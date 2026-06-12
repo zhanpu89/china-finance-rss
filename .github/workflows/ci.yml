@@ -1,0 +1,49 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m unittest discover -s tests -v
+      - run: python -m py_compile server.py tests/test_server.py
+      - name: Secret pattern scan
+        run: |
+          python - <<'PY'
+          import os, re, sys
+
+          patterns = [
+              re.compile(r'\b(?:AKIA|ASIA)[0-9A-Z]{16}\b'),
+              re.compile(r'\b(?:ghp_|github_pat_)[A-Za-z0-9_]{20,}\b'),
+              re.compile(r'\bsk-[A-Za-z0-9_-]{20,}\b'),
+              re.compile(r'-----BEGIN [A-Z ]*PRIVATE KEY-----'),
+              re.compile(r'(?i)\b(?:authorization|cookie|set-cookie)\s*[:=]\s*\S+'),
+              re.compile(r'(?i)\b(?:api[_-]?key|secret|token|password|passwd|access[_-]?key|client[_-]?secret)\b\s*[:=]\s*["\']?[A-Za-z0-9_./+=-]{16,}'),
+          ]
+
+          findings = []
+          for root, dirs, files in os.walk('.'):
+              dirs[:] = [d for d in dirs if d not in {'.git', '__pycache__'}]
+              for name in files:
+                  if name.endswith(('.pyc', '.pyo')):
+                      continue
+                  path = os.path.join(root, name)
+                  try:
+                      with open(path, encoding='utf-8') as f:
+                          for lineno, line in enumerate(f, 1):
+                              if any(pattern.search(line) for pattern in patterns):
+                                  findings.append(f'{path}:{lineno}')
+                  except UnicodeDecodeError:
+                      pass
+
+          if findings:
+              print('\n'.join(findings))
+              sys.exit(1)
+          PY

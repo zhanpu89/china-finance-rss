@@ -1,170 +1,113 @@
-# 🇨🇳 China Finance RSS Bridge
+# China Finance RSS Bridge
 
-A lightweight RSS bridge that converts Chinese financial news sources into standard RSS 2.0 feeds. Single-file Python server, minimal dependencies.
+Tiny RSS feeds for Chinese financial news: CLS, Eastmoney, THS, Jin10,
+Wallstreetcn, and optional Xueqiu.
 
-[中文说明](#中文说明)
-
-## Features
-
-- **4 major Chinese financial news sources** in one server
-- **Standard RSS 2.0** output — works with any RSS reader
-- **Single file** — just `server.py`, no framework needed
-- **In-memory cache** — configurable TTL, won't hammer upstream APIs
-- **Xueqiu WAF bypass** — uses Chrome CDP to fetch behind Alibaba Cloud WAF
-
-## Supported Sources
-
-| Source | Endpoint | Description |
-|--------|----------|-------------|
-| CLS (财联社) | `/cls/telegraph` | Real-time financial news flashes |
-| Eastmoney (东方财富) | `/eastmoney/kuaixun` | 7×24 financial news |
-| THS (同花顺) | `/ths/kuaixun` | 7×24 financial news |
-| Xueqiu (雪球) | `/xueqiu/user/{uid}` | User timeline (requires Chrome CDP) |
-
-## Quick Start
+## Start
 
 ```bash
-# Clone
-git clone https://github.com/yuxuan-made/china-finance-rss.git
-cd china-finance-rss
-
-# Run (no install needed for CLS/Eastmoney/THS)
 python server.py
-
-# Or with custom port
-PORT=9000 python server.py
 ```
 
-Open `http://localhost:8053/` in your browser to see available feeds.
+Open `http://localhost:8053/`.
 
-Add any feed URL to your RSS reader:
+## Feeds
+
+| Source | RSS URL | Notes |
+| --- | --- | --- |
+| CLS 财联社 | `http://localhost:8053/cls/telegraph` | Real-time flashes |
+| Eastmoney 东方财富 | `http://localhost:8053/eastmoney/kuaixun` | 7x24 news |
+| THS 同花顺 | `http://localhost:8053/ths/kuaixun` | 7x24 news |
+| Jin10 金十 | `http://localhost:8053/jin10/flash` | 7x24 news |
+| Wallstreetcn 华尔街见闻 | `http://localhost:8053/wallstreetcn/live` | 7x24 news |
+| Xueqiu 雪球 | `http://localhost:8053/xueqiu/user/{uid}` | Requires Chrome CDP |
+
+Import all built-in feeds with OPML:
+
+```text
+http://localhost:8053/opml.xml
 ```
-http://localhost:8053/cls/telegraph
-http://localhost:8053/eastmoney/kuaixun
-http://localhost:8053/ths/kuaixun
-http://localhost:8053/xueqiu/user/1247347556
+
+Check upstream status:
+
+```text
+http://localhost:8053/healthz?check=1
 ```
 
-## Configuration
+## Configure Only If Needed
 
-All configuration via environment variables:
+| Variable | Default | Use |
+| --- | --- | --- |
+| `PORT` | `8053` | Change the server port |
+| `CACHE_TTL` | `300` | Cache upstream responses |
+| `REQUEST_TIMEOUT` | `10` | Timeout for upstream requests |
+| `PUBLIC_BASE_URL` | auto | Public URL for OPML and RSS self links |
+| `CDP_URL` | `http://localhost:9222` | Chrome DevTools URL for Xueqiu |
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `PORT` | `8053` | Server port |
-| `CDP_URL` | `http://localhost:9222` | Chrome DevTools Protocol URL |
-| `CACHE_TTL` | `300` | Cache TTL in seconds |
+Configuration names are public. Do not commit `.env` files, cookies, tokens,
+private keys, Chrome profiles, or HAR captures.
 
-## Xueqiu Setup (Optional)
+## Xueqiu Optional Setup
 
-Xueqiu (雪球) uses Alibaba Cloud WAF that blocks direct API requests. This bridge bypasses it by executing `fetch()` inside a real Chrome browser via CDP.
-
-### Requirements
+Xueqiu blocks direct API requests. This bridge can fetch through a logged-in
+Chrome tab via Chrome DevTools Protocol.
 
 1. Install the optional dependency:
    ```bash
    pip install websocket-client
    ```
-
 2. Start Chrome with remote debugging:
    ```bash
-   # macOS
    /Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome --remote-debugging-port=9222 --remote-allow-origins=*
-
-   # Windows
-   chrome.exe --remote-debugging-port=9222 --remote-allow-origins=*
-
-   # Linux
-   google-chrome --remote-debugging-port=9222 --remote-allow-origins=*
    ```
-
-3. Open any Xueqiu page in Chrome and log in.
-
-4. Start the RSS bridge:
+3. Open Xueqiu in Chrome and log in.
+4. Run the bridge:
    ```bash
    CDP_URL=http://localhost:9222 python server.py
    ```
 
-5. Access `http://localhost:8053/xueqiu/user/{uid}` — replace `{uid}` with the Xueqiu user ID.
+Keep the CDP port local or on a trusted private network.
 
-### Finding a Xueqiu User ID
-
-Visit a user's profile page: `https://xueqiu.com/u/1247347556` — the number is the user ID.
-
-## Docker (Optional)
+## Docker
 
 ```bash
-docker run -d -p 8053:8053 --name cn-rss python:3.12-slim \
-  sh -c "pip install websocket-client && python /app/server.py"
+docker build -t china-finance-rss .
+docker run -d -p 8053:8053 --name china-finance-rss china-finance-rss
 ```
 
-Or build your own:
-```dockerfile
-FROM python:3.12-slim
-COPY server.py /app/server.py
-RUN pip install --no-cache-dir websocket-client
-WORKDIR /app
-CMD ["python", "server.py"]
+Behind a reverse proxy:
+
+```bash
+docker run -d -p 8053:8053 \
+  -e PUBLIC_BASE_URL=https://rss.example.com \
+  --name china-finance-rss china-finance-rss
 ```
 
-## How It Works
+## Notes
 
-```
-RSS Reader  →  china-finance-rss  →  CLS API / Eastmoney API / THS API
-                    ↓
-              Chrome CDP (WebSocket)
-                    ↓
-              Xueqiu (inside browser, bypasses WAF)
+- CLS, Eastmoney, THS, Jin10, and Wallstreetcn use public web endpoints.
+- Xueqiu uses your local browser session but does not store or print cookies.
+- If an upstream source breaks, the feed stays valid and includes a diagnostic
+  item. Use `/healthz?check=1` to see which source failed.
+
+## 中文简版
+
+启动：
+
+```bash
+python server.py
 ```
 
-- **CLS, Eastmoney, THS**: Direct HTTP requests to public APIs, parsed and converted to RSS XML.
-- **Xueqiu**: Connects to Chrome via CDP WebSocket, executes `fetch()` inside an open Xueqiu tab, returns the JSON response. This inherits the browser's cookies and session, bypassing WAF checks.
+打开 `http://localhost:8053/`，把页面里的 RSS 地址加到阅读器。内置源包括
+财联社、东方财富、同花顺、金十、华尔街见闻和可选雪球。阅读器支持 OPML
+的话，直接导入 `http://localhost:8053/opml.xml`。
+
+如果订阅为空或不更新，打开 `http://localhost:8053/healthz?check=1` 看是哪
+个上游源失败。
+
+雪球需要 Chrome CDP 和已登录的本地浏览器标签页；不要把 CDP 端口暴露到公网，
+也不要提交 cookies、tokens、`.env`、Chrome profile 或 HAR 文件。
 
 ## License
 
 MIT
-
----
-
-# 中文说明
-
-## 🇨🇳 中国财经 RSS 桥接服务
-
-轻量级 RSS 桥接服务器，将中国财经新闻源转换为标准 RSS 2.0 feed。单文件 Python，最小依赖。
-
-### 支持的数据源
-
-| 数据源 | 路径 | 说明 |
-|--------|------|------|
-| 财联社 | `/cls/telegraph` | 实时电报快讯 |
-| 东方财富 | `/eastmoney/kuaixun` | 7×24 快讯 |
-| 同花顺 | `/ths/kuaixun` | 7×24 快讯 |
-| 雪球 | `/xueqiu/user/{uid}` | 用户动态（需 Chrome CDP）|
-
-### 快速开始
-
-```bash
-git clone https://github.com/yuxuan-made/china-finance-rss.git
-cd china-finance-rss
-python server.py
-```
-
-打开 `http://localhost:8053/` 查看可用 feed，将 URL 添加到任意 RSS 阅读器即可。
-
-### 雪球设置
-
-雪球使用阿里云 WAF，直接请求 API 会被拦截。本工具通过 Chrome CDP 在浏览器内执行 `fetch()` 绕过 WAF。
-
-1. 安装可选依赖：`pip install websocket-client`
-2. 启动 Chrome：`chrome.exe --remote-debugging-port=9222 --remote-allow-origins=*`
-3. 在 Chrome 中打开雪球并登录
-4. 启动服务：`CDP_URL=http://localhost:9222 python server.py`
-
-### 为什么不用 RSSHub？
-
-RSSHub 很好，但：
-- 6000+ 文件，构建慢，配置复杂
-- 雪球源需要额外配置且不稳定
-- 本工具：单文件，零配置（除雪球外），直接跑
-
-如果你只需要中国财经数据的 RSS，这个更轻量。
