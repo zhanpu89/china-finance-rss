@@ -191,7 +191,7 @@ def parse_cls_items(payload):
         item_id = item.get('id', '')
         items.append({
             'title': item.get('brief') or item.get('content', '')[:100],
-            'link': f'https://www.cls.cn/telegraph/{item_id}',
+            'link': f'https://www.cls.cn/detail/{item_id}',
             'description': item.get('content', ''),
             'pubDate': timestamp_to_rfc822(item.get('ctime', 0)),
             'guid': f'cls_{item_id}',
@@ -311,7 +311,7 @@ def handle_eastmoney_kuaixun(feed_url=None):
     headers = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://kuaixun.eastmoney.com/'}
 
     data = fetch_json(url, headers)
-    match = re.search(r'var ajaxResult=(\{.*\});?', data, re.DOTALL)
+    match = re.search(r'var ajaxResult=(\{.*\})', data, re.DOTALL)
     if not match:
         return generate_rss(
             '东方财富快讯',
@@ -333,7 +333,7 @@ def handle_eastmoney_kuaixun(feed_url=None):
 
         items.append({
             'title': item.get('title', ''),
-            'link': f"https://kuaixun.eastmoney.com/a/{item.get('newsid', '')}",
+            'link': item.get('url_w', '') or f"https://kuaixun.eastmoney.com/a/{item.get('newsid', '')}",
             'description': item.get('digest', ''),
             'pubDate': pubdate,
             'guid': f"eastmoney_{item.get('newsid', '')}"
@@ -362,7 +362,7 @@ def handle_ths_kuaixun(feed_url=None):
     for item in data.get('data', {}).get('list', []):
         items.append({
             'title': item.get('title', ''),
-            'link': f"https://news.10jqka.com.cn/{item.get('seq', '')}",
+            'link': item.get('url', '') or f"https://news.10jqka.com.cn/{item.get('seq', '')}",
             'description': item.get('digest', item.get('remark', '')),
             'pubDate': timestamp_to_rfc822(int(item.get('ctime', 0))),
             'guid': f"ths_{item.get('seq', '')}"
@@ -554,10 +554,16 @@ class RSSHandler(BaseHTTPRequestHandler):
         sys.stderr.write(f"[{self.log_date_time_string()}] {format % args}\n")
 
     def do_HEAD(self):
-        self._handle_request(write_body=False)
+        try:
+            self._handle_request(write_body=False)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
     def do_GET(self):
-        self._handle_request(write_body=True)
+        try:
+            self._handle_request(write_body=True)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
     def _handle_request(self, write_body=True):
         parsed = urlparse(self.path)
