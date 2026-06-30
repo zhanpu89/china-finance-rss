@@ -26,7 +26,7 @@ import hashlib
 from html import unescape
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.request import Request, urlopen
-from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse, quote
 from datetime import datetime, timedelta, timezone
 from time import time
 from email.utils import formatdate
@@ -451,7 +451,7 @@ def _cdp_find_tab(site_hint=''):
     tab = next((t for t in tabs if site_hint in t.get('url', '')), None)
     if not tab:
         result = json.loads(urllib.request.urlopen(
-            f"{CDP_URL}/json/new?{urllib.parse.quote(site_hint, safe='')}",
+            f"{CDP_URL}/json/new?{quote(site_hint, safe='')}",
             timeout=10).read())
         tab = result
     ws_url = tab['webSocketDebuggerUrl']

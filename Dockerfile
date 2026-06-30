@@ -10,7 +10,7 @@ RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list 2>/dev/
 COPY requirements.txt server.py ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-ENV PORT=8053
+ENV PORT=8053 PYTHONUNBUFFERED=1
 EXPOSE 8053
 
 CMD ["python", "server.py"]
