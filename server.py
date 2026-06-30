@@ -20,10 +20,11 @@ import json
 import re
 import signal
 import sys
+import threading
 import urllib.request
 import hashlib
 from html import unescape
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.request import Request, urlopen
 from urllib.parse import parse_qs, urlencode, urlparse
 from datetime import datetime, timedelta, timezone
@@ -40,6 +41,7 @@ PUBLIC_BASE_URL = os.getenv('PUBLIC_BASE_URL', '').rstrip('/')
 
 # In-memory cache
 cache = {}
+feed_cache = {}
 jin10_public_headers = None
 
 
@@ -592,7 +594,12 @@ class RSSHandler(BaseHTTPRequestHandler):
         if path.startswith('/xueqiu/user/'):
             uid = path.split('/')[-1]
             feed_url = base_url + path
-            xml = handle_xueqiu_user(uid, feed_url=feed_url)
+            cached = feed_cache.get(path)
+            if cached and time() - cached['time'] < CACHE_TTL:
+                xml = cached['xml']
+            else:
+                xml = handle_xueqiu_user(uid, feed_url=feed_url)
+                feed_cache[path] = {'xml': xml, 'time': time()}
             self._send_text(200, 'application/rss+xml; charset=utf-8',
                             xml, write_body=write_body)
             return
@@ -602,11 +609,17 @@ class RSSHandler(BaseHTTPRequestHandler):
     def _serve_feed(self, path, base_url, write_body=True):
         _, handler = ROUTES[path]
         feed_url = base_url + path
-        try:
-            xml = handler(feed_url=feed_url)
-        except Exception as exc:
-            title, link, description = ROUTE_META[path]
-            xml = generate_error_rss(title, link, description, exc, feed_url=feed_url)
+
+        cached = feed_cache.get(path)
+        if cached and time() - cached['time'] < CACHE_TTL:
+            xml = cached['xml']
+        else:
+            try:
+                xml = handler(feed_url=feed_url)
+                feed_cache[path] = {'xml': xml, 'time': time()}
+            except Exception as exc:
+                title, link, description = ROUTE_META[path]
+                xml = generate_error_rss(title, link, description, exc, feed_url=feed_url)
 
         self._send_text(200, 'application/rss+xml; charset=utf-8',
                         xml, write_body=write_body)
@@ -644,9 +657,18 @@ class RSSHandler(BaseHTTPRequestHandler):
                         cache=False, write_body=write_body)
 
 
+def warm_jin10_headers():
+    try:
+        get_jin10_public_headers()
+    except Exception:
+        pass
+
+
 def main():
     signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+
+    threading.Thread(target=warm_jin10_headers, daemon=True).start()
 
     print(f'China Finance RSS Bridge running on http://localhost:{PORT}')
     print(f'Cache TTL: {CACHE_TTL}s | Timeout: {REQUEST_TIMEOUT}s | CDP: {CDP_URL}\n')
@@ -660,7 +682,7 @@ def main():
     print(f'\nNote: Xueqiu requires Chrome with CDP enabled + a logged-in Xueqiu tab.')
     print(f'Visit http://localhost:{PORT}/ for the web index.\n')
 
-    server = HTTPServer(('0.0.0.0', PORT), RSSHandler)
+    server = ThreadingHTTPServer(('0.0.0.0', PORT), RSSHandler)
     server.serve_forever()
 
 
