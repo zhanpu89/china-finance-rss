@@ -433,6 +433,7 @@ def _start_chrome():
     subprocess.Popen([
         chrome, '--headless', f'--remote-debugging-port={port}',
         '--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage',
+        '--remote-allow-origins=*',
     ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     for _ in range(15):
