@@ -636,10 +636,20 @@ def finance_fetch_via_cdp():
         ws.close()
 
         if not loaded:
-            time.sleep(3)
+            time.sleep(1)
 
-        # Wait for React to hydrate and make XHR calls
-        time.sleep(5)
+        # Poll for XHR data — return as soon as data arrives instead of fixed sleep
+        deadline = time.time() + 10
+        keys = []
+        while time.time() < deadline:
+            try:
+                raw = _cdp_execute(ws_url, 'JSON.stringify(Object.keys(window.__cdp_api))', timeout=5) or []
+                keys = raw if isinstance(raw, list) else []
+                if len(keys) >= 1:
+                    break
+            except Exception:
+                pass
+            time.sleep(0.5)
 
         data = _cdp_execute(ws_url, 'JSON.stringify(window.__cdp_api)', timeout=10) or {}
         return data
