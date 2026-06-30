@@ -411,11 +411,10 @@ def handle_wallstreetcn_live(feed_url=None):
     )
 
 
-def _ensure_chrome():
-    """Auto-launch headless Chrome if not already running."""
+def _start_chrome():
+    """Launch headless Chrome if not already running. Returns True on success."""
     import subprocess
     port = urlparse(CDP_URL).port or 9222
-
     try:
         urllib.request.urlopen(f"http://localhost:{port}/json", timeout=2)
         return True
@@ -446,13 +445,15 @@ def _ensure_chrome():
     return False
 
 
-def _cdp_ws_url(tabs, site_hint=''):
-    """Find a tab and return its CDP WebSocket URL."""
+def _cdp_find_tab(site_hint=''):
+    """Find a CDP tab matching site_hint, or create a new one on that URL."""
+    tabs = json.loads(urllib.request.urlopen(f"{CDP_URL}/json", timeout=5).read())
     tab = next((t for t in tabs if site_hint in t.get('url', '')), None)
     if not tab:
-        tab = tabs[0] if tabs else None
-    if not tab:
-        return None
+        result = json.loads(urllib.request.urlopen(
+            f"{CDP_URL}/json/new?{urllib.parse.quote(site_hint, safe='')}",
+            timeout=10).read())
+        tab = result
     ws_url = tab['webSocketDebuggerUrl']
     cdp_host = urlparse(CDP_URL).hostname
     return ws_url.replace('127.0.0.1', cdp_host).replace('localhost', cdp_host)
@@ -470,25 +471,6 @@ def _cdp_execute(ws_url, js, timeout=30):
     ws.close()
     raw = result.get('result', {}).get('result', {}).get('value', '{}')
     return json.loads(raw)
-
-
-def _cdp_navigate_and_wait(ws_url, url, wait_extra=0):
-    """Navigate a CDP tab and wait for page load."""
-    import websocket as ws_mod
-    ws = ws_mod.create_connection(ws_url, timeout=30)
-    ws.send(json.dumps({'id': 1, 'method': 'Page.enable', 'params': {}}))
-    ws.recv()
-    ws.send(json.dumps({
-        'id': 2, 'method': 'Page.navigate', 'params': {'url': url}
-    }))
-    while True:
-        msg = json.loads(ws.recv())
-        if msg.get('method') == 'Page.loadEventFired':
-            break
-    ws.close()
-    if wait_extra:
-        import time
-        time.sleep(wait_extra)
 
 
 def handle_finance_market(feed_url=None):
@@ -522,25 +504,10 @@ def xueqiu_fetch_via_cdp(api_path):
         return None
 
     try:
-        tabs = json.loads(urllib.request.urlopen(f"{CDP_URL}/json", timeout=5).read())
-        xq_tab = next((t for t in tabs if 'xueqiu' in t.get('url', '')), None)
-        if not xq_tab:
-            return None
-
-        ws_url = _cdp_ws_url(tabs, 'xueqiu')
+        ws_url = _cdp_find_tab('xueqiu')
         if not ws_url:
             return None
-
-        ws = ws_mod.create_connection(ws_url, timeout=15)
-        js = f'fetch("{api_path}").then(r=>r.json()).then(d=>JSON.stringify(d))'
-        ws.send(json.dumps({
-            'id': 1,
-            'method': 'Runtime.evaluate',
-            'params': {'expression': js, 'awaitPromise': True, 'returnByValue': True}
-        }))
-        result = json.loads(ws.recv())
-        ws.close()
-        return json.loads(result.get('result', {}).get('result', {}).get('value', '{}'))
+        return _cdp_execute(ws_url, f'fetch("{api_path}").then(r=>r.json()).then(d=>JSON.stringify(d))', timeout=15)
     except Exception:
         return None
 
@@ -548,9 +515,9 @@ def xueqiu_fetch_via_cdp(api_path):
 def finance_fetch_via_cdp():
     """Fetch CLS finance market data via Chrome CDP.
 
-    Navigates to the finance page so JS executes (WAF challenge, React
-    hydration, cookie setup), then calls the protected APIs from within
-    the browser's authenticated context.
+    Opens a tab to the finance page (or reuses one), waits for JS to
+    initialize, then calls the protected APIs from within the browser's
+    authenticated context.
 
     Returns a dict with keys: emotion, up_pool, articles (may be partial).
     """
@@ -559,38 +526,15 @@ def finance_fetch_via_cdp():
     except ImportError:
         return None
 
-    if not _ensure_chrome():
-        return None
-
     try:
-        tabs = json.loads(urllib.request.urlopen(f"{CDP_URL}/json", timeout=5).read())
-        ws_url = _cdp_ws_url(tabs, 'cls.cn/finance')
-
-        # Navigate to the finance page so JS runs and sets up cookies
+        ws_url = _cdp_find_tab('https://www.cls.cn/finance')
         if not ws_url:
-            result = json.loads(urllib.request.urlopen(
-                f"{CDP_URL}/json/new?https://www.cls.cn/finance",
-                timeout=10).read())
-            ws_url = _cdp_ws_url(
-                json.loads(urllib.request.urlopen(
-                    f"{CDP_URL}/json", timeout=5).read()),
-                'cls.cn/finance')
-            if not ws_url:
-                return None
+            return None
 
-        # Navigate if not already on the finance page
-        current_tabs = json.loads(
-            urllib.request.urlopen(f"{CDP_URL}/json", timeout=5).read())
-        current_url = next(
-            (t.get('url', '') for t in current_tabs
-             if t.get('webSocketDebuggerUrl', '').replace('127.0.0.1', urlparse(CDP_URL).hostname).replace('localhost', urlparse(CDP_URL).hostname) == ws_url),
-            '')
-        if 'cls.cn/finance' not in current_url:
-            _cdp_navigate_and_wait(ws_url, 'https://www.cls.cn/finance', wait_extra=2)
+        # Wait for page JS to init (WAF challenge, React hydration)
+        import time
+        time.sleep(4)
 
-        # Execute all API calls in the browser JS context.
-        # Native fetch() works because Chrome has already passed the WAF
-        # challenge and holds the correct cookies.
         js = '''
         (async () => {
             const r = {};
@@ -848,11 +792,25 @@ def warm_jin10_headers():
         pass
 
 
+def ensure_chrome():
+    """Start headless Chrome in background at server startup."""
+    if _start_chrome():
+        try:
+            # Open a finance page tab so it's ready when first request comes
+            _cdp_find_tab('https://www.cls.cn/finance')
+        except Exception:
+            pass
+        print(f'  ✓ Headless Chrome running on {CDP_URL}')
+    else:
+        print(f'  ✗ Headless Chrome not available (install chromium or set CDP_URL)')
+
+
 def main():
     signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 
     threading.Thread(target=warm_jin10_headers, daemon=True).start()
+    threading.Thread(target=ensure_chrome, daemon=True).start()
 
     print(f'China Finance RSS Bridge running on http://localhost:{PORT}')
     print(f'Cache TTL: {CACHE_TTL}s | Timeout: {REQUEST_TIMEOUT}s | CDP: {CDP_URL}\n')
