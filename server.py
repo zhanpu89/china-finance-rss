@@ -599,6 +599,7 @@ def _cdp_inject_xhr_interceptor(send, recv):
 
 def _cdp_navigate_and_wait(ws, send, recv, url, timeout=15):
     """Navigate to a URL and wait for Page.loadEventFired."""
+    import time
     send({'id': 3, 'method': 'Page.navigate', 'params': {'url': url}})
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -625,6 +626,7 @@ def finance_fetch_via_cdp():
         return None
 
     try:
+        import time
         ws_url, ws, send, recv = _cdp_connect_tab('about:blank')
         if not ws:
             return None
