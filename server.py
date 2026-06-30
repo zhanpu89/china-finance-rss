@@ -503,6 +503,33 @@ def _cdp_execute(ws_url, js, timeout=30):
     return json.loads(raw)
 
 
+# URL pattern → meaningful key name mapping for CLS finance API
+CDP_API_KEY_MAP = {
+    'emotion': 'market_sentiment',
+    'articles': 'articles',
+    'up_down': 'advance_decline',
+    'tline': 'timeline',
+    'refresh': 'live_refresh',
+    'anchor': 'anchor',
+    'basic': 'basic_info',
+}
+
+
+def _remap_cdp_keys(data):
+    """Remap URL-based keys from CDP capture to meaningful short names."""
+    if not isinstance(data, dict):
+        return data
+    mapped = {}
+    for url, value in data.items():
+        key = None
+        for pattern, name in CDP_API_KEY_MAP.items():
+            if pattern in url:
+                key = name
+                break
+        mapped[key or url] = value
+    return mapped
+
+
 def handle_finance_market(feed_url=None):
     """CLS Finance Market Data (财联社看盘) via Chrome CDP.
 
@@ -652,7 +679,7 @@ def finance_fetch_via_cdp():
             time.sleep(0.5)
 
         data = _cdp_execute(ws_url, 'JSON.stringify(window.__cdp_api)', timeout=10) or {}
-        return data
+        return _remap_cdp_keys(data)
     except Exception as exc:
         print(f"finance CDP fetch failed: {exc}")
         return None
