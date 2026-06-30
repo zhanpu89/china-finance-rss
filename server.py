@@ -26,7 +26,7 @@ import hashlib
 from html import unescape
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.request import Request, urlopen
-from urllib.parse import parse_qs, urlencode, urlparse, quote
+from urllib.parse import parse_qs, urlencode, urlparse
 from datetime import datetime, timedelta, timezone
 from time import time
 from email.utils import formatdate
@@ -446,17 +446,37 @@ def _start_chrome():
 
 
 def _cdp_find_tab(site_hint=''):
-    """Find a CDP tab matching site_hint, or create a new one on that URL."""
+    """Find a CDP tab matching site_hint, or create a new one via CDP."""
     tabs = json.loads(urllib.request.urlopen(f"{CDP_URL}/json", timeout=5).read())
     tab = next((t for t in tabs if site_hint in t.get('url', '')), None)
     if not tab:
-        result = json.loads(urllib.request.urlopen(
-            f"{CDP_URL}/json/new?{quote(site_hint, safe='')}",
-            timeout=10).read())
-        tab = result
+        tab = _cdp_create_tab(site_hint)
+        if not tab:
+            return None
     ws_url = tab['webSocketDebuggerUrl']
     cdp_host = urlparse(CDP_URL).hostname
     return ws_url.replace('127.0.0.1', cdp_host).replace('localhost', cdp_host)
+
+
+def _cdp_create_tab(url):
+    """Create a new CDP tab via Target.createTarget."""
+    import websocket as ws_mod
+    tabs = json.loads(urllib.request.urlopen(f"{CDP_URL}/json", timeout=5).read())
+    if not tabs:
+        return None
+    first_url = tabs[0]['webSocketDebuggerUrl']
+    cdp_host = urlparse(CDP_URL).hostname
+    ws_url = first_url.replace('127.0.0.1', cdp_host).replace('localhost', cdp_host)
+    ws = ws_mod.create_connection(ws_url, timeout=15)
+    ws.send(json.dumps({
+        'id': 1, 'method': 'Target.createTarget', 'params': {'url': url}
+    }))
+    result = json.loads(ws.recv())
+    ws.close()
+    tid = result.get('result', {}).get('targetId')
+    if not tid:
+        return None
+    return {'webSocketDebuggerUrl': f'ws://{cdp_host}:{urlparse(CDP_URL).port or 9222}/devtools/page/{tid}'}
 
 
 def _cdp_execute(ws_url, js, timeout=30):
