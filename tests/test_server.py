@@ -98,7 +98,7 @@ class SourceParserTests(unittest.TestCase):
 
         self.assertEqual(items[0]["title"], "LME期铜收涨216美元")
         self.assertEqual(items[0]["description"], "财联社6月13日电，LME期铜收涨216美元。")
-        self.assertEqual(items[0]["link"], "https://www.cls.cn/telegraph/123")
+        self.assertEqual(items[0]["link"], "https://www.cls.cn/detail/123")
         self.assertEqual(items[0]["guid"], "cls_123")
 
     def test_extract_jin10_public_app_id_from_frontend_bundle(self):

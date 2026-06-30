@@ -39,23 +39,30 @@ CACHE_TTL = int(os.getenv('CACHE_TTL', '300'))  # Cache TTL in seconds (default:
 REQUEST_TIMEOUT = int(os.getenv('REQUEST_TIMEOUT', '10'))
 PUBLIC_BASE_URL = os.getenv('PUBLIC_BASE_URL', '').rstrip('/')
 
-# In-memory cache
+# In-memory cache with thread safety
 cache = {}
 feed_cache = {}
 jin10_public_headers = None
+_cache_lock = threading.Lock()
+_feed_cache_lock = threading.Lock()
+MAX_CACHE_SIZE = 200
 
 
 def fetch_json(url, headers=None):
     """Fetch URL with in-memory cache."""
     now = time()
-    if url in cache and now - cache[url]['time'] < CACHE_TTL:
-        return cache[url]['data']
+    with _cache_lock:
+        if url in cache and now - cache[url]['time'] < CACHE_TTL:
+            return cache[url]['data']
 
     req = Request(url, headers=headers or {})
     with urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
         data = resp.read().decode('utf-8')
 
-    cache[url] = {'data': data, 'time': now}
+    with _cache_lock:
+        if len(cache) >= MAX_CACHE_SIZE:
+            cache.clear()
+        cache[url] = {'data': data, 'time': now}
     return data
 
 
@@ -129,8 +136,9 @@ def extract_jin10_public_app_id(bundle_text):
 def get_jin10_public_headers():
     """Build Jin10 headers from public frontend assets without hardcoded ids."""
     global jin10_public_headers
-    if jin10_public_headers:
-        return dict(jin10_public_headers)
+    with _cache_lock:
+        if jin10_public_headers:
+            return dict(jin10_public_headers)
 
     base_headers = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.jin10.com/'}
     html = fetch_json('https://www.jin10.com/', base_headers)
@@ -148,14 +156,15 @@ def get_jin10_public_headers():
 
     bundle = fetch_json(script_url, base_headers)
     app_id = extract_jin10_public_app_id(bundle)
-    jin10_public_headers = {
-        'User-Agent': 'Mozilla/5.0',
-        'Accept': 'application/json,text/plain,*/*',
-        'Referer': 'https://www.jin10.com/',
-        'Origin': 'https://www.jin10.com',
-        'x-app-id': app_id,
-        'x-version': '1.0.0',
-    }
+    with _cache_lock:
+        jin10_public_headers = {
+            'User-Agent': 'Mozilla/5.0',
+            'Accept': 'application/json,text/plain,*/*',
+            'Referer': 'https://www.jin10.com/',
+            'Origin': 'https://www.jin10.com',
+            'x-app-id': app_id,
+            'x-version': '1.0.0',
+        }
     return dict(jin10_public_headers)
 
 
@@ -268,8 +277,8 @@ def generate_opml(base_url):
 <body>
 <outline text="China Finance RSS Bridge" title="China Finance RSS Bridge">
 '''
-    for path, (name, _) in ROUTES.items():
-        xml += (f'<outline text="{escape_xml(name)}" title="{escape_xml(name)}" '
+    for path, info in ROUTES.items():
+        xml += (f'<outline text="{escape_xml(info["name"])}" title="{escape_xml(info["name"])}" '
                 f'type="rss" xmlUrl="{escape_xml(base_url + path)}"/>\n')
 
     xueqiu_path = '/xueqiu/user/1247347556'
@@ -500,14 +509,18 @@ def handle_finance_market(feed_url=None):
     Returns JSON with market heat, index data, stock pools, and live feed.
     Requires Chrome CDP enabled (same as Xueqiu).
     """
-    if feed_cache.get('__finance_market__') and time() - feed_cache['__finance_market__']['time'] < CACHE_TTL:
-        return feed_cache['__finance_market__']['data']
+    now = time()
+    with _feed_cache_lock:
+        entry = feed_cache.get('__finance_market__')
+        if entry and now - entry['time'] < CACHE_TTL:
+            return entry['data']
 
     data = finance_fetch_via_cdp()
     if data is None:
         return {'error': 'Chrome CDP not available or CLS finance tab not found. See README.'}
 
-    feed_cache['__finance_market__'] = {'data': data, 'time': time()}
+    with _feed_cache_lock:
+        feed_cache['__finance_market__'] = {'data': data, 'time': time()}
     return data
 
 
@@ -533,6 +546,72 @@ def xueqiu_fetch_via_cdp(api_path):
         return None
 
 
+def _cdp_connect_tab(url):
+    """Create a CDP tab and establish WebSocket. Returns (ws_url, ws, send, recv) or None values."""
+    try:
+        import websocket as ws_mod
+    except ImportError:
+        return None, None, None, None
+
+    tab = _cdp_create_tab(url)
+    if not tab:
+        return None, None, None, None
+    ws_url = tab['webSocketDebuggerUrl']
+    cdp_host = urlparse(CDP_URL).hostname
+    ws_url = ws_url.replace('127.0.0.1', cdp_host).replace('localhost', cdp_host)
+    ws = ws_mod.create_connection(ws_url, timeout=30)
+    send = lambda m: ws.send(json.dumps(m))
+    recv = lambda: json.loads(ws.recv())
+    return ws_url, ws, send, recv
+
+
+def _cdp_inject_xhr_interceptor(send, recv):
+    """Inject XHR interceptor before any page script runs to capture CLS finance API responses."""
+    send({'id': 1, 'method': 'Page.enable', 'params': {}})
+    recv()
+
+    send({'id': 2, 'method': 'Page.addScriptToEvaluateOnNewDocument', 'params': {
+        'source': '''
+            window.__cdp_api = {};
+            var _open = XMLHttpRequest.prototype.open;
+            XMLHttpRequest.prototype.open = function(m, u) {
+                this._url = u;
+                return _open.apply(this, arguments);
+            };
+            var _send = XMLHttpRequest.prototype.send;
+            XMLHttpRequest.prototype.send = function() {
+                this.addEventListener('load', function() {
+                    var url = this._url || '';
+                    if (url.indexOf('emotion') > -1 || url.indexOf('articles') > -1 ||
+                        url.indexOf('up_down') > -1 || url.indexOf('tline') > -1 ||
+                        url.indexOf('refresh') > -1 || url.indexOf('anchor') > -1 ||
+                        url.indexOf('basic') > -1) {
+                        try { window.__cdp_api[url] = JSON.parse(this.responseText); }
+                        catch(e) { window.__cdp_api[url] = {_raw: this.responseText.substring(0,200)}; }
+                    }
+                });
+                return _send.apply(this, arguments);
+            };
+        '''
+    }})
+    recv()
+
+
+def _cdp_navigate_and_wait(ws, send, recv, url, timeout=15):
+    """Navigate to a URL and wait for Page.loadEventFired."""
+    send({'id': 3, 'method': 'Page.navigate', 'params': {'url': url}})
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        ws.settimeout(deadline - time.time())
+        try:
+            msg = recv()
+        except Exception:
+            break
+        if msg.get('method') == 'Page.loadEventFired':
+            return True
+    return False
+
+
 def finance_fetch_via_cdp():
     """Fetch CLS finance market data via Chrome CDP.
 
@@ -546,64 +625,12 @@ def finance_fetch_via_cdp():
         return None
 
     try:
-        import time
-
-        tab = _cdp_create_tab('about:blank')
-        if not tab:
+        ws_url, ws, send, recv = _cdp_connect_tab('about:blank')
+        if not ws:
             return None
-        ws_url = tab['webSocketDebuggerUrl']
-        cdp_host = urlparse(CDP_URL).hostname
-        ws_url = ws_url.replace('127.0.0.1', cdp_host).replace('localhost', cdp_host)
 
-        ws = ws_mod.create_connection(ws_url, timeout=30)
-        send = lambda m: ws.send(json.dumps(m))
-        recv = lambda: json.loads(ws.recv())
-
-        send({'id': 1, 'method': 'Page.enable', 'params': {}})
-        recv()
-
-        # Inject XHR interceptor before any page script runs
-        send({'id': 2, 'method': 'Page.addScriptToEvaluateOnNewDocument', 'params': {
-            'source': '''
-                window.__cdp_api = {};
-                var _open = XMLHttpRequest.prototype.open;
-                XMLHttpRequest.prototype.open = function(m, u) {
-                    this._url = u;
-                    return _open.apply(this, arguments);
-                };
-                var _send = XMLHttpRequest.prototype.send;
-                XMLHttpRequest.prototype.send = function() {
-                    this.addEventListener('load', function() {
-                        var url = this._url || '';
-                        if (url.indexOf('emotion') > -1 || url.indexOf('articles') > -1 ||
-                            url.indexOf('up_down') > -1 || url.indexOf('tline') > -1 ||
-                            url.indexOf('refresh') > -1 || url.indexOf('anchor') > -1 ||
-                            url.indexOf('basic') > -1) {
-                            try { window.__cdp_api[url] = JSON.parse(this.responseText); }
-                            catch(e) { window.__cdp_api[url] = {_raw: this.responseText.substring(0,200)}; }
-                        }
-                    });
-                    return _send.apply(this, arguments);
-                };
-            '''
-        }})
-        recv()
-
-        send({'id': 3, 'method': 'Page.navigate', 'params': {
-            'url': 'https://www.cls.cn/finance'
-        }})
-        # Read the navigate result, then wait for load event (with timeout)
-        deadline = time.time() + 15
-        loaded = False
-        while time.time() < deadline:
-            ws.settimeout(deadline - time.time())
-            try:
-                msg = recv()
-            except Exception:
-                break
-            if msg.get('method') == 'Page.loadEventFired':
-                loaded = True
-                break
+        _cdp_inject_xhr_interceptor(send, recv)
+        loaded = _cdp_navigate_and_wait(ws, send, recv, 'https://www.cls.cn/finance')
         ws.close()
 
         if not loaded:
@@ -657,19 +684,41 @@ def handle_xueqiu_user(uid, feed_url=None):
 # ── HTTP Server ──────────────────────────────────────────────────────────────
 
 ROUTES = {
-    '/cls/telegraph': ('CLS Telegraph (财联社电报)', handle_cls_telegraph),
-    '/eastmoney/kuaixun': ('Eastmoney News (东方财富快讯)', handle_eastmoney_kuaixun),
-    '/ths/kuaixun': ('THS News (同花顺快讯)', handle_ths_kuaixun),
-    '/jin10/flash': ('Jin10 Flash (金十快讯)', handle_jin10_flash),
-    '/wallstreetcn/live': ('Wallstreetcn Live (华尔街见闻快讯)', handle_wallstreetcn_live),
-}
-
-ROUTE_META = {
-    '/cls/telegraph': ('财联社电报', 'https://www.cls.cn/telegraph', '财联社实时快讯'),
-    '/eastmoney/kuaixun': ('东方财富快讯', 'https://kuaixun.eastmoney.com/', '东方财富7x24快讯'),
-    '/ths/kuaixun': ('同花顺快讯', 'https://news.10jqka.com.cn/', '同花顺7x24快讯'),
-    '/jin10/flash': ('金十快讯', 'https://www.jin10.com/', '金十数据7x24快讯'),
-    '/wallstreetcn/live': ('华尔街见闻快讯', 'https://wallstreetcn.com/live', '华尔街见闻7x24快讯'),
+    '/cls/telegraph': {
+        'handler': handle_cls_telegraph,
+        'name': 'CLS Telegraph (财联社电报)',
+        'title': '财联社电报',
+        'link': 'https://www.cls.cn/telegraph',
+        'description': '财联社实时快讯',
+    },
+    '/eastmoney/kuaixun': {
+        'handler': handle_eastmoney_kuaixun,
+        'name': 'Eastmoney News (东方财富快讯)',
+        'title': '东方财富快讯',
+        'link': 'https://kuaixun.eastmoney.com/',
+        'description': '东方财富7x24快讯',
+    },
+    '/ths/kuaixun': {
+        'handler': handle_ths_kuaixun,
+        'name': 'THS News (同花顺快讯)',
+        'title': '同花顺快讯',
+        'link': 'https://news.10jqka.com.cn/',
+        'description': '同花顺7x24快讯',
+    },
+    '/jin10/flash': {
+        'handler': handle_jin10_flash,
+        'name': 'Jin10 Flash (金十快讯)',
+        'title': '金十快讯',
+        'link': 'https://www.jin10.com/',
+        'description': '金十数据7x24快讯',
+    },
+    '/wallstreetcn/live': {
+        'handler': handle_wallstreetcn_live,
+        'name': 'Wallstreetcn Live (华尔街见闻快讯)',
+        'title': '华尔街见闻快讯',
+        'link': 'https://wallstreetcn.com/live',
+        'description': '华尔街见闻7x24快讯',
+    },
 }
 
 
@@ -684,9 +733,9 @@ def build_health_payload(base_url, check_sources=False):
     feeds = []
     status = 'ok'
 
-    for path, (name, handler) in ROUTES.items():
+    for path, info in ROUTES.items():
         entry = {
-            'name': name,
+            'name': info['name'],
             'path': path,
             'url': base_url + path,
             'status': 'configured',
@@ -694,7 +743,7 @@ def build_health_payload(base_url, check_sources=False):
 
         if check_sources:
             try:
-                xml = handler(feed_url=base_url + path)
+                xml = info['handler'](feed_url=base_url + path)
                 entry['status'] = 'ok'
                 entry['items'] = count_rss_items(xml)
             except Exception as exc:
@@ -761,7 +810,8 @@ class RSSHandler(BaseHTTPRequestHandler):
         if path == '/finance/market':
             query = parse_qs(parsed.query)
             if query.get('refresh', ['0'])[0] in ('1', 'true', 'yes'):
-                feed_cache.pop('__finance_market__', None)
+                with _feed_cache_lock:
+                    feed_cache.pop('__finance_market__', None)
             data = handle_finance_market()
             body = json.dumps(data, ensure_ascii=False, indent=2)
             self._send_text(200, 'application/json; charset=utf-8',
@@ -773,32 +823,35 @@ class RSSHandler(BaseHTTPRequestHandler):
         if path.startswith('/xueqiu/user/'):
             uid = path.split('/')[-1]
             feed_url = base_url + path
-            cached = feed_cache.get(path)
-            if cached and time() - cached['time'] < CACHE_TTL:
-                xml = cached['xml']
-            else:
-                xml = handle_xueqiu_user(uid, feed_url=feed_url)
-                feed_cache[path] = {'xml': xml, 'time': time()}
+            xml = self._get_or_fetch_feed(
+                path, lambda: handle_xueqiu_user(uid, feed_url=feed_url))
             self._send_text(200, 'application/rss+xml; charset=utf-8',
                             xml, write_body=write_body)
             return
 
         self.send_error(404, 'Not Found. Visit / for available feeds.')
 
+    def _get_or_fetch_feed(self, path, fetch_func):
+        """Thread-safe feed cache lookup with automatic population."""
+        now = time()
+        with _feed_cache_lock:
+            cached = feed_cache.get(path)
+            if cached and now - cached['time'] < CACHE_TTL:
+                return cached['xml']
+        xml = fetch_func()
+        with _feed_cache_lock:
+            feed_cache[path] = {'xml': xml, 'time': time()}
+        return xml
+
     def _serve_feed(self, path, base_url, write_body=True):
-        _, handler = ROUTES[path]
+        handler = ROUTES[path]['handler']
         feed_url = base_url + path
 
-        cached = feed_cache.get(path)
-        if cached and time() - cached['time'] < CACHE_TTL:
-            xml = cached['xml']
-        else:
-            try:
-                xml = handler(feed_url=feed_url)
-                feed_cache[path] = {'xml': xml, 'time': time()}
-            except Exception as exc:
-                title, link, description = ROUTE_META[path]
-                xml = generate_error_rss(title, link, description, exc, feed_url=feed_url)
+        try:
+            xml = self._get_or_fetch_feed(path, lambda: handler(feed_url=feed_url))
+        except Exception as exc:
+            info = ROUTES[path]
+            xml = generate_error_rss(info['title'], info['link'], info['description'], exc, feed_url=feed_url)
 
         self._send_text(200, 'application/rss+xml; charset=utf-8',
                         xml, write_body=write_body)
@@ -825,8 +878,8 @@ class RSSHandler(BaseHTTPRequestHandler):
         """Serve a simple index page listing available feeds."""
         lines = ['<html><head><title>China Finance RSS Bridge</title></head>',
                  '<body><h1>🇨🇳 China Finance RSS Bridge</h1><ul>']
-        for path, (name, _) in ROUTES.items():
-            lines.append(f'<li><a href="{path}">{name}</a></li>')
+        for path, info in ROUTES.items():
+            lines.append(f'<li><a href="{path}">{info["name"]}</a></li>')
         lines.append(f'<li><a href="/xueqiu/user/1247347556">Xueqiu User Example (雪球)</a></li>')
         lines.append('</ul><p><a href="/finance/market">Finance Market JSON</a> | '
                      '<a href="/opml.xml">Import OPML</a> | '
@@ -867,8 +920,8 @@ def main():
     print(f'China Finance RSS Bridge running on http://localhost:{PORT}')
     print(f'Cache TTL: {CACHE_TTL}s | Timeout: {REQUEST_TIMEOUT}s | CDP: {CDP_URL}\n')
     print('Available feeds:')
-    for path, (name, _) in ROUTES.items():
-        print(f'  http://localhost:{PORT}{path}  — {name}')
+    for path, info in ROUTES.items():
+        print(f'  http://localhost:{PORT}{path}  — {info["name"]}')
     print(f'  http://localhost:{PORT}/xueqiu/user/{{uid}}  — Xueqiu User (雪球)')
     print(f'\nUtilities:')
     print(f'  http://localhost:{PORT}/finance/market  — Finance Market Data (JSON, needs Chrome CDP)')
