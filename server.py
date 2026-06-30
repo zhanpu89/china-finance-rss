@@ -411,6 +411,103 @@ def handle_wallstreetcn_live(feed_url=None):
     )
 
 
+def _ensure_chrome():
+    """Auto-launch headless Chrome if not already running."""
+    import subprocess
+    port = urlparse(CDP_URL).port or 9222
+
+    try:
+        urllib.request.urlopen(f"http://localhost:{port}/json", timeout=2)
+        return True
+    except Exception:
+        pass
+
+    candidates = [
+        'google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser',
+        'google-chrome-unstable',
+    ]
+    chrome = next((c for c in candidates if subprocess.run(
+        ['which', c], capture_output=True).returncode == 0), None)
+    if not chrome:
+        return False
+
+    subprocess.Popen([
+        chrome, '--headless', f'--remote-debugging-port={port}',
+        '--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage',
+    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    for _ in range(15):
+        try:
+            urllib.request.urlopen(f"http://localhost:{port}/json", timeout=2)
+            return True
+        except Exception:
+            import time
+            time.sleep(1)
+    return False
+
+
+def _cdp_ws_url(tabs, site_hint=''):
+    """Find a tab and return its CDP WebSocket URL."""
+    tab = next((t for t in tabs if site_hint in t.get('url', '')), None)
+    if not tab:
+        tab = tabs[0] if tabs else None
+    if not tab:
+        return None
+    ws_url = tab['webSocketDebuggerUrl']
+    cdp_host = urlparse(CDP_URL).hostname
+    return ws_url.replace('127.0.0.1', cdp_host).replace('localhost', cdp_host)
+
+
+def _cdp_execute(ws_url, js, timeout=30):
+    """Send JS to a CDP tab and return the result value."""
+    import websocket as ws_mod
+    ws = ws_mod.create_connection(ws_url, timeout=timeout)
+    ws.send(json.dumps({
+        'id': 1, 'method': 'Runtime.evaluate',
+        'params': {'expression': js, 'awaitPromise': True, 'returnByValue': True}
+    }))
+    result = json.loads(ws.recv())
+    ws.close()
+    raw = result.get('result', {}).get('result', {}).get('value', '{}')
+    return json.loads(raw)
+
+
+def _cdp_navigate_and_wait(ws_url, url, wait_extra=0):
+    """Navigate a CDP tab and wait for page load."""
+    import websocket as ws_mod
+    ws = ws_mod.create_connection(ws_url, timeout=30)
+    ws.send(json.dumps({'id': 1, 'method': 'Page.enable', 'params': {}}))
+    ws.recv()
+    ws.send(json.dumps({
+        'id': 2, 'method': 'Page.navigate', 'params': {'url': url}
+    }))
+    while True:
+        msg = json.loads(ws.recv())
+        if msg.get('method') == 'Page.loadEventFired':
+            break
+    ws.close()
+    if wait_extra:
+        import time
+        time.sleep(wait_extra)
+
+
+def handle_finance_market(feed_url=None):
+    """CLS Finance Market Data (财联社看盘) via Chrome CDP.
+
+    Returns JSON with market heat, index data, stock pools, and live feed.
+    Requires Chrome CDP enabled (same as Xueqiu).
+    """
+    if feed_cache.get('__finance_market__') and time() - feed_cache['__finance_market__']['time'] < CACHE_TTL:
+        return feed_cache['__finance_market__']['data']
+
+    data = finance_fetch_via_cdp()
+    if data is None:
+        return {'error': 'Chrome CDP not available or CLS finance tab not found. See README.'}
+
+    feed_cache['__finance_market__'] = {'data': data, 'time': time()}
+    return data
+
+
 def xueqiu_fetch_via_cdp(api_path):
     """Fetch Xueqiu API via Chrome CDP to bypass WAF.
 
@@ -430,10 +527,9 @@ def xueqiu_fetch_via_cdp(api_path):
         if not xq_tab:
             return None
 
-        ws_url = xq_tab['webSocketDebuggerUrl']
-        # Replace localhost with CDP_URL host if connecting remotely
-        cdp_host = urlparse(CDP_URL).hostname
-        ws_url = ws_url.replace('127.0.0.1', cdp_host).replace('localhost', cdp_host)
+        ws_url = _cdp_ws_url(tabs, 'xueqiu')
+        if not ws_url:
+            return None
 
         ws = ws_mod.create_connection(ws_url, timeout=15)
         js = f'fetch("{api_path}").then(r=>r.json()).then(d=>JSON.stringify(d))'
@@ -446,6 +542,84 @@ def xueqiu_fetch_via_cdp(api_path):
         ws.close()
         return json.loads(result.get('result', {}).get('result', {}).get('value', '{}'))
     except Exception:
+        return None
+
+
+def finance_fetch_via_cdp():
+    """Fetch CLS finance market data via Chrome CDP.
+
+    Navigates to the finance page so JS executes (WAF challenge, React
+    hydration, cookie setup), then calls the protected APIs from within
+    the browser's authenticated context.
+
+    Returns a dict with keys: emotion, up_pool, articles (may be partial).
+    """
+    try:
+        import websocket as ws_mod  # noqa: lazy import
+    except ImportError:
+        return None
+
+    if not _ensure_chrome():
+        return None
+
+    try:
+        tabs = json.loads(urllib.request.urlopen(f"{CDP_URL}/json", timeout=5).read())
+        ws_url = _cdp_ws_url(tabs, 'cls.cn/finance')
+
+        # Navigate to the finance page so JS runs and sets up cookies
+        if not ws_url:
+            result = json.loads(urllib.request.urlopen(
+                f"{CDP_URL}/json/new?https://www.cls.cn/finance",
+                timeout=10).read())
+            ws_url = _cdp_ws_url(
+                json.loads(urllib.request.urlopen(
+                    f"{CDP_URL}/json", timeout=5).read()),
+                'cls.cn/finance')
+            if not ws_url:
+                return None
+
+        # Navigate if not already on the finance page
+        current_tabs = json.loads(
+            urllib.request.urlopen(f"{CDP_URL}/json", timeout=5).read())
+        current_url = next(
+            (t.get('url', '') for t in current_tabs
+             if t.get('webSocketDebuggerUrl', '').replace('127.0.0.1', urlparse(CDP_URL).hostname).replace('localhost', urlparse(CDP_URL).hostname) == ws_url),
+            '')
+        if 'cls.cn/finance' not in current_url:
+            _cdp_navigate_and_wait(ws_url, 'https://www.cls.cn/finance', wait_extra=2)
+
+        # Execute all API calls in the browser JS context.
+        # Native fetch() works because Chrome has already passed the WAF
+        # challenge and holds the correct cookies.
+        js = '''
+        (async () => {
+            const r = {};
+            try {
+                const res = await fetch('/v2/quote/a/stock/emotion');
+                r.emotion = await res.json();
+            } catch(e) { r.emotion = {error: ''+e}; }
+            try {
+                const d = new Date();
+                const ds = d.getFullYear() +
+                    String(d.getMonth()+1).padStart(2,'0') +
+                    String(d.getDate()).padStart(2,'0');
+                const res = await fetch('/quote/index/tline?date=' + ds);
+                r.tline = await res.json();
+            } catch(e) { r.tline = {error: ''+e}; }
+            try {
+                const res = await fetch('/quote/index/up_down_analysis?type=up_pool&way=last_px&rever=1');
+                r.up_pool = await res.json();
+            } catch(e) { r.up_pool = {error: ''+e}; }
+            try {
+                const res = await fetch('/v3/transaction/articles');
+                r.articles = await res.json();
+            } catch(e) { r.articles = {error: ''+e}; }
+            return JSON.stringify(r);
+        })()
+        '''
+        return _cdp_execute(ws_url, js, timeout=30)
+    except Exception as exc:
+        print(f"finance CDP fetch failed: {exc}")
         return None
 
 
@@ -588,6 +762,15 @@ class RSSHandler(BaseHTTPRequestHandler):
             self._send_text(status_code, 'application/json; charset=utf-8',
                             body, cache=False, write_body=write_body)
             return
+        if path == '/finance/market':
+            query = parse_qs(parsed.query)
+            if query.get('refresh', ['0'])[0] in ('1', 'true', 'yes'):
+                feed_cache.pop('__finance_market__', None)
+            data = handle_finance_market()
+            body = json.dumps(data, ensure_ascii=False, indent=2)
+            self._send_text(200, 'application/json; charset=utf-8',
+                            body, cache=True, write_body=write_body)
+            return
         if path in ROUTES:
             self._serve_feed(path, base_url, write_body=write_body)
             return
@@ -649,7 +832,8 @@ class RSSHandler(BaseHTTPRequestHandler):
         for path, (name, _) in ROUTES.items():
             lines.append(f'<li><a href="{path}">{name}</a></li>')
         lines.append(f'<li><a href="/xueqiu/user/1247347556">Xueqiu User Example (雪球)</a></li>')
-        lines.append('</ul><p><a href="/opml.xml">Import OPML</a> | '
+        lines.append('</ul><p><a href="/finance/market">Finance Market JSON</a> | '
+                     '<a href="/opml.xml">Import OPML</a> | '
                      '<a href="/healthz?check=1">Source check</a></p>')
         lines.append('<p>Add any URL above to your RSS reader.</p></body></html>')
         html = '\n'.join(lines)
@@ -677,9 +861,10 @@ def main():
         print(f'  http://localhost:{PORT}{path}  — {name}')
     print(f'  http://localhost:{PORT}/xueqiu/user/{{uid}}  — Xueqiu User (雪球)')
     print(f'\nUtilities:')
+    print(f'  http://localhost:{PORT}/finance/market  — Finance Market Data (JSON, needs Chrome CDP)')
     print(f'  http://localhost:{PORT}/opml.xml  — OPML subscription list')
     print(f'  http://localhost:{PORT}/healthz?check=1  — Source health check')
-    print(f'\nNote: Xueqiu requires Chrome with CDP enabled + a logged-in Xueqiu tab.')
+    print(f'\nNote: Xueqiu and Finance Market require Chrome with CDP enabled.')
     print(f'Visit http://localhost:{PORT}/ for the web index.\n')
 
     server = ThreadingHTTPServer(('0.0.0.0', PORT), RSSHandler)
