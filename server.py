@@ -536,11 +536,9 @@ def xueqiu_fetch_via_cdp(api_path):
 def finance_fetch_via_cdp():
     """Fetch CLS finance market data via Chrome CDP.
 
-    Opens a tab to the finance page (or reuses one), waits for JS to
-    initialize, then calls the protected APIs from within the browser's
-    authenticated context.
-
-    Returns a dict with keys: emotion, up_pool, articles (may be partial).
+    Creates a tab, injects an XHR interceptor to capture API responses
+    the page's own React code makes, navigates to the finance page,
+    and returns the captured data.
     """
     try:
         import websocket as ws_mod  # noqa: lazy import
@@ -548,41 +546,74 @@ def finance_fetch_via_cdp():
         return None
 
     try:
-        ws_url = _cdp_find_tab('https://www.cls.cn/finance')
-        if not ws_url:
-            return None
-
-        # Wait for page JS to init (WAF challenge, React hydration)
         import time
-        time.sleep(4)
 
-        js = '''
-        (async () => {
-            const r = {};
-            try {
-                const res = await fetch('/v2/quote/a/stock/emotion');
-                r.emotion = await res.json();
-            } catch(e) { r.emotion = {error: ''+e}; }
-            try {
-                const d = new Date();
-                const ds = d.getFullYear() +
-                    String(d.getMonth()+1).padStart(2,'0') +
-                    String(d.getDate()).padStart(2,'0');
-                const res = await fetch('/quote/index/tline?date=' + ds);
-                r.tline = await res.json();
-            } catch(e) { r.tline = {error: ''+e}; }
-            try {
-                const res = await fetch('/quote/index/up_down_analysis?type=up_pool&way=last_px&rever=1');
-                r.up_pool = await res.json();
-            } catch(e) { r.up_pool = {error: ''+e}; }
-            try {
-                const res = await fetch('/v3/transaction/articles');
-                r.articles = await res.json();
-            } catch(e) { r.articles = {error: ''+e}; }
-            return JSON.stringify(r);
-        })()
-        '''
-        return _cdp_execute(ws_url, js, timeout=30)
+        tab = _cdp_create_tab('about:blank')
+        if not tab:
+            return None
+        ws_url = tab['webSocketDebuggerUrl']
+        cdp_host = urlparse(CDP_URL).hostname
+        ws_url = ws_url.replace('127.0.0.1', cdp_host).replace('localhost', cdp_host)
+
+        ws = ws_mod.create_connection(ws_url, timeout=30)
+        send = lambda m: ws.send(json.dumps(m))
+        recv = lambda: json.loads(ws.recv())
+
+        send({'id': 1, 'method': 'Page.enable', 'params': {}})
+        recv()
+
+        # Inject XHR interceptor before any page script runs
+        send({'id': 2, 'method': 'Page.addScriptToEvaluateOnNewDocument', 'params': {
+            'source': '''
+                window.__cdp_api = {};
+                var _open = XMLHttpRequest.prototype.open;
+                XMLHttpRequest.prototype.open = function(m, u) {
+                    this._url = u;
+                    return _open.apply(this, arguments);
+                };
+                var _send = XMLHttpRequest.prototype.send;
+                XMLHttpRequest.prototype.send = function() {
+                    this.addEventListener('load', function() {
+                        var url = this._url || '';
+                        if (url.indexOf('emotion') > -1 || url.indexOf('articles') > -1 ||
+                            url.indexOf('up_down') > -1 || url.indexOf('tline') > -1 ||
+                            url.indexOf('refresh') > -1 || url.indexOf('anchor') > -1 ||
+                            url.indexOf('basic') > -1) {
+                            try { window.__cdp_api[url] = JSON.parse(this.responseText); }
+                            catch(e) { window.__cdp_api[url] = {_raw: this.responseText.substring(0,200)}; }
+                        }
+                    });
+                    return _send.apply(this, arguments);
+                };
+            '''
+        }})
+        recv()
+
+        send({'id': 3, 'method': 'Page.navigate', 'params': {
+            'url': 'https://www.cls.cn/finance'
+        }})
+        # Read the navigate result, then wait for load event (with timeout)
+        deadline = time.time() + 15
+        loaded = False
+        while time.time() < deadline:
+            ws.settimeout(deadline - time.time())
+            try:
+                msg = recv()
+            except Exception:
+                break
+            if msg.get('method') == 'Page.loadEventFired':
+                loaded = True
+                break
+        ws.close()
+
+        if not loaded:
+            time.sleep(3)
+
+        # Wait for React to hydrate and make XHR calls
+        time.sleep(5)
+
+        data = _cdp_execute(ws_url, 'JSON.stringify(window.__cdp_api)', timeout=10) or {}
+        return data
     except Exception as exc:
         print(f"finance CDP fetch failed: {exc}")
         return None
