@@ -15,14 +15,17 @@ Dependencies:
     - websocket-client (optional, only for Xueqiu CDP mode)
 """
 
+import atexit
 import os
 import json
+import random
 import re
 import signal
 import sys
 import threading
 import urllib.request
 import hashlib
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from html import unescape
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.request import Request, urlopen
@@ -31,6 +34,8 @@ from datetime import datetime, timedelta, timezone
 from time import time
 from email.utils import formatdate
 from xml.etree import ElementTree as ET
+
+from cdp_engine import ensure_chrome, find_tab, execute_js, CDPEngine
 
 # Configuration via environment variables
 PORT = int(os.getenv('PORT', '8053'))
@@ -45,25 +50,80 @@ feed_cache = {}
 jin10_public_headers = None
 _cache_lock = threading.Lock()
 _feed_cache_lock = threading.Lock()
+_feed_fetch_locks = {}
+_feed_fetch_locks_lock = threading.Lock()
+_fetch_inflight = {}        # url -> threading.Event for cache stampede protection
 MAX_CACHE_SIZE = 200
+MAX_FEED_CACHE_SIZE = 100
+CACHE_JITTER = 0.2  # ±20% random jitter on TTL to stagger expiry
+MAX_WORKERS = int(os.getenv('MAX_WORKERS', '10'))  # Max concurrent request threads
+
+
+def _expires_at():
+    """Return an absolute expiry timestamp with ±CACHE_JITTER random jitter."""
+    return time() + CACHE_TTL * (1 + random.uniform(-CACHE_JITTER, CACHE_JITTER))
+
+
+def _cache_put(d, key, value):
+    """Write to a cache dict with LRU eviction and jittered expiry."""
+    with _cache_lock:
+        if len(d) >= MAX_CACHE_SIZE:
+            oldest = min(d, key=lambda k: d[k]['time'])
+            del d[oldest]
+        d[key] = {'data': value, 'time': time(), 'expires_at': _expires_at()}
+
+
+def _cache_fresh(entry):
+    """Check if a cache entry is still within its jittered expiry window."""
+    return entry and time() < entry['expires_at']
 
 
 def fetch_json(url, headers=None):
-    """Fetch URL with in-memory cache."""
+    """Fetch URL with in-memory cache and stampede protection.
+
+    Uses a per-URL Event for leader election:
+      - First thread to create the Event becomes leader and fetches upstream
+      - Followers wait on the Event, then read from cache
+      - If leader fails, the first follower after cleanup becomes the new leader
+      - Follower fallback also writes to cache to prevent cascading misses
+    """
     now = time()
     with _cache_lock:
-        if url in cache and now - cache[url]['time'] < CACHE_TTL:
-            return cache[url]['data']
-
-    req = Request(url, headers=headers or {})
-    with urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
-        data = resp.read().decode('utf-8')
+        entry = cache.get(url)
+        if _cache_fresh(entry):
+            return entry['data']
 
     with _cache_lock:
-        if len(cache) >= MAX_CACHE_SIZE:
-            cache.clear()
-        cache[url] = {'data': data, 'time': now}
-    return data
+        if url in _fetch_inflight:
+            event = _fetch_inflight[url]
+            is_leader = False
+        else:
+            _fetch_inflight[url] = threading.Event()
+            event = _fetch_inflight[url]
+            is_leader = True
+
+    if is_leader:
+        try:
+            req = Request(url, headers=headers or {})
+            with urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
+                data = resp.read().decode('utf-8')
+            _cache_put(cache, url, data)
+            return data
+        finally:
+            event.set()
+            with _cache_lock:
+                _fetch_inflight.pop(url, None)
+    else:
+        event.wait(timeout=REQUEST_TIMEOUT)
+        with _cache_lock:
+            entry = cache.get(url)
+            if _cache_fresh(entry):
+                return entry['data']
+        req = Request(url, headers=headers or {})
+        with urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
+            data = resp.read().decode('utf-8')
+        _cache_put(cache, url, data)
+        return data
 
 
 def escape_xml(text):
@@ -92,6 +152,23 @@ def strip_html(text):
     """Strip simple HTML tags from upstream snippets."""
     text = re.sub(r'<[^>]+>', '', str(text or ''))
     return unescape(re.sub(r'\s+', ' ', text)).strip()
+
+
+def clean_title(text, max_len=120):
+    """Truncate title to first sentence, max max_len chars."""
+    text = text.strip()
+    if len(text) <= max_len:
+        return text
+    truncated = text[:max_len]
+    for punct in ('。', '！', '？', '；', '\n'):
+        idx = truncated.rfind(punct)
+        if idx > max_len // 3:
+            return text[:idx + 1]
+    for punct in ('，', ', '):
+        idx = truncated.rfind(punct)
+        if idx > max_len // 3:
+            return text[:idx]
+    return truncated + '…'
 
 
 def cls_serialize_sign_value(value, key):
@@ -156,7 +233,10 @@ def get_jin10_public_headers():
 
     bundle = fetch_json(script_url, base_headers)
     app_id = extract_jin10_public_app_id(bundle)
+
     with _cache_lock:
+        if jin10_public_headers:
+            return dict(jin10_public_headers)
         jin10_public_headers = {
             'User-Agent': 'Mozilla/5.0',
             'Accept': 'application/json,text/plain,*/*',
@@ -200,10 +280,12 @@ def parse_cls_items(payload):
     items = []
     for item in payload.get('data', {}).get('roll_data', []):
         item_id = item.get('id', '')
+        content = item.get('content', '')
+        title = clean_title(item.get('brief') or content, max_len=120)
         items.append({
-            'title': item.get('brief') or item.get('content', '')[:100],
+            'title': title,
             'link': f'https://www.cls.cn/detail/{item_id}',
-            'description': item.get('content', ''),
+            'description': content,
             'pubDate': timestamp_to_rfc822(item.get('ctime', 0)),
             'guid': f'cls_{item_id}',
         })
@@ -342,10 +424,11 @@ def handle_eastmoney_kuaixun(feed_url=None):
         except Exception:
             pubdate = formatdate(timeval=None, localtime=False, usegmt=True)
 
+        digest = item.get('digest', '')
         items.append({
             'title': item.get('title', ''),
             'link': item.get('url_w', '') or f"https://kuaixun.eastmoney.com/a/{item.get('newsid', '')}",
-            'description': item.get('digest', ''),
+            'description': digest or item.get('title', ''),
             'pubDate': pubdate,
             'guid': f"eastmoney_{item.get('newsid', '')}"
         })
@@ -371,10 +454,11 @@ def handle_ths_kuaixun(feed_url=None):
     items = []
 
     for item in data.get('data', {}).get('list', []):
+        digest = item.get('digest') or item.get('remark', '')
         items.append({
             'title': item.get('title', ''),
             'link': item.get('url', '') or f"https://news.10jqka.com.cn/{item.get('seq', '')}",
-            'description': item.get('digest', item.get('remark', '')),
+            'description': digest or item.get('title', ''),
             'pubDate': timestamp_to_rfc822(int(item.get('ctime', 0))),
             'guid': f"ths_{item.get('seq', '')}"
         })
@@ -420,134 +504,35 @@ def handle_wallstreetcn_live(feed_url=None):
     )
 
 
-def _start_chrome():
-    """Launch headless Chrome if not already running. Returns True on success."""
-    import subprocess
-    port = urlparse(CDP_URL).port or 9222
-    try:
-        urllib.request.urlopen(f"http://localhost:{port}/json", timeout=2)
-        return True
-    except Exception:
-        pass
-
-    candidates = [
-        'google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser',
-        'google-chrome-unstable',
-    ]
-    chrome = next((c for c in candidates if subprocess.run(
-        ['which', c], capture_output=True).returncode == 0), None)
-    if not chrome:
-        return False
-
-    subprocess.Popen([
-        chrome, '--headless', f'--remote-debugging-port={port}',
-        '--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage',
-        '--remote-allow-origins=*',
-    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-    for _ in range(15):
-        try:
-            urllib.request.urlopen(f"http://localhost:{port}/json", timeout=2)
-            return True
-        except Exception:
-            import time
-            time.sleep(1)
-    return False
 
 
-def _cdp_find_tab(site_hint=''):
-    """Find a CDP tab matching site_hint, or create a new one via CDP."""
-    tabs = json.loads(urllib.request.urlopen(f"{CDP_URL}/json", timeout=5).read())
-    tab = next((t for t in tabs if site_hint in t.get('url', '')), None)
-    if not tab:
-        tab = _cdp_create_tab(site_hint)
-        if not tab:
-            return None
-    ws_url = tab['webSocketDebuggerUrl']
-    cdp_host = urlparse(CDP_URL).hostname
-    return ws_url.replace('127.0.0.1', cdp_host).replace('localhost', cdp_host)
 
-
-def _cdp_create_tab(url):
-    """Create a new CDP tab via Target.createTarget."""
-    import websocket as ws_mod
-    tabs = json.loads(urllib.request.urlopen(f"{CDP_URL}/json", timeout=5).read())
-    if not tabs:
-        return None
-    first_url = tabs[0]['webSocketDebuggerUrl']
-    cdp_host = urlparse(CDP_URL).hostname
-    ws_url = first_url.replace('127.0.0.1', cdp_host).replace('localhost', cdp_host)
-    ws = ws_mod.create_connection(ws_url, timeout=15)
-    ws.send(json.dumps({
-        'id': 1, 'method': 'Target.createTarget', 'params': {'url': url}
-    }))
-    result = json.loads(ws.recv())
-    ws.close()
-    tid = result.get('result', {}).get('targetId')
-    if not tid:
-        return None
-    return {'webSocketDebuggerUrl': f'ws://{cdp_host}:{urlparse(CDP_URL).port or 9222}/devtools/page/{tid}'}
-
-
-def _cdp_execute(ws_url, js, timeout=30):
-    """Send JS to a CDP tab and return the result value."""
-    import websocket as ws_mod
-    ws = ws_mod.create_connection(ws_url, timeout=timeout)
-    ws.send(json.dumps({
-        'id': 1, 'method': 'Runtime.evaluate',
-        'params': {'expression': js, 'awaitPromise': True, 'returnByValue': True}
-    }))
-    result = json.loads(ws.recv())
-    ws.close()
-    raw = result.get('result', {}).get('result', {}).get('value', '{}')
-    return json.loads(raw)
-
-
-# URL pattern → meaningful key name mapping for CLS finance API
-CDP_API_KEY_MAP = {
-    'emotion': 'market_sentiment',
-    'articles': 'articles',
-    'up_down': 'advance_decline',
-    'tline': 'timeline',
-    'refresh': 'live_refresh',
-    'anchor': 'anchor',
-    'basic': 'basic_info',
-}
-
-
-def _remap_cdp_keys(data):
-    """Remap URL-based keys from CDP capture to meaningful short names."""
-    if not isinstance(data, dict):
-        return data
-    mapped = {}
-    for url, value in data.items():
-        key = None
-        for pattern, name in CDP_API_KEY_MAP.items():
-            if pattern in url:
-                key = name
-                break
-        mapped[key or url] = value
-    return mapped
+# Global CDP engine instance (initialized in main)
+cdp_engine = None
 
 
 def handle_finance_market(feed_url=None):
     """CLS Finance Market Data (财联社看盘) via Chrome CDP.
 
     Returns JSON with market heat, index data, stock pools, and live feed.
-    Requires Chrome CDP enabled (same as Xueqiu).
+    Data is continuously collected by a persistent CDP page (see cdp_engine.py).
     """
-    now = time()
-    with _feed_cache_lock:
-        entry = feed_cache.get('__finance_market__')
-        if entry and now - entry['time'] < CACHE_TTL:
-            return entry['data']
-
-    data = finance_fetch_via_cdp()
+    global cdp_engine
+    if not cdp_engine or not cdp_engine.ready:
+        return {'error': 'Chrome CDP not available. See README.'}
+    page = cdp_engine.get_page('cls_finance')
+    if not page:
+        return {'error': 'Finance page not initialized.'}
+    data = page.get_data(max_age=120)
     if data is None:
-        return {'error': 'Chrome CDP not available or CLS finance tab not found. See README.'}
-
-    with _feed_cache_lock:
-        feed_cache['__finance_market__'] = {'data': data, 'time': time()}
+        age = page.last_updated
+        if age and time.time() - age > 120:
+            return {'error': 'Data stale for >120s. CDP page may need reconnection.'}
+        return {'error': 'No data collected yet. Page may still be loading.'}
+    ws_raw = data.pop('__ws__', None)
+    if ws_raw:
+        data['ws_count'] = len(ws_raw)
+        data['ws_latest'] = ws_raw[-5:] if ws_raw else []
     return data
 
 
@@ -560,128 +545,18 @@ def xueqiu_fetch_via_cdp(api_path):
     - pip install websocket-client
     """
     try:
-        import websocket as ws_mod  # noqa: lazy import
+        import websocket  # noqa: lazy import
     except ImportError:
         return None
 
     try:
-        ws_url = _cdp_find_tab('xueqiu')
+        ws_url = find_tab('xueqiu')
         if not ws_url:
             return None
-        return _cdp_execute(ws_url, f'fetch("{api_path}").then(r=>r.json()).then(d=>JSON.stringify(d))', timeout=15)
+        return execute_js(ws_url,
+                          f'fetch("{api_path}").then(r=>r.json()).then(d=>JSON.stringify(d))',
+                          timeout=15)
     except Exception:
-        return None
-
-
-def _cdp_connect_tab(url):
-    """Create a CDP tab and establish WebSocket. Returns (ws_url, ws, send, recv) or None values."""
-    try:
-        import websocket as ws_mod
-    except ImportError:
-        return None, None, None, None
-
-    tab = _cdp_create_tab(url)
-    if not tab:
-        return None, None, None, None
-    ws_url = tab['webSocketDebuggerUrl']
-    cdp_host = urlparse(CDP_URL).hostname
-    ws_url = ws_url.replace('127.0.0.1', cdp_host).replace('localhost', cdp_host)
-    ws = ws_mod.create_connection(ws_url, timeout=30)
-    send = lambda m: ws.send(json.dumps(m))
-    recv = lambda: json.loads(ws.recv())
-    return ws_url, ws, send, recv
-
-
-def _cdp_inject_xhr_interceptor(send, recv):
-    """Inject XHR interceptor before any page script runs to capture CLS finance API responses."""
-    send({'id': 1, 'method': 'Page.enable', 'params': {}})
-    recv()
-
-    send({'id': 2, 'method': 'Page.addScriptToEvaluateOnNewDocument', 'params': {
-        'source': '''
-            window.__cdp_api = {};
-            var _open = XMLHttpRequest.prototype.open;
-            XMLHttpRequest.prototype.open = function(m, u) {
-                this._url = u;
-                return _open.apply(this, arguments);
-            };
-            var _send = XMLHttpRequest.prototype.send;
-            XMLHttpRequest.prototype.send = function() {
-                this.addEventListener('load', function() {
-                    var url = this._url || '';
-                    if (url.indexOf('emotion') > -1 || url.indexOf('articles') > -1 ||
-                        url.indexOf('up_down') > -1 || url.indexOf('tline') > -1 ||
-                        url.indexOf('refresh') > -1 || url.indexOf('anchor') > -1 ||
-                        url.indexOf('basic') > -1) {
-                        try { window.__cdp_api[url] = JSON.parse(this.responseText); }
-                        catch(e) { window.__cdp_api[url] = {_raw: this.responseText.substring(0,200)}; }
-                    }
-                });
-                return _send.apply(this, arguments);
-            };
-        '''
-    }})
-    recv()
-
-
-def _cdp_navigate_and_wait(ws, send, recv, url, timeout=15):
-    """Navigate to a URL and wait for Page.loadEventFired."""
-    import time
-    send({'id': 3, 'method': 'Page.navigate', 'params': {'url': url}})
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        ws.settimeout(deadline - time.time())
-        try:
-            msg = recv()
-        except Exception:
-            break
-        if msg.get('method') == 'Page.loadEventFired':
-            return True
-    return False
-
-
-def finance_fetch_via_cdp():
-    """Fetch CLS finance market data via Chrome CDP.
-
-    Creates a tab, injects an XHR interceptor to capture API responses
-    the page's own React code makes, navigates to the finance page,
-    and returns the captured data.
-    """
-    try:
-        import websocket as ws_mod  # noqa: lazy import
-    except ImportError:
-        return None
-
-    try:
-        import time
-        ws_url, ws, send, recv = _cdp_connect_tab('about:blank')
-        if not ws:
-            return None
-
-        _cdp_inject_xhr_interceptor(send, recv)
-        loaded = _cdp_navigate_and_wait(ws, send, recv, 'https://www.cls.cn/finance')
-        ws.close()
-
-        if not loaded:
-            time.sleep(1)
-
-        # Poll for XHR data — return as soon as data arrives instead of fixed sleep
-        deadline = time.time() + 10
-        keys = []
-        while time.time() < deadline:
-            try:
-                raw = _cdp_execute(ws_url, 'JSON.stringify(Object.keys(window.__cdp_api))', timeout=5) or []
-                keys = raw if isinstance(raw, list) else []
-                if len(keys) >= 1:
-                    break
-            except Exception:
-                pass
-            time.sleep(0.5)
-
-        data = _cdp_execute(ws_url, 'JSON.stringify(window.__cdp_api)', timeout=10) or {}
-        return _remap_cdp_keys(data)
-    except Exception as exc:
-        print(f"finance CDP fetch failed: {exc}")
         return None
 
 
@@ -799,6 +674,13 @@ def build_health_payload(base_url, check_sources=False):
         'status': 'requires_chrome_cdp',
     })
 
+    feeds.append({
+        'name': 'CLS Finance Market (财联社看盘)',
+        'path': '/finance/market',
+        'url': base_url + '/finance/market',
+        'status': 'requires_chrome_cdp',
+    })
+
     return {
         'status': status,
         'cache_ttl': CACHE_TTL,
@@ -809,6 +691,11 @@ def build_health_payload(base_url, check_sources=False):
 
 class RSSHandler(BaseHTTPRequestHandler):
     """HTTP request handler for RSS feeds."""
+
+    def log_date_time_string(self):
+        """Return current Beijing time (UTC+8) for access logs."""
+        from time import time, strftime, gmtime
+        return strftime('%d/%b/%Y %H:%M:%S', gmtime(time() + 28800))
 
     def log_message(self, format, *args):
         sys.stderr.write(f"[{self.log_date_time_string()}] {format % args}\n")
@@ -847,10 +734,6 @@ class RSSHandler(BaseHTTPRequestHandler):
                             body, cache=False, write_body=write_body)
             return
         if path == '/finance/market':
-            query = parse_qs(parsed.query)
-            if query.get('refresh', ['0'])[0] in ('1', 'true', 'yes'):
-                with _feed_cache_lock:
-                    feed_cache.pop('__finance_market__', None)
             data = handle_finance_market()
             body = json.dumps(data, ensure_ascii=False, indent=2)
             self._send_text(200, 'application/json; charset=utf-8',
@@ -871,15 +754,37 @@ class RSSHandler(BaseHTTPRequestHandler):
         self.send_error(404, 'Not Found. Visit / for available feeds.')
 
     def _get_or_fetch_feed(self, path, fetch_func):
-        """Thread-safe feed cache lookup with automatic population."""
+        """Thread-safe feed cache lookup with stampede protection and LRU eviction."""
         now = time()
         with _feed_cache_lock:
             cached = feed_cache.get(path)
-            if cached and now - cached['time'] < CACHE_TTL:
+            if cached and now < cached['expires_at']:
                 return cached['xml']
-        xml = fetch_func()
-        with _feed_cache_lock:
-            feed_cache[path] = {'xml': xml, 'time': time()}
+
+        with _feed_fetch_locks_lock:
+            if path not in _feed_fetch_locks:
+                _feed_fetch_locks[path] = threading.Lock()
+            lock = _feed_fetch_locks[path]
+
+        with lock:
+            with _feed_cache_lock:
+                cached = feed_cache.get(path)
+                if cached and time() < cached['expires_at']:
+                    return cached['xml']
+            try:
+                xml = fetch_func()
+            except Exception:
+                _feed_fetch_locks.pop(path, None)
+                raise
+            with _feed_cache_lock:
+                if len(feed_cache) >= MAX_FEED_CACHE_SIZE:
+                    oldest = min(feed_cache, key=lambda k: feed_cache[k]['time'])
+                    del feed_cache[oldest]
+                    _feed_fetch_locks.pop(oldest, None)
+                feed_cache[path] = {
+                    'xml': xml, 'time': time(),
+                    'expires_at': time() + CACHE_TTL * (1 + random.uniform(-CACHE_JITTER, CACHE_JITTER))
+                }
         return xml
 
     def _serve_feed(self, path, base_url, write_body=True):
@@ -929,6 +834,29 @@ class RSSHandler(BaseHTTPRequestHandler):
                         cache=False, write_body=write_body)
 
 
+class BoundedThreadPoolServer(ThreadingHTTPServer):
+    """HTTPServer with a fixed-size thread pool instead of per-request threads.
+
+    Prevents thread explosion on 2C2G hardware under burst traffic.
+    Falls back to the parent's thread-per-request for truly concurrent CDP requests,
+    but the pool limits how many in-flight requests can consume worker threads.
+    """
+
+    allow_reuse_address = True
+    daemon_threads = True
+
+    def __init__(self, *args, max_workers=MAX_WORKERS, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.executor = ThreadPoolExecutor(max_workers=max_workers)
+
+    def process_request(self, request, client_address):
+        self.executor.submit(self.process_request_thread, request, client_address)
+
+    def server_close(self):
+        self.executor.shutdown(wait=False)
+        super().server_close()
+
+
 def warm_jin10_headers():
     try:
         get_jin10_public_headers()
@@ -936,28 +864,34 @@ def warm_jin10_headers():
         pass
 
 
-def ensure_chrome():
-    """Start headless Chrome in background at server startup."""
-    if _start_chrome():
-        try:
-            # Open a finance page tab so it's ready when first request comes
-            _cdp_find_tab('https://www.cls.cn/finance')
-        except Exception:
-            pass
-        print(f'  ✓ Headless Chrome running on {CDP_URL}')
-    else:
-        print(f'  ✗ Headless Chrome not available (install chromium or set CDP_URL)')
+def init_cdp():
+    """Initialize CDP engine with persistent CLS finance page."""
+    global cdp_engine
+    if not ensure_chrome():
+        print('  ✗ Chrome not available. /finance/market and Xueqiu will return errors.')
+        return
+    cdp_engine = CDPEngine()
+    if not cdp_engine.start():
+        print('  ✗ Failed to connect to Chrome CDP.')
+        return
+    cdp_engine.add_page('cls_finance', 'https://www.cls.cn/finance')
+    print(f'  ✓ CDP engine ready — finance market data updates every 15s')
 
 
 def main():
     signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
 
+    @atexit.register
+    def _shutdown():
+        if cdp_engine:
+            cdp_engine.shutdown()
+
     threading.Thread(target=warm_jin10_headers, daemon=True).start()
-    threading.Thread(target=ensure_chrome, daemon=True).start()
+    threading.Thread(target=init_cdp, daemon=True).start()
 
     print(f'China Finance RSS Bridge running on http://localhost:{PORT}')
-    print(f'Cache TTL: {CACHE_TTL}s | Timeout: {REQUEST_TIMEOUT}s | CDP: {CDP_URL}\n')
+    print(f'Cache TTL: {CACHE_TTL}s | Timeout: {REQUEST_TIMEOUT}s')
     print('Available feeds:')
     for path, info in ROUTES.items():
         print(f'  http://localhost:{PORT}{path}  — {info["name"]}')
@@ -969,7 +903,7 @@ def main():
     print(f'\nNote: Xueqiu and Finance Market require Chrome with CDP enabled.')
     print(f'Visit http://localhost:{PORT}/ for the web index.\n')
 
-    server = ThreadingHTTPServer(('0.0.0.0', PORT), RSSHandler)
+    server = BoundedThreadPoolServer(('0.0.0.0', PORT), RSSHandler)
     server.serve_forever()
 
 

@@ -43,6 +43,7 @@ http://localhost:8053/healthz?check=1
 | `REQUEST_TIMEOUT` | `10` | Timeout for upstream requests |
 | `PUBLIC_BASE_URL` | auto | Public URL for OPML and RSS self links |
 | `CDP_URL` | `http://localhost:9222` | Chrome DevTools URL for Xueqiu |
+| `MAX_WORKERS` | `10` | Max concurrent request threads (lower for low-memory servers) |
 
 Configuration names are public. Do not commit `.env` files, cookies, tokens,
 private keys, Chrome profiles, or HAR captures.
@@ -73,6 +74,12 @@ Keep the CDP port local or on a trusted private network.
 ```bash
 docker build -t china-finance-rss .
 docker run -d -p 8053:8053 --name china-finance-rss china-finance-rss
+```
+
+For 2C2G (2 core, 2GB RAM) servers, add memory limits to prevent OOM:
+```bash
+docker run -d --memory=1.5g --memory-swap=2g \
+  -p 8053:8053 --name china-finance-rss china-finance-rss
 ```
 
 Behind a reverse proxy:
