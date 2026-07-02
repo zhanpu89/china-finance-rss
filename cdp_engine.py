@@ -225,13 +225,17 @@ class CDPPage:
         'timeline', 'index_home', 'hot_plate', 'stock_ranking',
     })
 
+    # Safety cap for _last_data — prevents unbounded growth if an
+    # unrecognised URL with dynamic parameters enters remap_keys.
+    _LAST_DATA_MAX_KEYS = 50
+
     def __init__(self, name, target_url, cdp_host='localhost', cdp_port=9222):
         self.name = name
         self.target_url = target_url
         self.cdp_host = cdp_host
         self.cdp_port = cdp_port
         self.cache = {}
-        self._last_data = {}  # never-cleared serving cache for external callers
+        self._last_data = {}  # serving cache for external callers
         self.last_updated = time.time()
         self._lock = threading.Lock()
         self._running = True
@@ -406,6 +410,10 @@ class CDPPage:
                         remapped = remap_keys(all_api)
                         self.cache.update(remapped)
                         self._last_data.update(remapped)
+                        if len(self._last_data) > self._LAST_DATA_MAX_KEYS:
+                            # Evict oldest key if too many unrecognized URLs accumulated
+                            oldest = min(self._last_data, key=lambda k: self._key_last_seen.get(k, 0))
+                            del self._last_data[oldest]
                         for url_key, raw_val in all_api.items():
                             mapped = next((name for p, name in API_KEY_MAP.items()
                                            if p in str(url_key)), None)
@@ -473,8 +481,11 @@ class CDPPage:
             pass
         self._close_target()
         with self._lock:
+            self.cache.clear()
             self._key_last_seen.clear()
             self._api_urls.clear()
+            # Stale WebSocket data from old session — discard on reconnect
+            self._last_data.pop('__ws__', None)
         for attempt in range(3):
             try:
                 self._connect()
@@ -521,6 +532,9 @@ class CDPPage:
                         remapped = remap_keys(all_api)
                         self.cache.update(remapped)
                         self._last_data.update(remapped)
+                        if len(self._last_data) > self._LAST_DATA_MAX_KEYS:
+                            oldest = min(self._last_data, key=lambda k: self._key_last_seen.get(k, 0))
+                            del self._last_data[oldest]
                         for url_key, raw_val in all_api.items():
                             mapped = next((name for p, name in API_KEY_MAP.items()
                                            if p in str(url_key)), None)
