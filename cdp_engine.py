@@ -231,7 +231,8 @@ class CDPPage:
         self.cdp_host = cdp_host
         self.cdp_port = cdp_port
         self.cache = {}
-        self.last_updated = 0
+        self._last_data = {}  # never-cleared serving cache for external callers
+        self.last_updated = time.time()
         self._lock = threading.Lock()
         self._running = True
         self._ws = None
@@ -404,6 +405,7 @@ class CDPPage:
                     if all_api:
                         remapped = remap_keys(all_api)
                         self.cache.update(remapped)
+                        self._last_data.update(remapped)
                         for url_key, raw_val in all_api.items():
                             mapped = next((name for p, name in API_KEY_MAP.items()
                                            if p in str(url_key)), None)
@@ -412,8 +414,9 @@ class CDPPage:
                                 self._api_urls[mapped] = url_key
                     if ws_data:
                         self.cache['__ws__'] = ws_data
+                        self._last_data['__ws__'] = ws_data
                         self._key_last_seen['__ws__'] = now
-                    # Expire stale keys
+                    # Expire stale keys from freshness cache only — _last_data persists
                     for key in list(self.cache.keys()):
                         last_seen = self._key_last_seen.get(key)
                         if last_seen is None:
@@ -491,12 +494,16 @@ class CDPPage:
                         time.sleep(2)
         print(f"[CDP:{self.name}] reconnect failed after Chrome restart")
 
-    def get_data(self, max_age=None):
-        """Return collected data. If max_age (seconds) set, returns None if stale."""
+    def get_data(self):
+        """Return merged data — latest from live cache, gaps filled by _last_data.
+
+        _last_data persists across reconnections so external callers never
+        get an empty response once initial data has been collected.
+        """
         with self._lock:
-            if max_age and self.last_updated and time.time() - self.last_updated > max_age:
-                return None
-            return dict(self.cache) if self.cache else None
+            merged = dict(self._last_data)
+            merged.update(self.cache)
+            return merged
 
     def refresh(self):
         """Force an immediate data pull. Returns True on success."""
@@ -513,6 +520,7 @@ class CDPPage:
                     if all_api:
                         remapped = remap_keys(all_api)
                         self.cache.update(remapped)
+                        self._last_data.update(remapped)
                         for url_key, raw_val in all_api.items():
                             mapped = next((name for p, name in API_KEY_MAP.items()
                                            if p in str(url_key)), None)
@@ -521,8 +529,9 @@ class CDPPage:
                                 self._api_urls[mapped] = url_key
                     if ws_data:
                         self.cache['__ws__'] = ws_data
+                        self._last_data['__ws__'] = ws_data
                         self._key_last_seen['__ws__'] = now
-                    # Expire stale keys
+                    # Expire stale keys from freshness cache only
                     for key in list(self.cache.keys()):
                         last_seen = self._key_last_seen.get(key)
                         if last_seen is None:

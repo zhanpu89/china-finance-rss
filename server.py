@@ -538,6 +538,8 @@ def handle_finance_market(feed_url=None):
 
     Returns JSON with market heat, index data, stock pools, and live feed.
     Data is continuously collected by a persistent CDP page (see cdp_engine.py).
+    Once collected, _last_data persists across reconnections — external
+    callers always get data once initial collection completes.
     """
     global cdp_engine
     if not cdp_engine or not cdp_engine.ready:
@@ -545,12 +547,7 @@ def handle_finance_market(feed_url=None):
     page = cdp_engine.get_page('cls_finance')
     if not page:
         return {'error': 'Finance page not initialized.'}
-    data = page.get_data(max_age=120)
-    if data is None:
-        age = page.last_updated
-        if age and time.time() - age > 120:
-            return {'error': 'Data stale for >120s. CDP page may need reconnection.'}
-        return {'error': 'No data collected yet. Page may still be loading.'}
+    data = page.get_data()
     ws_raw = data.pop('__ws__', None)
     result = {}
     _fill_missing(result, data, _FINANCE_EXPECTED_KEYS)
@@ -566,6 +563,8 @@ def handle_cls_quotation(feed_url=None):
     Returns JSON with index timelines, advance/decline distribution,
     hot sectors, stock rankings, NEEQ/BSE data, and IPO info.
     Data is continuously collected by a persistent CDP page (see cdp_engine.py).
+    Once collected, _last_data persists across reconnections — external
+    callers always get data once initial collection completes.
     """
     global cdp_engine
     if not cdp_engine or not cdp_engine.ready:
@@ -573,12 +572,7 @@ def handle_cls_quotation(feed_url=None):
     page = cdp_engine.get_page('cls_quotation')
     if not page:
         return {'error': 'Quotation page not initialized.'}
-    data = page.get_data(max_age=120)
-    if data is None:
-        age = page.last_updated
-        if age and time.time() - age > 120:
-            return {'error': 'Data stale for >120s. CDP page may need reconnection.'}
-        return {'error': 'No data collected yet. Page may still be loading.'}
+    data = page.get_data()
     result = {}
     _fill_missing(result, data, _QUOTATION_EXPECTED_KEYS)
     return result
