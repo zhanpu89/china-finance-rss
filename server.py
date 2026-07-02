@@ -912,7 +912,7 @@ def init_cdp():
         return
     cdp_engine.add_page('cls_finance', 'https://www.cls.cn/finance')
     cdp_engine.add_page('cls_quotation', 'https://www.cls.cn/quotation')
-    print(f'  ✓ CDP engine ready — finance & quotation data updates every 15s')
+    print(f'  ✓ CDP engine ready — finance & quotation data updates every ~30s')
 
 
 def main():

@@ -53,6 +53,7 @@ def remap_keys(data):
 
 INTERCEPTOR_JS = """
 window.__cdp_api = {};
+window.__cdp_refetch = {};
 window.__cdp_ws = [];
 
 var _shouldCapture = function(url) {
@@ -203,23 +204,14 @@ class CDPPage:
     periodically pull collected data into a thread-safe cache.
     """
 
-    # Per-key TTL (seconds). APIs the page auto-refreshes get short TTL;
-    # one-shot APIs (fetched once on page load) get longer TTL.
-    KEY_TTL = 50  # default for keys not in overrides below
+    # Per-key TTL (seconds). Most APIs are proactively re-fetched every ~30s,
+    # so the TTL just needs to cover a few missed cycles as safety net.
+    KEY_TTL = 90
     KEY_TTL_OVERRIDES = {
-        'market_sentiment': 50,   # emotion — page refreshes every ~15s
-        'basic_info': 50,         # basic   — page refreshes every ~15s
-        'live_refresh': 50,       # refresh — page refreshes every ~15s
-        # One-shot APIs (page fetches once on load, rarely re-fetches):
-        'advance_decline': 600,   # up_down — 涨停数据
-        'articles': 600,
-        'anchor': 600,
-        'timeline': 600,          # tline - 分时线
-        'hot_plate': 600,
-        'stock_ranking': 600,
-        'stock_ipo': 600,
-        'bj_stock_info': 600,
-        'index_home': 600,
+        'market_sentiment': 60,   # emotion — page also auto-refreshes
+        'basic_info': 60,         # basic   — page also auto-refreshes
+        'live_refresh': 60,       # refresh — page also auto-refreshes
+        '__ws__': 30,             # websocket data is transient
     }
 
     def __init__(self, name, target_url, cdp_host='localhost', cdp_port=9222):
@@ -343,14 +335,15 @@ class CDPPage:
         return result.get('result', {}).get('result', {}).get('value')
 
     def _re_fetch_api(self, url):
-        """Fire-and-forget re-fetch of an API URL in the page via CDP.
+        """Fire-and-forget re-fetch of an API URL, storing result in __cdp_refetch.
 
-        The intercepted response will populate __cdp_api on the next heartbeat.
+        __cdp_refetch is a secondary buffer that's not cleared by the interceptor,
+        so data survives even if the fetch response arrives between heartbeat polls.
         """
         try:
             escaped = url.replace('\\', '\\\\').replace('"', '\\"')
             self._send({'id': self._next_id(), 'method': 'Runtime.evaluate',
-                        'params': {'expression': f'fetch("{escaped}").catch(function(){{}})',
+                        'params': {'expression': f'fetch("{escaped}").then(function(r){{return r.json()}}).then(function(d){{window.__cdp_refetch["{escaped}"]=d}}).catch(function(){{}})',
                                    'awaitPromise': False, 'returnByValue': False}})
         except Exception:
             pass
@@ -359,7 +352,7 @@ class CDPPage:
         """Background loop: poll collected data every 15s, reconnect on failure."""
         empty_count = 0
         while self._running:
-            time.sleep(15)
+            time.sleep(10)
             try:
                 alive = self._evaluate('typeof window.__cdp_api !== "undefined"', timeout=5)
                 if not alive:
@@ -369,8 +362,8 @@ class CDPPage:
                     continue
 
                 raw = self._evaluate(
-                    'var d=JSON.stringify({api:window.__cdp_api,ws:window.__cdp_ws});'
-                    'window.__cdp_api={};window.__cdp_ws=[];d',
+                    'var d=JSON.stringify({api:window.__cdp_api,refetch:window.__cdp_refetch,ws:window.__cdp_ws});'
+                    'window.__cdp_api={};window.__cdp_refetch={};window.__cdp_ws=[];d',
                     timeout=10
                 )
                 if not raw:
@@ -383,11 +376,13 @@ class CDPPage:
 
                 data = json.loads(raw)
                 api_data = data.get('api', {}) or {}
-                ws_data = data.get('ws', []) or []
+                refetch_data = data.get('refetch', {}) or {}
+                ws_data = data.get('ws', []) or {}
+                all_api = {**api_data, **refetch_data}
 
-                if not api_data and not ws_data:
+                if not all_api and not ws_data:
                     empty_count += 1
-                    if empty_count >= 4:
+                    if empty_count >= 6:
                         print(f"[CDP:{self.name}] {empty_count}x empty polls, forcing reconnect...")
                         self._reconnect()
                         empty_count = 0
@@ -395,11 +390,10 @@ class CDPPage:
 
                 with self._lock:
                     now = time.time()
-                    if api_data:
-                        remapped = remap_keys(api_data)
+                    if all_api:
+                        remapped = remap_keys(all_api)
                         self.cache.update(remapped)
-                        # Track when each key was last refreshed & save URL for re-fetch
-                        for url_key, raw_val in api_data.items():
+                        for url_key, raw_val in all_api.items():
                             mapped = next((name for p, name in API_KEY_MAP.items()
                                            if p in str(url_key)), None)
                             if mapped:
@@ -408,7 +402,7 @@ class CDPPage:
                     if ws_data:
                         self.cache['__ws__'] = ws_data
                         self._key_last_seen['__ws__'] = now
-                    # Expire stale keys — use per-key TTL when available
+                    # Expire stale keys
                     for key in list(self.cache.keys()):
                         last_seen = self._key_last_seen.get(key)
                         if last_seen is None:
@@ -417,13 +411,12 @@ class CDPPage:
                         if now - last_seen > ttl:
                             del self.cache[key]
                             del self._key_last_seen[key]
-                    # Proactively re-fetch one-shot APIs (TTL > 100) before they expire
-                    RE_FETCH_AFTER = 240  # seconds — re-fetch every 4 minutes
-                    for key, ttl in self.KEY_TTL_OVERRIDES.items():
-                        if ttl > 100 and key in self._api_urls:
-                            last_seen = self._key_last_seen.get(key, 0)
-                            if now - last_seen > RE_FETCH_AFTER:
-                                self._re_fetch_api(self._api_urls[key])
+                    # Proactively re-fetch APIs to keep data fresh (~30s update)
+                    RE_FETCH_AFTER = 20
+                    for key in list(self._api_urls.keys()):
+                        last_seen = self._key_last_seen.get(key, 0)
+                        if last_seen and now - last_seen > RE_FETCH_AFTER:
+                            self._re_fetch_api(self._api_urls[key])
                     self.last_updated = now
                 empty_count = 0
 
@@ -495,17 +488,19 @@ class CDPPage:
     def refresh(self):
         """Force an immediate data pull. Returns True on success."""
         try:
-            raw = self._evaluate('JSON.stringify({api:window.__cdp_api,ws:window.__cdp_ws})', timeout=10)
+            raw = self._evaluate('JSON.stringify({api:window.__cdp_api,refetch:window.__cdp_refetch,ws:window.__cdp_ws})', timeout=10)
             if raw:
                 data = json.loads(raw)
                 api_data = data.get('api', {}) or {}
-                ws_data = data.get('ws', []) or []
+                refetch_data = data.get('refetch', {}) or {}
+                ws_data = data.get('ws', []) or {}
+                all_api = {**api_data, **refetch_data}
                 with self._lock:
                     now = time.time()
-                    if api_data:
-                        remapped = remap_keys(api_data)
+                    if all_api:
+                        remapped = remap_keys(all_api)
                         self.cache.update(remapped)
-                        for url_key, raw_val in api_data.items():
+                        for url_key, raw_val in all_api.items():
                             mapped = next((name for p, name in API_KEY_MAP.items()
                                            if p in str(url_key)), None)
                             if mapped:
@@ -514,7 +509,7 @@ class CDPPage:
                     if ws_data:
                         self.cache['__ws__'] = ws_data
                         self._key_last_seen['__ws__'] = now
-                    # Expire stale keys — use per-key TTL
+                    # Expire stale keys
                     for key in list(self.cache.keys()):
                         last_seen = self._key_last_seen.get(key)
                         if last_seen is None:
