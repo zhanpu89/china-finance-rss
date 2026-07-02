@@ -76,9 +76,10 @@ docker build -t china-finance-rss .
 docker run -d -p 8053:8053 --name china-finance-rss china-finance-rss
 ```
 
-For 2C2G (2 core, 2GB RAM) servers, add memory limits to prevent OOM:
+For 2C2G (2 core, 2GB RAM) servers, limit memory and **disable swap**
+(Chrome under swap causes CDP heartbeat timeouts):
 ```bash
-docker run -d --memory=1.5g --memory-swap=2g \
+docker run -d --memory=1g --memory-swap=1g --memory-reservation=768m \
   -p 8053:8053 --name china-finance-rss china-finance-rss
 ```
 
