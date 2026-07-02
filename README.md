@@ -97,6 +97,8 @@ docker run -d -p 8053:8053 \
 - Xueqiu uses your local browser session but does not store or print cookies.
 - If an upstream source breaks, the feed stays valid and includes a diagnostic
   item. Use `/healthz?check=1` to see which source failed.
+- Run `python tests/freshness_test.py --duration 300` to monitor CDP data
+  update frequency during market hours.
 
 ## 中文简版
 
