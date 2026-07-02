@@ -204,15 +204,26 @@ class CDPPage:
     periodically pull collected data into a thread-safe cache.
     """
 
-    # Per-key TTL (seconds). Most APIs are proactively re-fetched every ~30s,
-    # so the TTL just needs to cover a few missed cycles as safety net.
-    KEY_TTL = 90
+    # Per-key TTL (seconds).
+    # High-frequency keys: page auto-refreshes them via setInterval — short TTL.
+    # Low-frequency keys: one-shot on page load, CDP re-fetches them — long TTL.
+    KEY_TTL = 120
     KEY_TTL_OVERRIDES = {
-        'market_sentiment': 60,   # emotion — page also auto-refreshes
-        'basic_info': 60,         # basic   — page also auto-refreshes
-        'live_refresh': 60,       # refresh — page also auto-refreshes
+        'market_sentiment': 60,   # emotion — page refreshes ~15s
+        'basic_info': 60,         # basic   — page refreshes ~15-50s
+        'live_refresh': 60,       # refresh — page refreshes ~15s
+        'timeline': 60,           # tline — page refreshes ~50s
+        'index_home': 60,         # page refreshes ~20s
+        'hot_plate': 60,          # page refreshes ~20s
+        'stock_ranking': 60,      # page refreshes ~20s
         '__ws__': 30,             # websocket data is transient
     }
+
+    # Keys the page auto-refreshes — no proactive CDP re-fetch needed.
+    _PAGE_REFRESHED_KEYS = frozenset({
+        'market_sentiment', 'basic_info', 'live_refresh',
+        'timeline', 'index_home', 'hot_plate', 'stock_ranking',
+    })
 
     def __init__(self, name, target_url, cdp_host='localhost', cdp_port=9222):
         self.name = name
@@ -411,9 +422,11 @@ class CDPPage:
                         if now - last_seen > ttl:
                             del self.cache[key]
                             del self._key_last_seen[key]
-                    # Proactively re-fetch APIs to keep data fresh (~30s update)
-                    RE_FETCH_AFTER = 20
+                    # Proactively re-fetch low-frequency APIs — page handles the high-frequency ones
+                    RE_FETCH_AFTER = 25
                     for key in list(self._api_urls.keys()):
+                        if key in self._PAGE_REFRESHED_KEYS:
+                            continue
                         last_seen = self._key_last_seen.get(key, 0)
                         if last_seen and now - last_seen > RE_FETCH_AFTER:
                             self._re_fetch_api(self._api_urls[key])
