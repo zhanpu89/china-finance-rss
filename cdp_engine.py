@@ -235,6 +235,7 @@ class CDPPage:
         self._target_id = None
         self._msg_id = 0
         self._key_last_seen = {}  # key -> timestamp of last refresh
+        self._api_urls = {}       # remapped_key -> original URL for re-fetch
         self._connect()
         threading.Thread(target=self._heartbeat, daemon=True).start()
 
@@ -341,6 +342,19 @@ class CDPPage:
         }, timeout)
         return result.get('result', {}).get('result', {}).get('value')
 
+    def _re_fetch_api(self, url):
+        """Fire-and-forget re-fetch of an API URL in the page via CDP.
+
+        The intercepted response will populate __cdp_api on the next heartbeat.
+        """
+        try:
+            escaped = url.replace('\\', '\\\\').replace('"', '\\"')
+            self._send({'id': self._next_id(), 'method': 'Runtime.evaluate',
+                        'params': {'expression': f'fetch("{escaped}").catch(function(){{}})',
+                                   'awaitPromise': False, 'returnByValue': False}})
+        except Exception:
+            pass
+
     def _heartbeat(self):
         """Background loop: poll collected data every 15s, reconnect on failure."""
         empty_count = 0
@@ -384,9 +398,13 @@ class CDPPage:
                     if api_data:
                         remapped = remap_keys(api_data)
                         self.cache.update(remapped)
-                        # Track when each key was last refreshed
-                        for key in remapped:
-                            self._key_last_seen[key] = now
+                        # Track when each key was last refreshed & save URL for re-fetch
+                        for url_key, raw_val in api_data.items():
+                            mapped = next((name for p, name in API_KEY_MAP.items()
+                                           if p in str(url_key)), None)
+                            if mapped:
+                                self._key_last_seen[mapped] = now
+                                self._api_urls[mapped] = url_key
                     if ws_data:
                         self.cache['__ws__'] = ws_data
                         self._key_last_seen['__ws__'] = now
@@ -399,6 +417,13 @@ class CDPPage:
                         if now - last_seen > ttl:
                             del self.cache[key]
                             del self._key_last_seen[key]
+                    # Proactively re-fetch one-shot APIs (TTL > 100) before they expire
+                    RE_FETCH_AFTER = 240  # seconds — re-fetch every 4 minutes
+                    for key, ttl in self.KEY_TTL_OVERRIDES.items():
+                        if ttl > 100 and key in self._api_urls:
+                            last_seen = self._key_last_seen.get(key, 0)
+                            if now - last_seen > RE_FETCH_AFTER:
+                                self._re_fetch_api(self._api_urls[key])
                     self.last_updated = now
                 empty_count = 0
 
@@ -440,6 +465,7 @@ class CDPPage:
         self._close_target()
         with self._lock:
             self._key_last_seen.clear()
+            self._api_urls.clear()
         for attempt in range(3):
             try:
                 self._connect()
@@ -479,8 +505,12 @@ class CDPPage:
                     if api_data:
                         remapped = remap_keys(api_data)
                         self.cache.update(remapped)
-                        for key in remapped:
-                            self._key_last_seen[key] = now
+                        for url_key, raw_val in api_data.items():
+                            mapped = next((name for p, name in API_KEY_MAP.items()
+                                           if p in str(url_key)), None)
+                            if mapped:
+                                self._key_last_seen[mapped] = now
+                                self._api_urls[mapped] = url_key
                     if ws_data:
                         self.cache['__ws__'] = ws_data
                         self._key_last_seen['__ws__'] = now
