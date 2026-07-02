@@ -203,6 +203,25 @@ class CDPPage:
     periodically pull collected data into a thread-safe cache.
     """
 
+    # Per-key TTL (seconds). APIs the page auto-refreshes get short TTL;
+    # one-shot APIs (fetched once on page load) get longer TTL.
+    KEY_TTL = 50  # default for keys not in overrides below
+    KEY_TTL_OVERRIDES = {
+        'market_sentiment': 50,   # emotion — page refreshes every ~15s
+        'basic_info': 50,         # basic   — page refreshes every ~15s
+        'live_refresh': 50,       # refresh — page refreshes every ~15s
+        # One-shot APIs (page fetches once on load, rarely re-fetches):
+        'advance_decline': 600,   # up_down — 涨停数据
+        'articles': 600,
+        'anchor': 600,
+        'timeline': 600,          # tline - 分时线
+        'hot_plate': 600,
+        'stock_ranking': 600,
+        'stock_ipo': 600,
+        'bj_stock_info': 600,
+        'index_home': 600,
+    }
+
     def __init__(self, name, target_url, cdp_host='localhost', cdp_port=9222):
         self.name = name
         self.target_url = target_url
@@ -215,6 +234,7 @@ class CDPPage:
         self._ws = None
         self._target_id = None
         self._msg_id = 0
+        self._key_last_seen = {}  # key -> timestamp of last refresh
         self._connect()
         threading.Thread(target=self._heartbeat, daemon=True).start()
 
@@ -360,11 +380,26 @@ class CDPPage:
                     continue
 
                 with self._lock:
+                    now = time.time()
                     if api_data:
-                        self.cache.update(remap_keys(api_data))
+                        remapped = remap_keys(api_data)
+                        self.cache.update(remapped)
+                        # Track when each key was last refreshed
+                        for key in remapped:
+                            self._key_last_seen[key] = now
                     if ws_data:
                         self.cache['__ws__'] = ws_data
-                    self.last_updated = time.time()
+                        self._key_last_seen['__ws__'] = now
+                    # Expire stale keys — use per-key TTL when available
+                    for key in list(self.cache.keys()):
+                        last_seen = self._key_last_seen.get(key)
+                        if last_seen is None:
+                            continue
+                        ttl = self.KEY_TTL_OVERRIDES.get(key, self.KEY_TTL)
+                        if now - last_seen > ttl:
+                            del self.cache[key]
+                            del self._key_last_seen[key]
+                    self.last_updated = now
                 empty_count = 0
 
             except Exception as e:
@@ -403,6 +438,8 @@ class CDPPage:
         except:
             pass
         self._close_target()
+        with self._lock:
+            self._key_last_seen.clear()
         for attempt in range(3):
             try:
                 self._connect()
@@ -438,11 +475,25 @@ class CDPPage:
                 api_data = data.get('api', {}) or {}
                 ws_data = data.get('ws', []) or []
                 with self._lock:
+                    now = time.time()
                     if api_data:
-                        self.cache.update(remap_keys(api_data))
+                        remapped = remap_keys(api_data)
+                        self.cache.update(remapped)
+                        for key in remapped:
+                            self._key_last_seen[key] = now
                     if ws_data:
                         self.cache['__ws__'] = ws_data
-                    self.last_updated = time.time()
+                        self._key_last_seen['__ws__'] = now
+                    # Expire stale keys — use per-key TTL
+                    for key in list(self.cache.keys()):
+                        last_seen = self._key_last_seen.get(key)
+                        if last_seen is None:
+                            continue
+                        ttl = self.KEY_TTL_OVERRIDES.get(key, self.KEY_TTL)
+                        if now - last_seen > ttl:
+                            del self.cache[key]
+                            del self._key_last_seen[key]
+                    self.last_updated = now
                 return True
         except:
             pass
