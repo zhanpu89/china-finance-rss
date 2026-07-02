@@ -536,6 +536,28 @@ def handle_finance_market(feed_url=None):
     return data
 
 
+def handle_cls_quotation(feed_url=None):
+    """CLS Quotation Market Data (财联社行情) via Chrome CDP.
+
+    Returns JSON with index timelines, advance/decline distribution,
+    hot sectors, stock rankings, NEEQ/BSE data, and IPO info.
+    Data is continuously collected by a persistent CDP page (see cdp_engine.py).
+    """
+    global cdp_engine
+    if not cdp_engine or not cdp_engine.ready:
+        return {'error': 'Chrome CDP not available. See README.'}
+    page = cdp_engine.get_page('cls_quotation')
+    if not page:
+        return {'error': 'Quotation page not initialized.'}
+    data = page.get_data(max_age=120)
+    if data is None:
+        age = page.last_updated
+        if age and time.time() - age > 120:
+            return {'error': 'Data stale for >120s. CDP page may need reconnection.'}
+        return {'error': 'No data collected yet. Page may still be loading.'}
+    return data
+
+
 def xueqiu_fetch_via_cdp(api_path):
     """Fetch Xueqiu API via Chrome CDP to bypass WAF.
 
@@ -681,6 +703,13 @@ def build_health_payload(base_url, check_sources=False):
         'status': 'requires_chrome_cdp',
     })
 
+    feeds.append({
+        'name': 'CLS Quotation Market (财联社行情)',
+        'path': '/quotation/market',
+        'url': base_url + '/quotation/market',
+        'status': 'requires_chrome_cdp',
+    })
+
     return {
         'status': status,
         'cache_ttl': CACHE_TTL,
@@ -735,6 +764,12 @@ class RSSHandler(BaseHTTPRequestHandler):
             return
         if path == '/finance/market':
             data = handle_finance_market()
+            body = json.dumps(data, ensure_ascii=False, indent=2)
+            self._send_text(200, 'application/json; charset=utf-8',
+                            body, cache=True, write_body=write_body)
+            return
+        if path == '/quotation/market':
+            data = handle_cls_quotation()
             body = json.dumps(data, ensure_ascii=False, indent=2)
             self._send_text(200, 'application/json; charset=utf-8',
                             body, cache=True, write_body=write_body)
@@ -826,6 +861,7 @@ class RSSHandler(BaseHTTPRequestHandler):
             lines.append(f'<li><a href="{path}">{info["name"]}</a></li>')
         lines.append(f'<li><a href="/xueqiu/user/1247347556">Xueqiu User Example (雪球)</a></li>')
         lines.append('</ul><p><a href="/finance/market">Finance Market JSON</a> | '
+                     '<a href="/quotation/market">Quotation Market JSON</a> | '
                      '<a href="/opml.xml">Import OPML</a> | '
                      '<a href="/healthz?check=1">Source check</a></p>')
         lines.append('<p>Add any URL above to your RSS reader.</p></body></html>')
@@ -868,14 +904,15 @@ def init_cdp():
     """Initialize CDP engine with persistent CLS finance page."""
     global cdp_engine
     if not ensure_chrome():
-        print('  ✗ Chrome not available. /finance/market and Xueqiu will return errors.')
+        print('  ✗ Chrome not available. /finance/market, /quotation/market and Xueqiu will return errors.')
         return
     cdp_engine = CDPEngine()
     if not cdp_engine.start():
         print('  ✗ Failed to connect to Chrome CDP.')
         return
     cdp_engine.add_page('cls_finance', 'https://www.cls.cn/finance')
-    print(f'  ✓ CDP engine ready — finance market data updates every 15s')
+    cdp_engine.add_page('cls_quotation', 'https://www.cls.cn/quotation')
+    print(f'  ✓ CDP engine ready — finance & quotation data updates every 15s')
 
 
 def main():
@@ -898,6 +935,7 @@ def main():
     print(f'  http://localhost:{PORT}/xueqiu/user/{{uid}}  — Xueqiu User (雪球)')
     print(f'\nUtilities:')
     print(f'  http://localhost:{PORT}/finance/market  — Finance Market Data (JSON, needs Chrome CDP)')
+    print(f'  http://localhost:{PORT}/quotation/market  — Quotation Market Data (JSON, needs Chrome CDP)')
     print(f'  http://localhost:{PORT}/opml.xml  — OPML subscription list')
     print(f'  http://localhost:{PORT}/healthz?check=1  — Source health check')
     print(f'\nNote: Xueqiu and Finance Market require Chrome with CDP enabled.')

@@ -32,6 +32,11 @@ API_KEY_MAP = {
     'refresh': 'live_refresh',
     'anchor': 'anchor',
     'basic': 'basic_info',
+    'hot_plate': 'hot_plate',
+    'index_stock_list': 'stock_ranking',
+    'stock_ipo': 'stock_ipo',
+    'bj_stock_info': 'bj_stock_info',
+    'index/home': 'index_home',
 }
 
 
@@ -54,7 +59,10 @@ var _shouldCapture = function(url) {
     return url.indexOf('emotion') > -1 || url.indexOf('articles') > -1 ||
            url.indexOf('up_down') > -1 || url.indexOf('tline') > -1 ||
            url.indexOf('refresh') > -1 || url.indexOf('anchor') > -1 ||
-           url.indexOf('basic') > -1;
+           url.indexOf('basic') > -1 ||
+           url.indexOf('hot_plate') > -1 || url.indexOf('index_stock_list') > -1 ||
+           url.indexOf('stock_ipo') > -1 || url.indexOf('bj_stock_info') > -1 ||
+           url.indexOf('index/home') > -1;
 };
 
 var _origFetch = window.fetch.bind(window);
