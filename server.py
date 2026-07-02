@@ -511,6 +511,28 @@ def handle_wallstreetcn_live(feed_url=None):
 cdp_engine = None
 
 
+# Expected CDP data keys per page — ensures external callers always get a
+# consistent schema (missing keys → null) instead of silent omissions.
+_FINANCE_EXPECTED_KEYS = frozenset({
+    'market_sentiment', 'articles', 'advance_decline',
+    'timeline', 'live_refresh', 'anchor', 'basic_info',
+})
+
+_QUOTATION_EXPECTED_KEYS = frozenset({
+    'hot_plate', 'stock_ranking', 'stock_ipo',
+    'bj_stock_info', 'index_home', 'timeline', 'basic_info',
+})
+
+
+def _fill_missing(result, data, expected_keys):
+    """Fill expected keys not in data as null, preserving extra keys."""
+    for key in expected_keys:
+        result[key] = data.get(key)
+    for k, v in data.items():
+        if k not in expected_keys:
+            result[k] = v
+
+
 def handle_finance_market(feed_url=None):
     """CLS Finance Market Data (财联社看盘) via Chrome CDP.
 
@@ -530,10 +552,12 @@ def handle_finance_market(feed_url=None):
             return {'error': 'Data stale for >120s. CDP page may need reconnection.'}
         return {'error': 'No data collected yet. Page may still be loading.'}
     ws_raw = data.pop('__ws__', None)
+    result = {}
+    _fill_missing(result, data, _FINANCE_EXPECTED_KEYS)
     if ws_raw:
-        data['ws_count'] = len(ws_raw)
-        data['ws_latest'] = ws_raw[-5:] if ws_raw else []
-    return data
+        result['ws_count'] = len(ws_raw)
+        result['ws_latest'] = ws_raw[-5:] if ws_raw else []
+    return result
 
 
 def handle_cls_quotation(feed_url=None):
@@ -555,7 +579,9 @@ def handle_cls_quotation(feed_url=None):
         if age and time.time() - age > 120:
             return {'error': 'Data stale for >120s. CDP page may need reconnection.'}
         return {'error': 'No data collected yet. Page may still be loading.'}
-    return data
+    result = {}
+    _fill_missing(result, data, _QUOTATION_EXPECTED_KEYS)
+    return result
 
 
 def xueqiu_fetch_via_cdp(api_path):
