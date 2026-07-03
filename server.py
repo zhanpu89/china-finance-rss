@@ -43,7 +43,6 @@ CDP_URL = os.getenv('CDP_URL', 'http://localhost:9222')  # Chrome DevTools Proto
 CACHE_TTL = int(os.getenv('CACHE_TTL', '300'))  # Cache TTL in seconds (default: 5 min)
 REQUEST_TIMEOUT = int(os.getenv('REQUEST_TIMEOUT', '10'))
 PUBLIC_BASE_URL = os.getenv('PUBLIC_BASE_URL', '').rstrip('/')
-CLS_STOCK_CODE = os.getenv('CLS_STOCK_CODE', 'sz300139')  # Default stock for CLS detail page
 
 # In-memory cache with thread safety
 cache = {}
@@ -525,7 +524,7 @@ _QUOTATION_EXPECTED_KEYS = frozenset({
 })
 
 _STOCK_EXPECTED_KEYS = frozenset({
-    'stock_quote', 'basic_info', 'timeline', 'articles',
+    'basic_info', 'timeline', 'articles',
     'stock_plate', 'stock_company_info',
     'stock_announcement', 'stock_detail',
 })
@@ -585,13 +584,11 @@ def handle_cls_quotation(feed_url=None):
     return result
 
 
-def handle_cls_stock(feed_url=None):
-    """CLS Stock Detail Data (财联社个股详情) via Chrome CDP.
+def handle_cls_stock(stock_code, timeout=30):
+    """CLS Stock Detail Data (财联社个股详情) via persistent CDP page.
 
-    Returns JSON with stock quote, related plates, company info,
-    announcements, and related articles.
-    Data is continuously collected by a persistent CDP page (see cdp_engine.py).
-    Stock code is configured via CLS_STOCK_CODE env var (default: sz300139).
+    Reuses a single hidden tab; navigates to the requested stock code,
+    waits for fresh data, caches the result, and returns immediately.
     """
     global cdp_engine
     if not cdp_engine or not cdp_engine.ready:
@@ -599,7 +596,9 @@ def handle_cls_stock(feed_url=None):
     page = cdp_engine.get_page('cls_stock')
     if not page:
         return {'error': 'Stock page not initialized.'}
+    page.navigate_stock(stock_code, timeout=timeout)
     data = page.get_data()
+    data.pop('stock_quote', None)
     result = {}
     _fill_missing(result, data, _STOCK_EXPECTED_KEYS)
     return result
@@ -829,7 +828,14 @@ class RSSHandler(BaseHTTPRequestHandler):
                             body, cache=True, write_body=write_body)
             return
         if path == '/stock/data':
-            data = handle_cls_stock()
+            params = parse_qs(parsed.query)
+            if 'code' not in params:
+                self._send_text(400, 'application/json; charset=utf-8',
+                                json.dumps({'error': 'Missing ?code= parameter. Usage: /stock/data?code=sh600519'}),
+                                cache=False, write_body=write_body)
+                return
+            stock_code = params['code'][0]
+            data = handle_cls_stock(stock_code)
             body = json.dumps(data, ensure_ascii=False, indent=2)
             self._send_text(200, 'application/json; charset=utf-8',
                             body, cache=True, write_body=write_body)
@@ -922,7 +928,7 @@ class RSSHandler(BaseHTTPRequestHandler):
         lines.append(f'<li><a href="/xueqiu/user/1247347556">Xueqiu User Example (雪球)</a></li>')
         lines.append('</ul><p><a href="/finance/market">Finance Market JSON</a> | '
                      '<a href="/quotation/market">Quotation Market JSON</a> | '
-                     '<a href="/stock/data">Stock Detail JSON</a> | '
+                     '<a href="/stock/data?code=sz300139">Stock Detail JSON (sz300139)</a> | '
                      '<a href="/opml.xml">Import OPML</a> | '
                      '<a href="/healthz?check=1">Source check</a></p>')
         lines.append('<p>Add any URL above to your RSS reader.</p></body></html>')
@@ -973,8 +979,9 @@ def init_cdp():
         return
     cdp_engine.add_page('cls_finance', 'https://www.cls.cn/finance')
     cdp_engine.add_page('cls_quotation', 'https://www.cls.cn/quotation')
-    cdp_engine.add_page('cls_stock', f'https://www.cls.cn/stock?code={CLS_STOCK_CODE}')
-    print(f'  ✓ CDP engine ready — finance, quotation & stock ({CLS_STOCK_CODE}) data updates every ~30s')
+    cdp_engine.add_page('cls_stock', 'https://www.cls.cn/stock?code=sz300139',
+                        heartbeat=False)
+    print(f'  ✓ CDP engine ready — finance, quotation & stock pages')
 
 
 def main():

@@ -28,7 +28,22 @@ Import all built-in feeds with OPML:
 http://localhost:8053/opml.xml
 ```
 
-Check upstream status:
+## JSON Data Endpoints (Chrome CDP required)
+
+These endpoints collect real-time market data via a headless Chrome tab
+(DevTools Protocol). Start the bridge normally — Chrome auto-starts.
+
+| Endpoint | Description |
+| --- | --- |
+| `/finance/market` | CLS market overview: heat, index, stock pools, live feed |
+| `/quotation/market` | CLS quotation: sectors, rankings, NEEQ/BSE, 涨停 data |
+| `/stock/data?code=sz300139` | Single-stock detail (price, timeline, news, fundamentals) |
+
+The stock endpoint requires `?code=` with any CLS stock symbol
+(e.g. `/stock/data?code=sh600519`). Data is collected from a single
+persistent tab that navigates on demand — no per-request tab overhead.
+
+Check upstream source status:
 
 ```text
 http://localhost:8053/healthz?check=1
@@ -42,8 +57,9 @@ http://localhost:8053/healthz?check=1
 | `CACHE_TTL` | `300` | Cache upstream responses |
 | `REQUEST_TIMEOUT` | `10` | Timeout for upstream requests |
 | `PUBLIC_BASE_URL` | auto | Public URL for OPML and RSS self links |
-| `CDP_URL` | `http://localhost:9222` | Chrome DevTools URL for Xueqiu |
+| `CDP_URL` | `http://localhost:9222` | Chrome DevTools URL for CDP pages |
 | `MAX_WORKERS` | `10` | Max concurrent request threads (lower for low-memory servers) |
+
 
 Configuration names are public. Do not commit `.env` files, cookies, tokens,
 private keys, Chrome profiles, or HAR captures.
@@ -76,12 +92,25 @@ docker build -t china-finance-rss .
 docker run -d -p 8053:8053 --name china-finance-rss china-finance-rss
 ```
 
-For 2C2G (2 core, 2GB RAM) servers, limit memory and **disable swap**
-(Chrome under swap causes CDP heartbeat timeouts):
+For 2C2G servers (2 core, 2GB RAM), limit memory and **disable swap**
+(Chrome under swap causes CDP heartbeat timeouts). 2GB is recommended
+when using stock detail queries at 10+ concurrency; 1GB suffices for RSS
+feeds + market overview only:
+
 ```bash
+# 2GB (heavy stock query load)
+docker run -d --memory=2g --memory-swap=2g --memory-reservation=1g \
+  -p 8053:8053 --name china-finance-rss china-finance-rss
+
+# 1GB (RSS feeds + market overview only)
 docker run -d --memory=1g --memory-swap=1g --memory-reservation=768m \
   -p 8053:8053 --name china-finance-rss china-finance-rss
 ```
+
+Stress test results (2GB 2C, concurrency=10, 30 stock detail queries):
+**100% success** — 0 failures, 0 data mismatches, 0 zombie tabs,
+peak memory 630MiB, p95 latency 6.6s. The single persistent tab
+approach ensures memory is reclaimed after each test cycle.
 
 Behind a reverse proxy:
 
@@ -99,6 +128,25 @@ docker run -d -p 8053:8053 \
   item. Use `/healthz?check=1` to see which source failed.
 - Run `python tests/freshness_test.py --duration 300` to monitor CDP data
   update frequency during market hours.
+- Run `python tests/stress_stock.py --concurrency 5 --total 20` to stress-test
+  the stock detail endpoint with multiple real stock codes.
+
+## CDP Architecture
+
+The bridge uses headless Chrome DevTools Protocol for two kinds of pages:
+
+- **Heartbeat pages** (`/finance/market`, `/quotation/market`): a persistent
+  tab with a background thread that polls collected data every 10s, supports
+  TTL expiry and proactive API re-fetch. Data is served from an in-memory
+  cache — zero-latency for callers.
+- **On-demand page** (`/stock/data`): a single persistent tab that navigates
+  to the requested stock code on each query. No heartbeat, no background
+  polling. A re-entrant lock serializes concurrent requests. Chrome crash
+  self-heals via `ensure_chrome()`.
+
+The interceptor JS (`cdp_engine.py:INTERCEPTOR_JS`) hooks `fetch` and
+`XMLHttpRequest` to capture JSON API responses into `window.__cdp_api`,
+which is read by `Runtime.evaluate` on each refresh cycle.
 
 ## 中文简版
 
@@ -114,6 +162,11 @@ python server.py
 
 如果订阅为空或不更新，打开 `http://localhost:8053/healthz?check=1` 看是哪
 个上游源失败。
+
+通过 CDP 自动采集的实时行情数据：
+- `/finance/market` — 盘面热度、指数、股票池、盘口
+- `/quotation/market` — 板块、排名、北交所、涨停数据
+- `/stock/data?code=sz300139` — 个股详情（股价、分时图、新闻、基本面）
 
 雪球需要 Chrome CDP 和已登录的本地浏览器标签页；不要把 CDP 端口暴露到公网，
 也不要提交 cookies、tokens、`.env`、Chrome profile 或 HAR 文件。

@@ -38,7 +38,7 @@ API_KEY_MAP = {
     'bj_stock_info': 'bj_stock_info',
     'index/home': 'index_home',
     # Stock detail page APIs
-    'quote/stock/': 'stock_quote',            # real-time price / fundflow
+    '/quote/stock/': 'stock_quote',           # real-time price / fundflow
     'stock/assoc_plate': 'stock_plate',       # related sectors
     'company_info': 'stock_company_info',     # F10 company info
     'quote/index/ann': 'stock_announcement',  # announcements
@@ -70,7 +70,7 @@ var _shouldCapture = function(url) {
            url.indexOf('hot_plate') > -1 || url.indexOf('index_stock_list') > -1 ||
            url.indexOf('stock_ipo') > -1 || url.indexOf('bj_stock_info') > -1 ||
            url.indexOf('index/home') > -1 ||
-           url.indexOf('quote/stock/') > -1 || url.indexOf('assoc_plate') > -1 ||
+           url.indexOf('/quote/stock/') > -1 || url.indexOf('assoc_plate') > -1 ||
            url.indexOf('company_info') > -1 || url.indexOf('/index/ann') > -1 ||
            url.indexOf('stock/detail') > -1;
 };
@@ -238,7 +238,7 @@ class CDPPage:
     # unrecognised URL with dynamic parameters enters remap_keys.
     _LAST_DATA_MAX_KEYS = 50
 
-    def __init__(self, name, target_url, cdp_host='localhost', cdp_port=9222):
+    def __init__(self, name, target_url, cdp_host='localhost', cdp_port=9222, heartbeat=True):
         self.name = name
         self.target_url = target_url
         self.cdp_host = cdp_host
@@ -247,14 +247,17 @@ class CDPPage:
         self._last_data = {}  # serving cache for external callers
         self.last_updated = time.time()
         self._lock = threading.Lock()
+        self._ws_lock = threading.RLock()
         self._running = True
         self._ws = None
         self._target_id = None
         self._msg_id = 0
         self._key_last_seen = {}  # key -> timestamp of last refresh
         self._api_urls = {}       # remapped_key -> original URL for re-fetch
+        self._navigate_lock = threading.Lock()
         self._connect()
-        threading.Thread(target=self._heartbeat, daemon=True).start()
+        if heartbeat:
+            threading.Thread(target=self._heartbeat, daemon=True).start()
 
     def _http_url(self):
         return f"http://{self.cdp_host}:{self.cdp_port}"
@@ -353,10 +356,11 @@ class CDPPage:
 
     def _evaluate(self, js, timeout=10):
         """Evaluate JS in the page and return the result value."""
-        result = self._send_recv({
-            'id': self._next_id(), 'method': 'Runtime.evaluate',
-            'params': {'expression': js, 'returnByValue': True, 'awaitPromise': True}
-        }, timeout)
+        with self._ws_lock:
+            result = self._send_recv({
+                'id': self._next_id(), 'method': 'Runtime.evaluate',
+                'params': {'expression': js, 'returnByValue': True, 'awaitPromise': True}
+            }, timeout)
         return result.get('result', {}).get('result', {}).get('value')
 
     def _re_fetch_api(self, url):
@@ -569,6 +573,70 @@ class CDPPage:
             pass
         return False
 
+    def _ensure_ws(self):
+        """Reconnect WebSocket if disconnected (stock page, no heartbeat)."""
+        if self._ws:
+            try:
+                if self._evaluate('1', timeout=3):
+                    return True
+            except Exception:
+                pass
+        if self._target_id:
+            self._close_target()
+        try:
+            self._ws.close()
+        except Exception:
+            pass
+        self._ws = None
+        for attempt in range(3):
+            try:
+                self._connect()
+                return True
+            except Exception:
+                if attempt == 0:
+                    ensure_chrome()  # restart Chrome if down
+                time.sleep(2)
+        return False
+
+    def navigate_stock(self, stock_code, timeout=15):
+        """Navigate to a stock code, wait for fresh data, return True on success."""
+        url = f'https://www.cls.cn/stock?code={stock_code}'
+        with self._navigate_lock:
+            if not self._ensure_ws():
+                return False
+            self.cache.clear()
+            self._last_data.clear()
+            self._key_last_seen.clear()
+            self._api_urls.clear()
+            with self._ws_lock:
+                self._evaluate(
+                    'window.__cdp_api={};window.__cdp_refetch={}',
+                    timeout=5)
+                self._send_recv({'id': self._next_id(), 'method': 'Page.navigate',
+                                 'params': {'url': url}}, timeout=15)
+            deadline = time.time() + 20
+            while time.time() < deadline:
+                try:
+                    msg = self._recv(timeout=5)
+                    if msg.get('method') == 'Page.loadEventFired':
+                        break
+                except:
+                    break
+            deadline = time.time() + timeout
+            while time.time() < deadline:
+                self.refresh()
+                data = self.get_data()
+                bi = (data.get('basic_info') or {}).get('data') or {}
+                if bi.get('secu_code') == stock_code:
+                    time.sleep(1)  # let lazy tab APIs finish
+                    self.refresh()
+                    return True
+                time.sleep(0.5)
+            self.refresh()
+            data = self.get_data()
+            bi = (data.get('basic_info') or {}).get('data') or {}
+            return bi.get('secu_code') == stock_code
+
     def close(self):
         self._running = False
         try:
@@ -601,12 +669,13 @@ class CDPEngine:
         except:
             return False
 
-    def add_page(self, name, target_url):
+    def add_page(self, name, target_url, heartbeat=True):
         """Create and register a persistent CDP page."""
         port = urlparse(CDP_URL).port or 9222
         host = urlparse(CDP_URL).hostname or 'localhost'
         try:
-            page = CDPPage(name, target_url, cdp_host=host, cdp_port=port)
+            page = CDPPage(name, target_url, cdp_host=host, cdp_port=port,
+                           heartbeat=heartbeat)
             self.pages[name] = page
             return page
         except Exception as e:
