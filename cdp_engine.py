@@ -37,6 +37,12 @@ API_KEY_MAP = {
     'stock_ipo': 'stock_ipo',
     'bj_stock_info': 'bj_stock_info',
     'index/home': 'index_home',
+    # Stock detail page APIs
+    'quote/stock/': 'stock_quote',            # real-time price / fundflow
+    'stock/assoc_plate': 'stock_plate',       # related sectors
+    'company_info': 'stock_company_info',     # F10 company info
+    'quote/index/ann': 'stock_announcement',  # announcements
+    'stock/detail': 'stock_detail',           # stock detail (if used)
 }
 
 
@@ -63,7 +69,10 @@ var _shouldCapture = function(url) {
            url.indexOf('basic') > -1 ||
            url.indexOf('hot_plate') > -1 || url.indexOf('index_stock_list') > -1 ||
            url.indexOf('stock_ipo') > -1 || url.indexOf('bj_stock_info') > -1 ||
-           url.indexOf('index/home') > -1;
+           url.indexOf('index/home') > -1 ||
+           url.indexOf('quote/stock/') > -1 || url.indexOf('assoc_plate') > -1 ||
+           url.indexOf('company_info') > -1 || url.indexOf('/index/ann') > -1 ||
+           url.indexOf('stock/detail') > -1;
 };
 
 var _origFetch = window.fetch.bind(window);

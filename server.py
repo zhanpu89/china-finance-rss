@@ -43,6 +43,7 @@ CDP_URL = os.getenv('CDP_URL', 'http://localhost:9222')  # Chrome DevTools Proto
 CACHE_TTL = int(os.getenv('CACHE_TTL', '300'))  # Cache TTL in seconds (default: 5 min)
 REQUEST_TIMEOUT = int(os.getenv('REQUEST_TIMEOUT', '10'))
 PUBLIC_BASE_URL = os.getenv('PUBLIC_BASE_URL', '').rstrip('/')
+CLS_STOCK_CODE = os.getenv('CLS_STOCK_CODE', 'sz300139')  # Default stock for CLS detail page
 
 # In-memory cache with thread safety
 cache = {}
@@ -523,6 +524,12 @@ _QUOTATION_EXPECTED_KEYS = frozenset({
     'bj_stock_info', 'index_home', 'timeline', 'basic_info',
 })
 
+_STOCK_EXPECTED_KEYS = frozenset({
+    'stock_quote', 'basic_info', 'timeline', 'articles',
+    'stock_plate', 'stock_company_info',
+    'stock_announcement', 'stock_detail',
+})
+
 
 def _fill_missing(result, data, expected_keys):
     """Fill expected keys not in data as null, preserving extra keys."""
@@ -575,6 +582,26 @@ def handle_cls_quotation(feed_url=None):
     data = page.get_data()
     result = {}
     _fill_missing(result, data, _QUOTATION_EXPECTED_KEYS)
+    return result
+
+
+def handle_cls_stock(feed_url=None):
+    """CLS Stock Detail Data (财联社个股详情) via Chrome CDP.
+
+    Returns JSON with stock quote, related plates, company info,
+    announcements, and related articles.
+    Data is continuously collected by a persistent CDP page (see cdp_engine.py).
+    Stock code is configured via CLS_STOCK_CODE env var (default: sz300139).
+    """
+    global cdp_engine
+    if not cdp_engine or not cdp_engine.ready:
+        return {'error': 'Chrome CDP not available. See README.'}
+    page = cdp_engine.get_page('cls_stock')
+    if not page:
+        return {'error': 'Stock page not initialized.'}
+    data = page.get_data()
+    result = {}
+    _fill_missing(result, data, _STOCK_EXPECTED_KEYS)
     return result
 
 
@@ -730,6 +757,13 @@ def build_health_payload(base_url, check_sources=False):
         'status': 'requires_chrome_cdp',
     })
 
+    feeds.append({
+        'name': 'CLS Stock Detail (财联社个股详情)',
+        'path': '/stock/data',
+        'url': base_url + '/stock/data',
+        'status': 'requires_chrome_cdp',
+    })
+
     return {
         'status': status,
         'cache_ttl': CACHE_TTL,
@@ -790,6 +824,12 @@ class RSSHandler(BaseHTTPRequestHandler):
             return
         if path == '/quotation/market':
             data = handle_cls_quotation()
+            body = json.dumps(data, ensure_ascii=False, indent=2)
+            self._send_text(200, 'application/json; charset=utf-8',
+                            body, cache=True, write_body=write_body)
+            return
+        if path == '/stock/data':
+            data = handle_cls_stock()
             body = json.dumps(data, ensure_ascii=False, indent=2)
             self._send_text(200, 'application/json; charset=utf-8',
                             body, cache=True, write_body=write_body)
@@ -882,6 +922,7 @@ class RSSHandler(BaseHTTPRequestHandler):
         lines.append(f'<li><a href="/xueqiu/user/1247347556">Xueqiu User Example (雪球)</a></li>')
         lines.append('</ul><p><a href="/finance/market">Finance Market JSON</a> | '
                      '<a href="/quotation/market">Quotation Market JSON</a> | '
+                     '<a href="/stock/data">Stock Detail JSON</a> | '
                      '<a href="/opml.xml">Import OPML</a> | '
                      '<a href="/healthz?check=1">Source check</a></p>')
         lines.append('<p>Add any URL above to your RSS reader.</p></body></html>')
@@ -924,7 +965,7 @@ def init_cdp():
     """Initialize CDP engine with persistent CLS finance page."""
     global cdp_engine
     if not ensure_chrome():
-        print('  ✗ Chrome not available. /finance/market, /quotation/market and Xueqiu will return errors.')
+        print('  ✗ Chrome not available. CDP endpoints will return errors.')
         return
     cdp_engine = CDPEngine()
     if not cdp_engine.start():
@@ -932,7 +973,8 @@ def init_cdp():
         return
     cdp_engine.add_page('cls_finance', 'https://www.cls.cn/finance')
     cdp_engine.add_page('cls_quotation', 'https://www.cls.cn/quotation')
-    print(f'  ✓ CDP engine ready — finance & quotation data updates every ~30s')
+    cdp_engine.add_page('cls_stock', f'https://www.cls.cn/stock?code={CLS_STOCK_CODE}')
+    print(f'  ✓ CDP engine ready — finance, quotation & stock ({CLS_STOCK_CODE}) data updates every ~30s')
 
 
 def main():
@@ -956,9 +998,10 @@ def main():
     print(f'\nUtilities:')
     print(f'  http://localhost:{PORT}/finance/market  — Finance Market Data (JSON, needs Chrome CDP)')
     print(f'  http://localhost:{PORT}/quotation/market  — Quotation Market Data (JSON, needs Chrome CDP)')
+    print(f'  http://localhost:{PORT}/stock/data  — Stock Detail Data (JSON, needs Chrome CDP)')
     print(f'  http://localhost:{PORT}/opml.xml  — OPML subscription list')
     print(f'  http://localhost:{PORT}/healthz?check=1  — Source health check')
-    print(f'\nNote: Xueqiu and Finance Market require Chrome with CDP enabled.')
+    print(f'\nNote: Xueqiu, Finance Market, Quotation and Stock Detail require Chrome with CDP enabled.')
     print(f'Visit http://localhost:{PORT}/ for the web index.\n')
 
     server = BoundedThreadPoolServer(('0.0.0.0', PORT), RSSHandler)
