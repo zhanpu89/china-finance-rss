@@ -985,8 +985,11 @@ def init_cdp():
 
 
 def main():
-    signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
-    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    def _signal_handler(signum, frame):
+        print(f'[exit] received signal {signum} ({signal.Signals(signum).name})')
+        sys.exit(0)
+    signal.signal(signal.SIGINT, _signal_handler)
+    signal.signal(signal.SIGTERM, _signal_handler)
 
     @atexit.register
     def _shutdown():

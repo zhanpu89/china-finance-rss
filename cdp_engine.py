@@ -15,6 +15,7 @@ this reduces API latency from 3-8s to <1ms and captures WebSocket frames.
 import atexit
 import json
 import os
+import signal
 import subprocess
 import threading
 import time
@@ -23,6 +24,8 @@ from urllib.parse import urlparse
 
 
 CDP_URL = os.getenv('CDP_URL', 'http://localhost:9222')
+_chrome_restart_lock = threading.Lock()
+_last_chrome_restart = 0
 
 API_KEY_MAP = {
     'emotion': 'market_sentiment',
@@ -122,6 +125,41 @@ window.WebSocket = function(url, protocols) {
 """
 
 
+def _chrome_pids_by_flag(flag):
+    """Return PIDs of processes whose cmdline contains the given flag."""
+    pids = []
+    try:
+        for entry in os.listdir('/proc/'):
+            if not entry.isdigit():
+                continue
+            try:
+                cmdline = open(f'/proc/{entry}/cmdline', 'rb').read().decode('utf-8', errors='replace')
+                if flag in cmdline:
+                    pids.append(int(entry))
+            except (OSError, IOError):
+                pass
+    except Exception:
+        pass
+    return pids
+
+
+def _kill_chrome_on_port(port):
+    """Kill any Chrome processes bound to the given debugging port."""
+    flag = f'remote-debugging-port={port}'
+    for pid in _chrome_pids_by_flag(flag):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+    # Also try pkill as fallback for processes not visible in /proc
+    try:
+        subprocess.run(['pkill', '-f', flag],
+                       capture_output=True, timeout=5)
+    except Exception:
+        pass
+    time.sleep(0.5)
+
+
 def ensure_chrome(cdp_url=CDP_URL):
     """Start headless Chrome if not running. Returns True if Chrome is available."""
     port = urlparse(cdp_url).port or 9222
@@ -133,31 +171,48 @@ def ensure_chrome(cdp_url=CDP_URL):
     except Exception:
         pass
 
-    candidates = [
-        'google-chrome', 'google-chrome-stable', 'chromium',
-        'chromium-browser', 'google-chrome-unstable',
-    ]
-    chrome = next((c for c in candidates if subprocess.run(
-        ['which', c], capture_output=True).returncode == 0), None)
-    if not chrome:
-        return False
-
-    subprocess.Popen([
-        chrome, '--headless', f'--remote-debugging-port={port}',
-        '--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage',
-        '--disable-extensions', '--disable-default-apps',
-        '--disable-component-extensions-with-background-pages',
-        '--js-flags=--max_old_space_size=512',
-        '--remote-allow-origins=*',
-    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-    for _ in range(15):
+    global _last_chrome_restart
+    now = time.time()
+    with _chrome_restart_lock:
+        if now - _last_chrome_restart < 60:
+            print(f'[CDP] Chrome restart throttled (last restart: {_last_chrome_restart:.0f}, now: {now:.0f})')
+            return False
+        # Double-check after lock
         try:
             urllib.request.urlopen(f"http://{host}:{port}/json", timeout=2)
             return True
-        except:
-            time.sleep(1)
-    return False
+        except Exception:
+            pass
+
+        _kill_chrome_on_port(port)
+        _last_chrome_restart = time.time()
+
+        candidates = [
+            'google-chrome', 'google-chrome-stable', 'chromium',
+            'chromium-browser', 'google-chrome-unstable',
+        ]
+        chrome = next((c for c in candidates if subprocess.run(
+            ['which', c], capture_output=True).returncode == 0), None)
+        if not chrome:
+            return False
+
+        print(f'[CDP] starting {chrome} --headless --remote-debugging-port={port}')
+        subprocess.Popen([
+            chrome, '--headless', f'--remote-debugging-port={port}',
+            '--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage',
+            '--disable-extensions', '--disable-default-apps',
+            '--disable-component-extensions-with-background-pages',
+            '--js-flags=--max_old_space_size=512',
+            '--remote-allow-origins=*',
+        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+        for _ in range(15):
+            try:
+                urllib.request.urlopen(f"http://{host}:{port}/json", timeout=2)
+                return True
+            except:
+                time.sleep(1)
+        return False
 
 
 def find_tab(pattern, cdp_url=CDP_URL):
