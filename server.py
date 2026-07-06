@@ -774,9 +774,11 @@ def build_health_payload(base_url, check_sources=False):
 class RSSHandler(BaseHTTPRequestHandler):
     """HTTP request handler for RSS feeds."""
 
+    timeout = 30  # seconds — prevents slow clients from tying up worker threads
+
     def log_date_time_string(self):
         """Return current Beijing time (UTC+8) for access logs."""
-        from time import time, strftime, gmtime
+        from time import strftime, gmtime
         return strftime('%d/%b/%Y %H:%M:%S', gmtime(time() + 28800))
 
     def log_message(self, format, *args):
