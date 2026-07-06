@@ -1,0 +1,20 @@
+services:
+  rss:
+    build: .
+    container_name: china-finance-rss
+    restart: unless-stopped
+    ports:
+      - "8053:8053"
+    environment:
+      - PORT=8053
+      - CACHE_TTL=300
+      - REQUEST_TIMEOUT=10
+      - MAX_WORKERS=10
+      - PUBLIC_BASE_URL=
+    mem_limit: 2g
+    mem_reservation: 1g
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
