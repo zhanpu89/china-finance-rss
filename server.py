@@ -528,6 +528,7 @@ _STOCK_EXPECTED_KEYS = frozenset({
     'stock_plate', 'stock_company_info',
     'stock_announcement', 'stock_detail',
     'stock_quote', 'fund_flow',
+    'stock_f10', 'stock_shareholder',
 })
 
 

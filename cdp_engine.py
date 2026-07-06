@@ -50,6 +50,9 @@ API_KEY_MAP = {
     'capital_flow': 'fund_flow',              # fund flow (alt path)
     'money_stream': 'fund_flow',              # fund flow (alt path)
     'zjjl': 'fund_flow',                      # fund flow (拼音缩写)
+    'f10': 'stock_f10',                       # F10 info (general)
+    'finance_main': 'stock_f10',              # F10 financial summary
+    'shareholder': 'stock_shareholder',       # F10 shareholder info
 }
 
 
@@ -81,7 +84,9 @@ var _shouldCapture = function(url) {
            url.indexOf('company_info') > -1 || url.indexOf('/index/ann') > -1 ||
            url.indexOf('stock/detail') > -1 ||
            url.indexOf('fund_flow') > -1 || url.indexOf('capital_flow') > -1 ||
-           url.indexOf('money_stream') > -1 || url.indexOf('zjjl') > -1;
+           url.indexOf('money_stream') > -1 || url.indexOf('zjjl') > -1 ||
+           url.indexOf('f10') > -1 || url.indexOf('shareholder') > -1 ||
+           url.indexOf('finance_main') > -1;
 };
 
 var _origFetch = window.fetch.bind(window);
@@ -691,10 +696,18 @@ class CDPPage:
                 if bi.get('secu_code') == stock_code:
                     time.sleep(1)  # let lazy tab APIs finish
                     self.refresh()
-                    # Click fund flow tab and wait for data
-                    self._click_fund_flow_tab()
-                    time.sleep(2)
-                    self.refresh()
+                    # BSE (北交所) stocks lack fund flow and F10 tabs — skip them
+                    code_lower = stock_code.lower()
+                    is_bse = code_lower.startswith('bj') or code_lower.endswith('bj')
+                    if not is_bse:
+                        # Click fund flow tab and wait for data
+                        self._click_fund_flow_tab()
+                        time.sleep(2)
+                        self.refresh()
+                        # Click 简况F10 tab and wait for data
+                        self._click_f10_tab()
+                        time.sleep(2)
+                        self.refresh()
                     return True
                 time.sleep(0.5)
             self.refresh()
@@ -722,6 +735,38 @@ class CDPPage:
                 for (var i=0; i<items.length; i++) {
                     var t = items[i].textContent.trim();
                     if (t === '资金流向' || t === '资金' || t === '主力') {
+                        items[i].click();
+                        return t;
+                    }
+                }
+                return null;
+            })()
+        """
+        try:
+            self._evaluate(js, timeout=5)
+        except Exception:
+            pass
+
+    def _click_f10_tab(self):
+        """Click the 简况F10 tab on the stock detail page."""
+        js = """
+            (function(){
+                var container = document.querySelector('[class*="tab" i]') || document.querySelector('[class*="detail" i]');
+                if (!container) {
+                    var els = document.querySelectorAll('span,div,a,li');
+                    for (var i=0; i<els.length; i++) {
+                        var t = els[i].textContent.trim();
+                        if (t === '简况F10' || t === 'F10' || t === '公司概况') {
+                            els[i].click();
+                            return t;
+                        }
+                    }
+                    return null;
+                }
+                var items = container.querySelectorAll('span,div,a,li');
+                for (var i=0; i<items.length; i++) {
+                    var t = items[i].textContent.trim();
+                    if (t === '简况F10' || t === 'F10' || t === '公司概况') {
                         items[i].click();
                         return t;
                     }
