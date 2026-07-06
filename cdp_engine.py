@@ -46,6 +46,10 @@ API_KEY_MAP = {
     'company_info': 'stock_company_info',     # F10 company info
     'quote/index/ann': 'stock_announcement',  # announcements
     'stock/detail': 'stock_detail',           # stock detail (if used)
+    'fund_flow': 'fund_flow',                 # fund flow
+    'capital_flow': 'fund_flow',              # fund flow (alt path)
+    'money_stream': 'fund_flow',              # fund flow (alt path)
+    'zjjl': 'fund_flow',                      # fund flow (拼音缩写)
 }
 
 
@@ -75,7 +79,9 @@ var _shouldCapture = function(url) {
            url.indexOf('index/home') > -1 ||
            url.indexOf('/quote/stock/') > -1 || url.indexOf('assoc_plate') > -1 ||
            url.indexOf('company_info') > -1 || url.indexOf('/index/ann') > -1 ||
-           url.indexOf('stock/detail') > -1;
+           url.indexOf('stock/detail') > -1 ||
+           url.indexOf('fund_flow') > -1 || url.indexOf('capital_flow') > -1 ||
+           url.indexOf('money_stream') > -1 || url.indexOf('zjjl') > -1;
 };
 
 var _origFetch = window.fetch.bind(window);
@@ -685,12 +691,48 @@ class CDPPage:
                 if bi.get('secu_code') == stock_code:
                     time.sleep(1)  # let lazy tab APIs finish
                     self.refresh()
+                    # Click fund flow tab and wait for data
+                    self._click_fund_flow_tab()
+                    time.sleep(2)
+                    self.refresh()
                     return True
                 time.sleep(0.5)
             self.refresh()
             data = self.get_data()
             bi = (data.get('basic_info') or {}).get('data') or {}
             return bi.get('secu_code') == stock_code
+
+    def _click_fund_flow_tab(self):
+        """Click the fund flow (资金流向) tab on the stock detail page."""
+        js = """
+            (function(){
+                var container = document.querySelector('[class*="tab" i]') || document.querySelector('[class*="detail" i]');
+                if (!container) {
+                    var els = document.querySelectorAll('span,div,a,li');
+                    for (var i=0; i<els.length; i++) {
+                        var t = els[i].textContent.trim();
+                        if (t === '资金流向' || t === '资金' || t === '主力') {
+                            els[i].click();
+                            return t;
+                        }
+                    }
+                    return null;
+                }
+                var items = container.querySelectorAll('span,div,a,li');
+                for (var i=0; i<items.length; i++) {
+                    var t = items[i].textContent.trim();
+                    if (t === '资金流向' || t === '资金' || t === '主力') {
+                        items[i].click();
+                        return t;
+                    }
+                }
+                return null;
+            })()
+        """
+        try:
+            self._evaluate(js, timeout=5)
+        except Exception:
+            pass
 
     def close(self):
         self._running = False

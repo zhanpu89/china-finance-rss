@@ -527,6 +527,7 @@ _STOCK_EXPECTED_KEYS = frozenset({
     'basic_info', 'timeline', 'articles',
     'stock_plate', 'stock_company_info',
     'stock_announcement', 'stock_detail',
+    'stock_quote', 'fund_flow',
 })
 
 
@@ -598,7 +599,6 @@ def handle_cls_stock(stock_code, timeout=30):
         return {'error': 'Stock page not initialized.'}
     page.navigate_stock(stock_code, timeout=timeout)
     data = page.get_data()
-    data.pop('stock_quote', None)
     result = {}
     _fill_missing(result, data, _STOCK_EXPECTED_KEYS)
     return result
