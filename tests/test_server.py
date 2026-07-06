@@ -54,6 +54,8 @@ class FeedGenerationTests(unittest.TestCase):
         self.assertIn("https://feeds.example.com/jin10/flash", urls)
         self.assertIn("https://feeds.example.com/wallstreetcn/live", urls)
         self.assertIn("https://feeds.example.com/xueqiu/user/1247347556", urls)
+        # Hotplate is a JSON endpoint, not an RSS feed — not in OPML
+        self.assertNotIn("https://feeds.example.com/cls/hotplate", urls)
 
 
 class TimeParsingTests(unittest.TestCase):
@@ -125,6 +127,26 @@ class SourceParserTests(unittest.TestCase):
         self.assertEqual(items[0]["description"], "周末定价权大重估")
         self.assertEqual(items[0]["link"], "https://flash.jin10.com/detail/20260612233021430800")
         self.assertEqual(items[0]["guid"], "jin10_20260612233021430800")
+
+    def test_handle_cls_hotplate_returns_three_plate_keys(self):
+        """The handler returns a dict with plate_industry/concept/area keys.
+        Each value is a dict (data from API or error if fetch fails)."""
+        result = server.handle_cls_hotplate()
+        for key in ('plate_industry', 'plate_concept', 'plate_area'):
+            self.assertIn(key, result)
+            self.assertIsInstance(result[key], dict)
+
+    def test_handle_cls_hotplate_includes_hot_plates(self):
+        """The handler includes a hot_plates key with 6 items (3 top + 3 last)."""
+        result = server.handle_cls_hotplate()
+        self.assertIn('hot_plates', result)
+        self.assertIsInstance(result['hot_plates'], list)
+        self.assertEqual(len(result['hot_plates']), 6)
+
+    def test_healthz_payload_includes_hotplate_endpoint(self):
+        payload = server.build_health_payload("https://feeds.example.com")
+        paths = {f['path'] for f in payload['feeds']}
+        self.assertIn('/cls/hotplate', paths)
 
     def test_parse_wallstreetcn_items_prefers_plain_text_content(self):
         payload = {

@@ -59,18 +59,28 @@ CACHE_JITTER = 0.2  # ±20% random jitter on TTL to stagger expiry
 MAX_WORKERS = int(os.getenv('MAX_WORKERS', '10'))  # Max concurrent request threads
 
 
-def _expires_at():
-    """Return an absolute expiry timestamp with ±CACHE_JITTER random jitter."""
-    return time() + CACHE_TTL * (1 + random.uniform(-CACHE_JITTER, CACHE_JITTER))
+def _expires_at(ttl=None):
+    """Return an absolute expiry timestamp with ±CACHE_JITTER random jitter.
+    
+    Args:
+        ttl: Custom TTL in seconds (defaults to CACHE_TTL). Use per-URL TTL
+             offsets to stagger expiry across related URLs.
+    """
+    base = (ttl if ttl is not None else CACHE_TTL)
+    return time() + base * (1 + random.uniform(-CACHE_JITTER, CACHE_JITTER))
 
 
-def _cache_put(d, key, value):
-    """Write to a cache dict with LRU eviction and jittered expiry."""
+def _cache_put(d, key, value, ttl=None):
+    """Write to a cache dict with LRU eviction and jittered expiry.
+    
+    Args:
+        ttl: Custom TTL override (defaults to CACHE_TTL in _expires_at).
+    """
     with _cache_lock:
         if len(d) >= MAX_CACHE_SIZE:
             oldest = min(d, key=lambda k: d[k]['time'])
             del d[oldest]
-        d[key] = {'data': value, 'time': time(), 'expires_at': _expires_at()}
+        d[key] = {'data': value, 'time': time(), 'expires_at': _expires_at(ttl)}
 
 
 def _cache_fresh(entry):
@@ -78,7 +88,7 @@ def _cache_fresh(entry):
     return entry and time() < entry['expires_at']
 
 
-def fetch_json(url, headers=None):
+def fetch_json(url, headers=None, ttl=None):
     """Fetch URL with in-memory cache and stampede protection.
 
     Uses a per-URL Event for leader election:
@@ -86,6 +96,10 @@ def fetch_json(url, headers=None):
       - Followers wait on the Event, then read from cache
       - If leader fails, the first follower after cleanup becomes the new leader
       - Follower fallback also writes to cache to prevent cascading misses
+
+    Args:
+        ttl: Custom TTL override for the cache entry (defaults to CACHE_TTL).
+             Use per-URL offsets to stagger expiry across related URLs.
     """
     now = time()
     with _cache_lock:
@@ -107,7 +121,7 @@ def fetch_json(url, headers=None):
             req = Request(url, headers=headers or {})
             with urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
                 data = resp.read().decode('utf-8')
-            _cache_put(cache, url, data)
+            _cache_put(cache, url, data, ttl=ttl)
             return data
         finally:
             event.set()
@@ -122,7 +136,7 @@ def fetch_json(url, headers=None):
         req = Request(url, headers=headers or {})
         with urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
             data = resp.read().decode('utf-8')
-        _cache_put(cache, url, data)
+        _cache_put(cache, url, data, ttl=ttl)
         return data
 
 
@@ -527,9 +541,25 @@ _STOCK_EXPECTED_KEYS = frozenset({
     'basic_info', 'timeline', 'articles',
     'stock_plate', 'stock_company_info',
     'stock_announcement', 'stock_detail',
-    'stock_quote', 'fund_flow',
+    'stock_quote',
     'stock_f10', 'stock_shareholder',
 })
+
+# x-quote.cls.cn API base for hotplate data
+_HOTPLATE_BASE_URL = 'https://x-quote.cls.cn/web_quote/plate/plate_list'
+_HOTPLATE_HEADERS = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.cls.cn/hotplate'}
+
+# Fund flow REST API (no CDP needed — direct REST call)
+_FUNDFLOW_BASE_URL = 'https://x-quote.cls.cn/quote/stock/fundflow'
+_FUNDFLOW_HEADERS = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.cls.cn/stock'}
+
+# Background prefetch cache for fund flow (30-stock pool)
+_fundflow_cache = {}            # stock_code -> data dict
+_fundflow_pool = {}             # stock_code -> last_access_time (for LRU evict)
+_fundflow_cache_lock = threading.Lock()
+_FUNDFLOW_POOL_REFRESH = 25     # seconds between refresh cycles
+_FUNDFLOW_MAX_POOL = 500        # safety cap to prevent OOM from runaway queries
+_MAX_BATCH_SIZE = 50             # max stock codes per batch request
 
 
 def _fill_missing(result, data, expected_keys):
@@ -602,6 +632,194 @@ def handle_cls_stock(stock_code, timeout=30):
     data = page.get_data()
     result = {}
     _fill_missing(result, data, _STOCK_EXPECTED_KEYS)
+    return result
+
+
+def fetch_cls_fundflow(stock_code):
+    """Fetch fund flow — CDP evaluate_fetch first, REST fallback.
+
+    Uses fetch_json cache (15s TTL) for user-facing requests.
+    The background prefetch loop uses _fundflow_direct_fetch instead.
+    """
+    global cdp_engine
+    if cdp_engine and cdp_engine.ready:
+        page = cdp_engine.get_page('cls_fundflow')
+        if page:
+            url = f'{_FUNDFLOW_BASE_URL}?secu_code={stock_code}'
+            result = page.evaluate_fetch(url, timeout=15)
+            if result and isinstance(result, dict) and result.get('code') == 200:
+                return result.get('data')
+
+    # Fallback: use fetch_json with cache
+    url = f'{_FUNDFLOW_BASE_URL}?secu_code={stock_code}'
+    try:
+        raw = json.loads(fetch_json(url, _FUNDFLOW_HEADERS, ttl=15))
+        if raw.get('code') == 200:
+            return raw.get('data')
+    except Exception:
+        pass
+    return None
+
+
+def _fundflow_direct_fetch(stock_code):
+    """Fetch fund flow data via CDP browser context (anti-ban).
+
+    Uses the persistent cls_fundflow page's JavaScript runtime to fire
+    a fetch() call — request comes from the browser (same IP, cookies,
+    headers as a real CLS user). Falls back to direct REST if CDP is
+    not available or fails.
+    """
+    global cdp_engine
+    if cdp_engine and cdp_engine.ready:
+        page = cdp_engine.get_page('cls_fundflow')
+        if page:
+            url = f'{_FUNDFLOW_BASE_URL}?secu_code={stock_code}'
+            result = page.evaluate_fetch(url, timeout=15)
+            if result and isinstance(result, dict) and result.get('code') == 200:
+                return result.get('data')
+            # Evaluate may return the raw data differently; check for error field
+            if result and isinstance(result, dict) and result.get('error'):
+                print(f'[fundflow] CDP fetch error for {stock_code}: {result["error"]}')
+
+    # Fallback: direct REST call (no browser protection)
+    req = Request(f'{_FUNDFLOW_BASE_URL}?secu_code={stock_code}',
+                   headers=_FUNDFLOW_HEADERS)
+    try:
+        with urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
+            raw = json.loads(resp.read().decode('utf-8'))
+            if raw.get('code') == 200:
+                return raw.get('data')
+    except Exception:
+        pass
+    return None
+
+
+def handle_cls_fundflow(codes):
+    """Fund Flow Data (资金流向) — REST-based, batch supported, no CDP needed.
+
+    Args:
+        codes: list of stock code strings.
+    Returns:
+        dict of {stock_code: data_or_None, ...}.
+    Auto-registers all codes into the background prefetch pool
+    with LRU eviction when _FUNDFLOW_MAX_POOL is exceeded.
+    """
+    # Deduplicate while preserving order
+    seen = set()
+    codes = [c for c in codes if not (c in seen or seen.add(c))]
+
+    if not codes:
+        return {}
+
+    now = time()
+    with _fundflow_cache_lock:
+        for code in codes:
+            _fundflow_pool[code] = now
+        # LRU evict: trim pool to max size, remove oldest entries
+        if len(_fundflow_pool) > _FUNDFLOW_MAX_POOL:
+            excess = sorted(_fundflow_pool, key=_fundflow_pool.get)[:len(_fundflow_pool) - _FUNDFLOW_MAX_POOL]
+            for code in excess:
+                del _fundflow_pool[code]
+                _fundflow_cache.pop(code, None)
+
+    result = {}
+    missing = []
+    with _fundflow_cache_lock:
+        for code in codes:
+            cached = _fundflow_cache.get(code)
+            if cached is not None:
+                result[code] = cached
+            else:
+                missing.append(code)
+
+    for code in missing:
+        data = fetch_cls_fundflow(code)
+        if data:
+            with _fundflow_cache_lock:
+                _fundflow_cache[code] = data
+            result[code] = data
+        else:
+            result[code] = None
+
+    return result
+
+
+def _fundflow_prefetch_loop():
+    """Background thread: refresh fund flow for all auto-registered stocks.
+
+    Runs every FUNDFLOW_POOL_REFRESH seconds. Bypasses fetch_json cache
+    so data is always fresh. One failed stock does not block others.
+    """
+    while True:
+        time.sleep(_FUNDFLOW_POOL_REFRESH)
+        with _fundflow_cache_lock:
+            codes = list(_fundflow_pool.keys())
+        if not codes:
+            continue
+        for code in codes:
+            data = _fundflow_direct_fetch(code)
+            if data:
+                with _fundflow_cache_lock:
+                    _fundflow_cache[code] = data
+
+
+def _china_trading_ttl():
+    """Return (base_ttl, stagger_step) for China A-share trading status.
+
+    Trading hours (Mon-Fri, UTC+8): 09:30-11:30, 13:00-15:00.
+    During trading → short TTL (30s) to keep quant data fresh.
+    Outside trading → normal TTL (300s).
+    """
+    now_utc = datetime.now(timezone.utc)
+    now_cst = now_utc + timedelta(hours=8)
+    if now_cst.weekday() >= 5:
+        return (300, 90)                    # weekend, long TTL
+    h, m = now_cst.hour, now_cst.minute
+    in_morning = (h == 9 and m >= 30) or (10 <= h <= 10) or (h == 11 and m <= 30)
+    in_afternoon = (13 <= h <= 14)
+    if in_morning or in_afternoon:
+        return (30, 15)                     # trading hours, short TTL
+    return (300, 90)                        # night / pre-market, long TTL
+
+
+def handle_cls_hotplate(feed_url=None):
+    """CLS Hotplate Data (财联社板块) — uses same sign mechanism as telegraph.
+
+    Returns:
+      plate_industry / plate_concept / plate_area — plate list per type
+      hot_plates — combined top 3 + last 3 hot sectors by fund flow (6 total)
+
+    Cache strategy: each plate type gets a staggered TTL so the three entries
+    do not expire simultaneously, preventing burst re-fetches.
+    During trading hours base=30s, off-hours base=300s.
+    """
+    result = {}
+    hot_plates = None
+    _BASE_TTL, _STAGGER = _china_trading_ttl()
+    _TTL_OFFSETS = {'industry': 0, 'concept': _STAGGER, 'area': _STAGGER * 2}
+    for ptype in ('industry', 'concept', 'area'):
+        params = {
+            'app': 'CailianpressWeb', 'os': 'web', 'sv': '8.7.9',
+            'type': ptype, 'way': 'change', 'page': 1, 'rever': 1,
+        }
+        params['sign'] = cls_sign_params(params)
+        url = f'{_HOTPLATE_BASE_URL}?{urlencode(params)}'
+        try:
+            raw = json.loads(fetch_json(url, _HOTPLATE_HEADERS,
+                                        ttl=_BASE_TTL + _TTL_OFFSETS[ptype]))
+            data = raw.get('data') or raw
+            result[f'plate_{ptype}'] = data
+            # Extract hot plates (6 = 3 top + 3 last) from first successful response
+            if hot_plates is None:
+                mfd = data.get('main_fund_diff') or {}
+                top = mfd.get('top_main_fund_diff') or []
+                last = mfd.get('last_main_fund_diff') or []
+                if top or last:
+                    hot_plates = top + last
+        except Exception as e:
+            result[f'plate_{ptype}'] = {'error': str(e)}
+    if hot_plates:
+        result['hot_plates'] = hot_plates
     return result
 
 
@@ -764,6 +982,20 @@ def build_health_payload(base_url, check_sources=False):
         'status': 'requires_chrome_cdp',
     })
 
+    feeds.append({
+        'name': 'CLS Stock Fund Flow (财联社个股资金流向)',
+        'path': '/stock/fundflow',
+        'url': base_url + '/stock/fundflow',
+        'status': 'configured',
+    })
+
+    feeds.append({
+        'name': 'CLS Hotplate (财联社板块)',
+        'path': '/cls/hotplate',
+        'url': base_url + '/cls/hotplate',
+        'status': 'configured',
+    })
+
     return {
         'status': status,
         'cache_ttl': CACHE_TTL,
@@ -839,6 +1071,37 @@ class RSSHandler(BaseHTTPRequestHandler):
                 return
             stock_code = params['code'][0]
             data = handle_cls_stock(stock_code)
+            body = json.dumps(data, ensure_ascii=False, indent=2)
+            self._send_text(200, 'application/json; charset=utf-8',
+                            body, cache=True, write_body=write_body)
+            return
+        if path == '/stock/fundflow':
+            params = parse_qs(parsed.query)
+            if 'code' not in params:
+                self._send_text(400, 'application/json; charset=utf-8',
+                                json.dumps({'error': 'Missing ?code= parameter. Usage: /stock/fundflow?code=sh600519 or /stock/fundflow?code=sh600519,sz000001'}),
+                                cache=False, write_body=write_body)
+                return
+            codes_str = params['code'][0]
+            stock_codes = [c.strip() for c in codes_str.split(',') if c.strip()]
+            if not stock_codes:
+                self._send_text(400, 'application/json; charset=utf-8',
+                                json.dumps({'error': 'No valid stock codes provided.'}),
+                                cache=False, write_body=write_body)
+                return
+            if len(stock_codes) > _MAX_BATCH_SIZE:
+                stock_codes = stock_codes[:_MAX_BATCH_SIZE]
+            data = handle_cls_fundflow(stock_codes)
+            if len(stock_codes) == 1:
+                body = json.dumps({'fund_flow': data.get(stock_codes[0])},
+                                  ensure_ascii=False, indent=2)
+            else:
+                body = json.dumps(data, ensure_ascii=False, indent=2)
+            self._send_text(200, 'application/json; charset=utf-8',
+                            body, cache=True, write_body=write_body)
+            return
+        if path == '/cls/hotplate':
+            data = handle_cls_hotplate()
             body = json.dumps(data, ensure_ascii=False, indent=2)
             self._send_text(200, 'application/json; charset=utf-8',
                             body, cache=True, write_body=write_body)
@@ -930,10 +1193,12 @@ class RSSHandler(BaseHTTPRequestHandler):
             lines.append(f'<li><a href="{path}">{info["name"]}</a></li>')
         lines.append(f'<li><a href="/xueqiu/user/1247347556">Xueqiu User Example (雪球)</a></li>')
         lines.append('</ul><p><a href="/finance/market">Finance Market JSON</a> | '
-                     '<a href="/quotation/market">Quotation Market JSON</a> | '
-                     '<a href="/stock/data?code=sz300139">Stock Detail JSON (sz300139)</a> | '
-                     '<a href="/opml.xml">Import OPML</a> | '
-                     '<a href="/healthz?check=1">Source check</a></p>')
+                      '<a href="/quotation/market">Quotation Market JSON</a> | '
+                      '<a href="/cls/hotplate">Hotplate JSON (板块)</a> | '
+                      '<a href="/stock/data?code=sz300139">Stock Detail JSON (sz300139)</a> | '
+                      '<a href="/stock/fundflow?code=sh600519">Stock Fund Flow JSON (sh600519)</a> | '
+                      '<a href="/opml.xml">Import OPML</a> | '
+                      '<a href="/healthz?check=1">Source check</a></p>')
         lines.append('<p>Add any URL above to your RSS reader.</p></body></html>')
         html = '\n'.join(lines)
         self._send_text(200, 'text/html; charset=utf-8', html,
@@ -984,7 +1249,10 @@ def init_cdp():
     cdp_engine.add_page('cls_quotation', 'https://www.cls.cn/quotation')
     cdp_engine.add_page('cls_stock', 'https://www.cls.cn/stock?code=sz300139',
                         heartbeat=False)
-    print(f'  ✓ CDP engine ready — finance, quotation & stock pages')
+    # Lightweight page for fund flow API calls — no heartbeat, no navigation
+    cdp_engine.add_page('cls_fundflow', 'https://www.cls.cn/stock',
+                        heartbeat=False)
+    print(f'  ✓ CDP engine ready — finance, quotation, stock & fundflow pages')
 
 
 def main():
@@ -1001,6 +1269,7 @@ def main():
 
     threading.Thread(target=warm_jin10_headers, daemon=True).start()
     threading.Thread(target=init_cdp, daemon=True).start()
+    threading.Thread(target=_fundflow_prefetch_loop, daemon=True).start()
 
     print(f'China Finance RSS Bridge running on http://localhost:{PORT}')
     print(f'Cache TTL: {CACHE_TTL}s | Timeout: {REQUEST_TIMEOUT}s')
@@ -1011,10 +1280,12 @@ def main():
     print(f'\nUtilities:')
     print(f'  http://localhost:{PORT}/finance/market  — Finance Market Data (JSON, needs Chrome CDP)')
     print(f'  http://localhost:{PORT}/quotation/market  — Quotation Market Data (JSON, needs Chrome CDP)')
+    print(f'  http://localhost:{PORT}/cls/hotplate  — Hotplate Data (JSON, no CDP needed)')
     print(f'  http://localhost:{PORT}/stock/data  — Stock Detail Data (JSON, needs Chrome CDP)')
+    print(f'  http://localhost:{PORT}/stock/fundflow  — Stock Fund Flow (JSON, no CDP needed)')
     print(f'  http://localhost:{PORT}/opml.xml  — OPML subscription list')
     print(f'  http://localhost:{PORT}/healthz?check=1  — Source health check')
-    print(f'\nNote: Xueqiu, Finance Market, Quotation and Stock Detail require Chrome with CDP enabled.')
+    print(f'\nNote: Xueqiu, Finance Market, Quotation and Stock Detail require Chrome with CDP enabled.\n      Hotplate and Stock Fund Flow do NOT require CDP — they use direct API calls with signing.')
     print(f'Visit http://localhost:{PORT}/ for the web index.\n')
 
     server = BoundedThreadPoolServer(('0.0.0.0', PORT), RSSHandler)

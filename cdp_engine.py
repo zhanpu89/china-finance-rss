@@ -429,19 +429,54 @@ class CDPPage:
             }, timeout)
         return result.get('result', {}).get('result', {}).get('value')
 
-    def _re_fetch_api(self, url):
+    def re_fetch_api(self, url):
         """Fire-and-forget re-fetch of an API URL, storing result in __cdp_refetch.
 
         __cdp_refetch is a secondary buffer that's not cleared by the interceptor,
         so data survives even if the fetch response arrives between heartbeat polls.
+        Returns True if the fetch command was sent successfully (not a guarantee
+        the response will arrive).
         """
         try:
             escaped = url.replace('\\', '\\\\').replace('"', '\\"')
             self._send({'id': self._next_id(), 'method': 'Runtime.evaluate',
                         'params': {'expression': f'fetch("{escaped}").then(function(r){{return r.json()}}).then(function(d){{window.__cdp_refetch["{escaped}"]=d}}).catch(function(){{}})',
                                    'awaitPromise': False, 'returnByValue': False}})
-        except Exception:
-            pass
+            return True
+        except Exception as e:
+            print(f'[CDP:{self.name}] re_fetch_api failed for {url}: {e}')
+            return False
+
+    # Backward compat alias
+    _re_fetch_api = re_fetch_api
+
+    def evaluate_fetch(self, url, timeout=15):
+        """Fetch a URL from within the browser context and return parsed JSON.
+
+        Uses the page's JavaScript runtime to fire a fetch() call,
+        so the request comes from the browser (same IP, cookies, headers).
+        Returns parsed dict, or None on failure.
+
+        This is NOT a fire-and-forget — it blocks until the fetch completes
+        or the timeout expires, making it suitable for synchronous callers.
+        """
+        if not self._ensure_ws():
+            return None
+        escaped = url.replace('\\', '\\\\').replace('"', '\\"')
+        js = (
+            '(async function(){'
+            'try{'
+            'var r=await fetch("' + escaped + '",{credentials:"include"});'
+            'if(!r.ok)return{error:"HTTP "+r.status};'
+            'return await r.json();'
+            '}catch(e){return{error:e.message}}'
+            '})()'
+        )
+        try:
+            return self._evaluate(js, timeout=timeout)
+        except Exception as e:
+            print(f'[CDP:{self.name}] evaluate_fetch failed for {url}: {e}')
+            return None
 
     def _heartbeat(self):
         """Background loop: poll collected data every 15s, reconnect on failure."""
@@ -664,8 +699,15 @@ class CDPPage:
                 time.sleep(2)
         return False
 
-    def navigate_stock(self, stock_code, timeout=15):
-        """Navigate to a stock code, wait for fresh data, return True on success."""
+    def navigate_stock(self, stock_code, timeout=15, tabs=('fund_flow', 'f10')):
+        """Navigate to a stock code, wait for fresh data, return True on success.
+
+        Args:
+            tabs: Which tab sections to click after navigation.
+                  ('fund_flow', 'f10') — both tabs (legacy, ~6s extra).
+                  ('fund_flow',)       — fund flow only.
+                  ()                   — no tabs, fastest (~2-3s total).
+        """
         url = f'https://www.cls.cn/stock?code={stock_code}'
         with self._navigate_lock:
             if not self._ensure_ws():
@@ -700,14 +742,14 @@ class CDPPage:
                     code_lower = stock_code.lower()
                     is_bse = code_lower.startswith('bj') or code_lower.endswith('bj')
                     if not is_bse:
-                        # Click fund flow tab and wait for data
-                        self._click_fund_flow_tab()
-                        time.sleep(2)
-                        self.refresh()
-                        # Click 简况F10 tab and wait for data
-                        self._click_f10_tab()
-                        time.sleep(2)
-                        self.refresh()
+                        if 'fund_flow' in tabs:
+                            self._click_fund_flow_tab()
+                            time.sleep(2)
+                            self.refresh()
+                        if 'f10' in tabs:
+                            self._click_f10_tab()
+                            time.sleep(2)
+                            self.refresh()
                     return True
                 time.sleep(0.5)
             self.refresh()
