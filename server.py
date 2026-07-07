@@ -1318,6 +1318,11 @@ class RSSHandler(BaseHTTPRequestHandler):
 
     timeout = 30  # seconds — prevents slow clients from tying up worker threads
 
+    def log_error(self, format, *args):
+        if format == 'Request timed out: %r':
+            return  # suppress — harmless slow client connections
+        self.log_message(format, *args)
+
     def log_date_time_string(self):
         """Return current Beijing time (UTC+8) for access logs."""
         from time import strftime, gmtime
