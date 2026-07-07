@@ -31,7 +31,7 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.request import Request, urlopen
 from urllib.parse import parse_qs, urlencode, urlparse
 from datetime import datetime, timedelta, timezone
-from time import time
+from time import sleep, time
 from email.utils import formatdate
 from xml.etree import ElementTree as ET
 
@@ -751,7 +751,7 @@ def _fundflow_prefetch_loop():
     so data is always fresh. One failed stock does not block others.
     """
     while True:
-        time.sleep(_FUNDFLOW_POOL_REFRESH)
+        sleep(_FUNDFLOW_POOL_REFRESH)
         with _fundflow_cache_lock:
             codes = list(_fundflow_pool.keys())
         if not codes:
