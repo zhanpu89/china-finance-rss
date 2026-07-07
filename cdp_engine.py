@@ -440,7 +440,7 @@ class CDPPage:
         try:
             escaped = url.replace('\\', '\\\\').replace('"', '\\"')
             self._send({'id': self._next_id(), 'method': 'Runtime.evaluate',
-                        'params': {'expression': f'fetch("{escaped}").then(function(r){{return r.json()}}).then(function(d){{window.__cdp_refetch["{escaped}"]=d}}).catch(function(){{}})',
+                        'params': {'expression': f'fetch("{escaped}",{{cache:"no-store"}}).then(function(r){{return r.json()}}).then(function(d){{window.__cdp_refetch["{escaped}"]=d}}).catch(function(){{}})',
                                    'awaitPromise': False, 'returnByValue': False}})
             return True
         except Exception as e:
@@ -466,7 +466,7 @@ class CDPPage:
         js = (
             '(async function(){'
             'try{'
-            'var r=await fetch("' + escaped + '",{credentials:"include"});'
+            'var r=await fetch("' + escaped + '",{credentials:"include",cache:"no-store"});'
             'if(!r.ok)return{error:"HTTP "+r.status};'
             'return await r.json();'
             '}catch(e){return{error:e.message}}'
