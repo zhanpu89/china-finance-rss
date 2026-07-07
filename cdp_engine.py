@@ -20,6 +20,7 @@ import subprocess
 import threading
 import time
 import urllib.request
+from datetime import datetime, timezone, timedelta
 from urllib.parse import urlparse
 
 
@@ -480,11 +481,25 @@ class CDPPage:
             print(f'[CDP:{self.name}] evaluate_fetch failed for {url}: {e}')
             return None
 
+    def _heartbeat_interval(self):
+        """Return heartbeat sleep interval based on China A-share trading hours.
+
+        During trading (Mon-Fri 09:30-11:30, 13:00-15:00 UTC+8): 10s.
+        Outside trading: 60s — data doesn't change, reduce polling.
+        """
+        now = datetime.now(timezone.utc) + timedelta(hours=8)
+        if now.weekday() >= 5:
+            return 60
+        h, m = now.hour, now.minute
+        in_morning = (h == 9 and m >= 30) or (10 <= h <= 10) or (h == 11 and m <= 30)
+        in_afternoon = (13 <= h <= 14)
+        return 10 if (in_morning or in_afternoon) else 60
+
     def _heartbeat(self):
-        """Background loop: poll collected data every 15s, reconnect on failure."""
+        """Background loop: poll collected data, reconnect on failure."""
         empty_count = 0
         while self._running:
-            time.sleep(10)
+            time.sleep(self._heartbeat_interval())
             try:
                 alive = self._evaluate('typeof window.__cdp_api !== "undefined"', timeout=5)
                 if not alive:

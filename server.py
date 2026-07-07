@@ -809,12 +809,15 @@ def handle_cls_fundflow(codes):
 def _fundflow_prefetch_loop():
     """Background thread: refresh fund flow for all auto-registered stocks.
 
-    Runs every FUNDFLOW_POOL_REFRESH seconds. Bypasses fetch_json cache
-    so data is always fresh. One failed stock does not block others.
+    Runs every FUNDFLOW_POOL_REFRESH seconds (trading hours) or 300s (off-hours).
+    Bypasses fetch_json cache so data is always fresh.
+    One failed stock does not block others.
     """
     while True:
         try:
-            sleep(_FUNDFLOW_POOL_REFRESH)
+            ttl, _ = _china_trading_ttl()
+            interval = max(_FUNDFLOW_POOL_REFRESH, ttl)
+            sleep(interval)
             with _fundflow_cache_lock:
                 codes = list(_fundflow_pool.keys())
             if not codes:
@@ -931,7 +934,9 @@ def _timeline_prefetch_loop():
     """Background thread: refresh timeline for all auto-registered stocks."""
     while True:
         try:
-            sleep(_TIMELINE_POOL_REFRESH)
+            ttl, _ = _china_trading_ttl()
+            interval = max(_TIMELINE_POOL_REFRESH, ttl)
+            sleep(interval)
             with _timeline_cache_lock:
                 codes = list(_timeline_pool.keys())
             if not codes:
@@ -1036,7 +1041,9 @@ def _f10_prefetch_loop():
     """Background thread: refresh F10 for all auto-registered stocks."""
     while True:
         try:
-            sleep(_F10_POOL_REFRESH)
+            ttl, _ = _china_trading_ttl()
+            interval = max(_F10_POOL_REFRESH, ttl)
+            sleep(interval)
             with _f10_cache_lock:
                 codes = list(_f10_pool.keys())
             if not codes:
