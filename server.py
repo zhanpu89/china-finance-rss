@@ -529,20 +529,18 @@ cdp_engine = None
 # consistent schema (missing keys → null) instead of silent omissions.
 _FINANCE_EXPECTED_KEYS = frozenset({
     'market_sentiment', 'articles', 'advance_decline',
-    'timeline', 'live_refresh', 'anchor', 'basic_info',
+    'live_refresh', 'anchor', 'basic_info',
 })
 
 _QUOTATION_EXPECTED_KEYS = frozenset({
     'hot_plate', 'stock_ranking', 'stock_ipo',
-    'bj_stock_info', 'index_home', 'timeline', 'basic_info',
+    'bj_stock_info', 'index_home', 'basic_info',
 })
 
 _STOCK_EXPECTED_KEYS = frozenset({
-    'basic_info', 'timeline', 'articles',
-    'stock_plate', 'stock_company_info',
+    'basic_info', 'articles',
+    'stock_plate',
     'stock_announcement', 'stock_detail',
-    'stock_quote',
-    'stock_f10', 'stock_shareholder',
 })
 
 # x-quote.cls.cn API base for hotplate data
@@ -555,11 +553,39 @@ _FUNDFLOW_HEADERS = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.cls.cn
 
 # Background prefetch cache for fund flow (30-stock pool)
 _fundflow_cache = {}            # stock_code -> data dict
+_fundflow_cache_ts = {}         # stock_code -> timestamp of last update
 _fundflow_pool = {}             # stock_code -> last_access_time (for LRU evict)
 _fundflow_cache_lock = threading.Lock()
 _FUNDFLOW_POOL_REFRESH = 25     # seconds between refresh cycles
 _FUNDFLOW_MAX_POOL = 500        # safety cap to prevent OOM from runaway queries
+_MAX_CACHE_AGE = 120            # max age (seconds) for cached entries before forcing re-fetch
 _MAX_BATCH_SIZE = 50             # max stock codes per batch request
+
+# Stock timeline REST API
+_TIMELINE_BASE_URL = 'https://x-quote.cls.cn/quote/stock/tline'
+_TIMELINE_HEADERS = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.cls.cn/stock'}
+
+# Background prefetch cache for timeline
+_timeline_cache = {}
+_timeline_cache_ts = {}
+_timeline_pool = {}
+_timeline_cache_lock = threading.Lock()
+_TIMELINE_POOL_REFRESH = 30
+_TIMELINE_MAX_POOL = 300
+
+# Stock F10 (financial summary) REST API
+_F10_BASE_URL = 'https://x-quote.cls.cn/quote/stock/f10'
+_F10_HEADERS = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.cls.cn/stock'}
+_F10_EXPECTED_KEYS = frozenset({
+    'stock_company_info',
+})
+
+_f10_cache = {}
+_f10_cache_ts = {}
+_f10_pool = {}
+_f10_cache_lock = threading.Lock()
+_F10_POOL_REFRESH = 60
+_F10_MAX_POOL = 300
 
 
 def _fill_missing(result, data, expected_keys):
@@ -587,6 +613,7 @@ def handle_finance_market(feed_url=None):
         return {'error': 'Finance page not initialized.'}
     data = page.get_data()
     ws_raw = data.pop('__ws__', None)
+    data.pop('timeline', None)
     result = {}
     _fill_missing(result, data, _FINANCE_EXPECTED_KEYS)
     if ws_raw:
@@ -611,9 +638,34 @@ def handle_cls_quotation(feed_url=None):
     if not page:
         return {'error': 'Quotation page not initialized.'}
     data = page.get_data()
+    data.pop('timeline', None)
     result = {}
     _fill_missing(result, data, _QUOTATION_EXPECTED_KEYS)
     return result
+
+
+def handle_market_timeline():
+    """CLS Market Index Timeline (指数分时图) — extracted from quotation CDP page."""
+    global cdp_engine
+    if not cdp_engine or not cdp_engine.ready:
+        return {'error': 'Chrome CDP not available. See README.'}
+    page = cdp_engine.get_page('cls_quotation')
+    if not page:
+        return {'error': 'Quotation page not initialized.'}
+    data = page.get_data()
+    return data.get('timeline')
+
+
+def handle_finance_timeline():
+    """CLS Finance Market Timeline — extracted from finance CDP page."""
+    global cdp_engine
+    if not cdp_engine or not cdp_engine.ready:
+        return {'error': 'Chrome CDP not available. See README.'}
+    page = cdp_engine.get_page('cls_finance')
+    if not page:
+        return {'error': 'Finance page not initialized.'}
+    data = page.get_data()
+    return data.get('timeline')
 
 
 def handle_cls_stock(stock_code, timeout=30):
@@ -628,8 +680,12 @@ def handle_cls_stock(stock_code, timeout=30):
     page = cdp_engine.get_page('cls_stock')
     if not page:
         return {'error': 'Stock page not initialized.'}
-    page.navigate_stock(stock_code, timeout=timeout)
+    page.navigate_stock(stock_code, timeout=timeout, tabs=())
     data = page.get_data()
+    data.pop('stock_quote', None)
+    data.pop('timeline', None)
+    data.pop('stock_f10', None)
+    data.pop('stock_company_info', None)
     result = {}
     _fill_missing(result, data, _STOCK_EXPECTED_KEYS)
     return result
@@ -721,6 +777,7 @@ def handle_cls_fundflow(codes):
             for code in excess:
                 del _fundflow_pool[code]
                 _fundflow_cache.pop(code, None)
+                _fundflow_cache_ts.pop(code, None)
 
     result = {}
     missing = []
@@ -728,7 +785,11 @@ def handle_cls_fundflow(codes):
         for code in codes:
             cached = _fundflow_cache.get(code)
             if cached is not None:
-                result[code] = cached
+                ts = _fundflow_cache_ts.get(code, 0)
+                if now - ts < _MAX_CACHE_AGE:
+                    result[code] = cached
+                else:
+                    missing.append(code)
             else:
                 missing.append(code)
 
@@ -737,6 +798,7 @@ def handle_cls_fundflow(codes):
         if data:
             with _fundflow_cache_lock:
                 _fundflow_cache[code] = data
+                _fundflow_cache_ts[code] = time()
             result[code] = data
         else:
             result[code] = None
@@ -751,16 +813,242 @@ def _fundflow_prefetch_loop():
     so data is always fresh. One failed stock does not block others.
     """
     while True:
-        sleep(_FUNDFLOW_POOL_REFRESH)
-        with _fundflow_cache_lock:
-            codes = list(_fundflow_pool.keys())
-        if not codes:
-            continue
+        try:
+            sleep(_FUNDFLOW_POOL_REFRESH)
+            with _fundflow_cache_lock:
+                codes = list(_fundflow_pool.keys())
+            if not codes:
+                continue
+            for code in codes:
+                data = _fundflow_direct_fetch(code)
+                if data:
+                    with _fundflow_cache_lock:
+                        _fundflow_cache[code] = data
+                        _fundflow_cache_ts[code] = time()
+        except Exception as e:
+            print(f'[fundflow] prefetch error: {e}')
+
+
+def fetch_cls_timeline(stock_code):
+    """Fetch stock timeline — CDP evaluate_fetch first, REST fallback."""
+    global cdp_engine
+    if cdp_engine and cdp_engine.ready:
+        page = cdp_engine.get_page('cls_fundflow')
+        if page:
+            url = f'{_TIMELINE_BASE_URL}?secu_code={stock_code}'
+            result = page.evaluate_fetch(url, timeout=15)
+            if result and isinstance(result, dict) and result.get('code') == 200:
+                return result.get('data')
+
+    url = f'{_TIMELINE_BASE_URL}?secu_code={stock_code}'
+    try:
+        raw = json.loads(fetch_json(url, _TIMELINE_HEADERS, ttl=15))
+        if raw.get('code') == 200:
+            return raw.get('data')
+    except Exception:
+        pass
+    return None
+
+
+def _timeline_direct_fetch(stock_code):
+    """Fetch timeline data via CDP browser context (anti-ban)."""
+    global cdp_engine
+    if cdp_engine and cdp_engine.ready:
+        page = cdp_engine.get_page('cls_fundflow')
+        if page:
+            url = f'{_TIMELINE_BASE_URL}?secu_code={stock_code}'
+            result = page.evaluate_fetch(url, timeout=15)
+            if result and isinstance(result, dict) and result.get('code') == 200:
+                return result.get('data')
+            if result and isinstance(result, dict) and result.get('error'):
+                print(f'[timeline] CDP fetch error for {stock_code}: {result["error"]}')
+
+    req = Request(f'{_TIMELINE_BASE_URL}?secu_code={stock_code}',
+                   headers=_TIMELINE_HEADERS)
+    try:
+        with urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
+            raw = json.loads(resp.read().decode('utf-8'))
+            if raw.get('code') == 200:
+                return raw.get('data')
+    except Exception:
+        pass
+    return None
+
+
+def handle_cls_timeline(codes):
+    """Stock Timeline Data (分时图) — REST-based, batch supported.
+
+    Args:
+        codes: list of stock code strings.
+    Returns:
+        dict of {stock_code: data_or_None, ...}.
+    """
+    seen = set()
+    codes = [c for c in codes if not (c in seen or seen.add(c))]
+
+    if not codes:
+        return {}
+
+    now = time()
+    with _timeline_cache_lock:
         for code in codes:
-            data = _fundflow_direct_fetch(code)
-            if data:
-                with _fundflow_cache_lock:
-                    _fundflow_cache[code] = data
+            _timeline_pool[code] = now
+        if len(_timeline_pool) > _TIMELINE_MAX_POOL:
+            excess = sorted(_timeline_pool, key=_timeline_pool.get)[:len(_timeline_pool) - _TIMELINE_MAX_POOL]
+            for code in excess:
+                del _timeline_pool[code]
+                _timeline_cache.pop(code, None)
+                _timeline_cache_ts.pop(code, None)
+
+    result = {}
+    missing = []
+    with _timeline_cache_lock:
+        for code in codes:
+            cached = _timeline_cache.get(code)
+            if cached is not None:
+                ts = _timeline_cache_ts.get(code, 0)
+                if now - ts < _MAX_CACHE_AGE:
+                    result[code] = cached
+                else:
+                    missing.append(code)
+            else:
+                missing.append(code)
+
+    for code in missing:
+        data = fetch_cls_timeline(code)
+        if data:
+            with _timeline_cache_lock:
+                _timeline_cache[code] = data
+                _timeline_cache_ts[code] = time()
+            result[code] = data
+        else:
+            result[code] = None
+
+    return result
+
+
+def _timeline_prefetch_loop():
+    """Background thread: refresh timeline for all auto-registered stocks."""
+    while True:
+        try:
+            sleep(_TIMELINE_POOL_REFRESH)
+            with _timeline_cache_lock:
+                codes = list(_timeline_pool.keys())
+            if not codes:
+                continue
+            for code in codes:
+                data = _timeline_direct_fetch(code)
+                if data:
+                    with _timeline_cache_lock:
+                        _timeline_cache[code] = data
+                        _timeline_cache_ts[code] = time()
+        except Exception as e:
+            print(f'[timeline] prefetch error: {e}')
+
+
+def fetch_cls_f10(stock_code):
+    """Fetch company info — CDP page navigation (clicks F10 tab).
+
+    Page navigation captures company_info (industry, plates, etc.).
+    REST fallback is unavailable — this API only loads via F10 tab click.
+    """
+    global cdp_engine
+    if cdp_engine and cdp_engine.ready:
+        page = cdp_engine.get_page('cls_stock')
+        if page:
+            page.navigate_stock(stock_code, tabs=('f10',))
+            data = page.get_data()
+            result = {}
+            _fill_missing(result, data, _F10_EXPECTED_KEYS)
+            if result:
+                return result.get('stock_company_info')
+    return None
+
+
+def _f10_direct_fetch(stock_code):
+    """Fetch company info via CDP page navigation (anti-ban)."""
+    global cdp_engine
+    if cdp_engine and cdp_engine.ready:
+        page = cdp_engine.get_page('cls_stock')
+        if page:
+            page.navigate_stock(stock_code, tabs=('f10',))
+            data = page.get_data()
+            result = {}
+            _fill_missing(result, data, _F10_EXPECTED_KEYS)
+            if result:
+                return result.get('stock_company_info')
+    return None
+
+
+def handle_cls_f10(codes):
+    """Stock F10 Financial Summary — REST-based, batch supported.
+
+    Args:
+        codes: list of stock code strings.
+    Returns:
+        dict of {stock_code: data_or_None, ...}.
+    """
+    seen = set()
+    codes = [c for c in codes if not (c in seen or seen.add(c))]
+
+    if not codes:
+        return {}
+
+    now = time()
+    with _f10_cache_lock:
+        for code in codes:
+            _f10_pool[code] = now
+        if len(_f10_pool) > _F10_MAX_POOL:
+            excess = sorted(_f10_pool, key=_f10_pool.get)[:len(_f10_pool) - _F10_MAX_POOL]
+            for code in excess:
+                del _f10_pool[code]
+                _f10_cache.pop(code, None)
+                _f10_cache_ts.pop(code, None)
+
+    result = {}
+    missing = []
+    with _f10_cache_lock:
+        for code in codes:
+            cached = _f10_cache.get(code)
+            if cached is not None:
+                ts = _f10_cache_ts.get(code, 0)
+                if now - ts < _MAX_CACHE_AGE:
+                    result[code] = cached
+                else:
+                    missing.append(code)
+            else:
+                missing.append(code)
+
+    for code in missing:
+        data = fetch_cls_f10(code)
+        if data:
+            with _f10_cache_lock:
+                _f10_cache[code] = data
+                _f10_cache_ts[code] = time()
+            result[code] = data
+        else:
+            result[code] = None
+
+    return result
+
+
+def _f10_prefetch_loop():
+    """Background thread: refresh F10 for all auto-registered stocks."""
+    while True:
+        try:
+            sleep(_F10_POOL_REFRESH)
+            with _f10_cache_lock:
+                codes = list(_f10_pool.keys())
+            if not codes:
+                continue
+            for code in codes:
+                data = _f10_direct_fetch(code)
+                if data:
+                    with _f10_cache_lock:
+                        _f10_cache[code] = data
+                        _f10_cache_ts[code] = time()
+        except Exception as e:
+            print(f'[f10] prefetch error: {e}')
 
 
 def _china_trading_ttl():
@@ -996,6 +1284,20 @@ def build_health_payload(base_url, check_sources=False):
         'status': 'configured',
     })
 
+    feeds.append({
+        'name': 'CLS Stock Timeline (个股分时图)',
+        'path': '/stock/timeline',
+        'url': base_url + '/stock/timeline',
+        'status': 'configured',
+    })
+
+    feeds.append({
+        'name': 'CLS Stock F10 (个股F10财务概要)',
+        'path': '/stock/f10',
+        'url': base_url + '/stock/f10',
+        'status': 'configured',
+    })
+
     return {
         'status': status,
         'cache_ttl': CACHE_TTL,
@@ -1056,8 +1358,20 @@ class RSSHandler(BaseHTTPRequestHandler):
             self._send_text(200, 'application/json; charset=utf-8',
                             body, cache=True, write_body=write_body)
             return
+        if path == '/finance/timeline':
+            data = handle_finance_timeline()
+            body = json.dumps(data, ensure_ascii=False, indent=2)
+            self._send_text(200, 'application/json; charset=utf-8',
+                            body, cache=True, write_body=write_body)
+            return
         if path == '/quotation/market':
             data = handle_cls_quotation()
+            body = json.dumps(data, ensure_ascii=False, indent=2)
+            self._send_text(200, 'application/json; charset=utf-8',
+                            body, cache=True, write_body=write_body)
+            return
+        if path == '/market/timeline':
+            data = handle_market_timeline()
             body = json.dumps(data, ensure_ascii=False, indent=2)
             self._send_text(200, 'application/json; charset=utf-8',
                             body, cache=True, write_body=write_body)
@@ -1094,6 +1408,56 @@ class RSSHandler(BaseHTTPRequestHandler):
             data = handle_cls_fundflow(stock_codes)
             if len(stock_codes) == 1:
                 body = json.dumps({'fund_flow': data.get(stock_codes[0])},
+                                  ensure_ascii=False, indent=2)
+            else:
+                body = json.dumps(data, ensure_ascii=False, indent=2)
+            self._send_text(200, 'application/json; charset=utf-8',
+                            body, cache=True, write_body=write_body)
+            return
+        if path == '/stock/timeline':
+            params = parse_qs(parsed.query)
+            if 'code' not in params:
+                self._send_text(400, 'application/json; charset=utf-8',
+                                json.dumps({'error': 'Missing ?code= parameter. Usage: /stock/timeline?code=sh600519 or /stock/timeline?code=sh600519,sz000001'}),
+                                cache=False, write_body=write_body)
+                return
+            codes_str = params['code'][0]
+            stock_codes = [c.strip() for c in codes_str.split(',') if c.strip()]
+            if not stock_codes:
+                self._send_text(400, 'application/json; charset=utf-8',
+                                json.dumps({'error': 'No valid stock codes provided.'}),
+                                cache=False, write_body=write_body)
+                return
+            if len(stock_codes) > _MAX_BATCH_SIZE:
+                stock_codes = stock_codes[:_MAX_BATCH_SIZE]
+            data = handle_cls_timeline(stock_codes)
+            if len(stock_codes) == 1:
+                body = json.dumps({'timeline': data.get(stock_codes[0])},
+                                  ensure_ascii=False, indent=2)
+            else:
+                body = json.dumps(data, ensure_ascii=False, indent=2)
+            self._send_text(200, 'application/json; charset=utf-8',
+                            body, cache=True, write_body=write_body)
+            return
+        if path == '/stock/f10':
+            params = parse_qs(parsed.query)
+            if 'code' not in params:
+                self._send_text(400, 'application/json; charset=utf-8',
+                                json.dumps({'error': 'Missing ?code= parameter. Usage: /stock/f10?code=sh600519 or /stock/f10?code=sh600519,sz000001'}),
+                                cache=False, write_body=write_body)
+                return
+            codes_str = params['code'][0]
+            stock_codes = [c.strip() for c in codes_str.split(',') if c.strip()]
+            if not stock_codes:
+                self._send_text(400, 'application/json; charset=utf-8',
+                                json.dumps({'error': 'No valid stock codes provided.'}),
+                                cache=False, write_body=write_body)
+                return
+            if len(stock_codes) > _MAX_BATCH_SIZE:
+                stock_codes = stock_codes[:_MAX_BATCH_SIZE]
+            data = handle_cls_f10(stock_codes)
+            if len(stock_codes) == 1:
+                body = json.dumps({'f10': data.get(stock_codes[0])},
                                   ensure_ascii=False, indent=2)
             else:
                 body = json.dumps(data, ensure_ascii=False, indent=2)
@@ -1193,11 +1557,15 @@ class RSSHandler(BaseHTTPRequestHandler):
             lines.append(f'<li><a href="{path}">{info["name"]}</a></li>')
         lines.append(f'<li><a href="/xueqiu/user/1247347556">Xueqiu User Example (雪球)</a></li>')
         lines.append('</ul><p><a href="/finance/market">Finance Market JSON</a> | '
+                      '<a href="/finance/timeline">Finance Timeline JSON</a> | '
                       '<a href="/quotation/market">Quotation Market JSON</a> | '
+                      '<a href="/market/timeline">Market Index Timeline JSON</a> | '
                       '<a href="/cls/hotplate">Hotplate JSON (板块)</a> | '
                       '<a href="/stock/data?code=sz300139">Stock Detail JSON (sz300139)</a> | '
-                      '<a href="/stock/fundflow?code=sh600519">Stock Fund Flow JSON (sh600519)</a> | '
-                      '<a href="/opml.xml">Import OPML</a> | '
+                       '<a href="/stock/fundflow?code=sh600519">Stock Fund Flow JSON (sh600519)</a> | '
+                        '<a href="/stock/timeline?code=sh600519">Stock Timeline JSON (sh600519)</a> | '
+                        '<a href="/stock/f10?code=sh600519">Stock F10 JSON (sh600519)</a> | '
+                        '<a href="/opml.xml">Import OPML</a> | '
                       '<a href="/healthz?check=1">Source check</a></p>')
         lines.append('<p>Add any URL above to your RSS reader.</p></body></html>')
         html = '\n'.join(lines)
@@ -1270,6 +1638,8 @@ def main():
     threading.Thread(target=warm_jin10_headers, daemon=True).start()
     threading.Thread(target=init_cdp, daemon=True).start()
     threading.Thread(target=_fundflow_prefetch_loop, daemon=True).start()
+    threading.Thread(target=_timeline_prefetch_loop, daemon=True).start()
+    threading.Thread(target=_f10_prefetch_loop, daemon=True).start()
 
     print(f'China Finance RSS Bridge running on http://localhost:{PORT}')
     print(f'Cache TTL: {CACHE_TTL}s | Timeout: {REQUEST_TIMEOUT}s')
@@ -1279,13 +1649,17 @@ def main():
     print(f'  http://localhost:{PORT}/xueqiu/user/{{uid}}  — Xueqiu User (雪球)')
     print(f'\nUtilities:')
     print(f'  http://localhost:{PORT}/finance/market  — Finance Market Data (JSON, needs Chrome CDP)')
+    print(f'  http://localhost:{PORT}/finance/timeline  — Finance Timeline (JSON, needs Chrome CDP)')
     print(f'  http://localhost:{PORT}/quotation/market  — Quotation Market Data (JSON, needs Chrome CDP)')
+    print(f'  http://localhost:{PORT}/market/timeline  — Market Index Timeline (JSON, needs Chrome CDP)')
     print(f'  http://localhost:{PORT}/cls/hotplate  — Hotplate Data (JSON, no CDP needed)')
     print(f'  http://localhost:{PORT}/stock/data  — Stock Detail Data (JSON, needs Chrome CDP)')
     print(f'  http://localhost:{PORT}/stock/fundflow  — Stock Fund Flow (JSON, no CDP needed)')
+    print(f'  http://localhost:{PORT}/stock/timeline  — Stock Timeline (JSON, no CDP needed)')
+    print(f'  http://localhost:{PORT}/stock/f10  — Stock F10 Financial Summary (JSON, no CDP needed)')
     print(f'  http://localhost:{PORT}/opml.xml  — OPML subscription list')
     print(f'  http://localhost:{PORT}/healthz?check=1  — Source health check')
-    print(f'\nNote: Xueqiu, Finance Market, Quotation and Stock Detail require Chrome with CDP enabled.\n      Hotplate and Stock Fund Flow do NOT require CDP — they use direct API calls with signing.')
+    print(f'\nNote: Xueqiu, Finance Market, Quotation and Stock Detail require Chrome with CDP enabled.\n      Hotplate, Stock Fund Flow and Stock Timeline do NOT require CDP — they use direct API calls with signing.')
     print(f'Visit http://localhost:{PORT}/ for the web index.\n')
 
     server = BoundedThreadPoolServer(('0.0.0.0', PORT), RSSHandler)

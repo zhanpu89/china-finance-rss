@@ -320,6 +320,8 @@ class CDPPage:
         self._msg_id = 0
         self._key_last_seen = {}  # key -> timestamp of last refresh
         self._api_urls = {}       # remapped_key -> original URL for re-fetch
+        self._last_data_max_age = 600  # max age (seconds) for _last_data entries
+        self._last_data_ts = {}   # key -> timestamp when last added to _last_data
         self._navigate_lock = threading.Lock()
         self._connect()
         if heartbeat:
@@ -524,6 +526,8 @@ class CDPPage:
                         remapped = remap_keys(all_api)
                         self.cache.update(remapped)
                         self._last_data.update(remapped)
+                        for k in remapped:
+                            self._last_data_ts[k] = now
                         if len(self._last_data) > self._LAST_DATA_MAX_KEYS:
                             # Evict oldest key if too many unrecognized URLs accumulated
                             oldest = min(self._last_data, key=lambda k: self._key_last_seen.get(k, 0))
@@ -537,8 +541,9 @@ class CDPPage:
                     if ws_data:
                         self.cache['__ws__'] = ws_data
                         self._last_data['__ws__'] = ws_data
+                        self._last_data_ts['__ws__'] = now
                         self._key_last_seen['__ws__'] = now
-                    # Expire stale keys from freshness cache only — _last_data persists
+                    # Expire stale keys from freshness cache
                     for key in list(self.cache.keys()):
                         last_seen = self._key_last_seen.get(key)
                         if last_seen is None:
@@ -547,6 +552,14 @@ class CDPPage:
                         if now - last_seen > ttl:
                             del self.cache[key]
                             del self._key_last_seen[key]
+                    # Expire _last_data entries that haven't been seen in max_age
+                    for key in list(self._last_data.keys()):
+                        age = now - self._last_data_ts.get(key, 0)
+                        if age > self._last_data_max_age:
+                            del self._last_data[key]
+                            self._last_data_ts.pop(key, None)
+                            self._key_last_seen.pop(key, None)
+                            self._api_urls.pop(key, None)
                     # Proactively re-fetch low-frequency APIs — page handles the high-frequency ones
                     RE_FETCH_AFTER = 25
                     for key in list(self._api_urls.keys()):
@@ -600,6 +613,7 @@ class CDPPage:
             self._api_urls.clear()
             # Stale WebSocket data from old session — discard on reconnect
             self._last_data.pop('__ws__', None)
+            self._last_data_ts.pop('__ws__', None)
         for attempt in range(3):
             try:
                 self._connect()
@@ -622,11 +636,16 @@ class CDPPage:
     def get_data(self):
         """Return merged data — latest from live cache, gaps filled by _last_data.
 
-        _last_data persists across reconnections so external callers never
-        get an empty response once initial data has been collected.
+        _last_data entries older than _last_data_max_age are skipped to
+        prevent serving permanently stale data.
         """
         with self._lock:
-            merged = dict(self._last_data)
+            now = time.time()
+            merged = {}
+            for key, val in self._last_data.items():
+                last_seen = self._key_last_seen.get(key)
+                if last_seen is None or now - last_seen < self._last_data_max_age:
+                    merged[key] = val
             merged.update(self.cache)
             return merged
 
@@ -646,6 +665,8 @@ class CDPPage:
                         remapped = remap_keys(all_api)
                         self.cache.update(remapped)
                         self._last_data.update(remapped)
+                        for k in remapped:
+                            self._last_data_ts[k] = now
                         if len(self._last_data) > self._LAST_DATA_MAX_KEYS:
                             oldest = min(self._last_data, key=lambda k: self._key_last_seen.get(k, 0))
                             del self._last_data[oldest]
@@ -658,6 +679,7 @@ class CDPPage:
                     if ws_data:
                         self.cache['__ws__'] = ws_data
                         self._last_data['__ws__'] = ws_data
+                        self._last_data_ts['__ws__'] = now
                         self._key_last_seen['__ws__'] = now
                     # Expire stale keys from freshness cache only
                     for key in list(self.cache.keys()):
@@ -709,11 +731,14 @@ class CDPPage:
                   ()                   — no tabs, fastest (~2-3s total).
         """
         url = f'https://www.cls.cn/stock?code={stock_code}'
-        with self._navigate_lock:
+        if not self._navigate_lock.acquire(blocking=False):
+            return self._last_data.get('basic_info', {}).get('data', {}).get('secu_code') == stock_code
+        try:
             if not self._ensure_ws():
                 return False
             self.cache.clear()
             self._last_data.clear()
+            self._last_data_ts.clear()
             self._key_last_seen.clear()
             self._api_urls.clear()
             with self._ws_lock:
@@ -736,7 +761,8 @@ class CDPPage:
                 data = self.get_data()
                 bi = (data.get('basic_info') or {}).get('data') or {}
                 if bi.get('secu_code') == stock_code:
-                    time.sleep(1)  # let lazy tab APIs finish
+                    if tabs:
+                        time.sleep(1)
                     self.refresh()
                     # BSE (北交所) stocks lack fund flow and F10 tabs — skip them
                     code_lower = stock_code.lower()
@@ -756,6 +782,8 @@ class CDPPage:
             data = self.get_data()
             bi = (data.get('basic_info') or {}).get('data') or {}
             return bi.get('secu_code') == stock_code
+        finally:
+            self._navigate_lock.release()
 
     def _click_fund_flow_tab(self):
         """Click the fund flow (资金流向) tab on the stock detail page."""
