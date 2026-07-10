@@ -538,8 +538,7 @@ _QUOTATION_EXPECTED_KEYS = frozenset({
 })
 
 _STOCK_EXPECTED_KEYS = frozenset({
-    'basic_info', 'articles',
-    'stock_plate',
+    'articles', 'stock_plate',
     'stock_announcement', 'stock_detail',
 })
 
@@ -586,6 +585,14 @@ _f10_pool = {}
 _f10_cache_lock = threading.Lock()
 _F10_POOL_REFRESH = 60
 _F10_MAX_POOL = 300
+
+# Stock Basic Info cache (CDP navigation-based, no REST fallback)
+_basic_info_cache = {}
+_basic_info_cache_ts = {}
+_basic_info_pool = {}
+_basic_info_cache_lock = threading.Lock()
+_BASIC_INFO_POOL_REFRESH = 120
+_BASIC_INFO_MAX_POOL = 300
 
 
 def _fill_missing(result, data, expected_keys):
@@ -691,6 +698,7 @@ def handle_cls_stock(stock_code, timeout=30):
         return {'error': f'Failed to navigate to stock {stock_code}'}
     data = page.get_data()
     data.pop('stock_quote', None)
+    data.pop('basic_info', None)
     data.pop('timeline', None)
     data.pop('stock_f10', None)
     data.pop('stock_company_info', None)
@@ -1057,6 +1065,101 @@ def handle_cls_f10(codes):
     return result
 
 
+def fetch_cls_basic_info(stock_code):
+    """Fetch basic info via CDP page navigation.
+
+    Navigates the shared cls_stock page to the target stock and
+    extracts basic_info (name, code, industry, etc.).
+    """
+    global cdp_engine
+    if cdp_engine and cdp_engine.ready:
+        page = cdp_engine.get_page('cls_stock')
+        if page:
+            deadline = time() + 15
+            while time() < deadline:
+                if page.navigate_stock(stock_code, tabs=()):
+                    break
+                sleep(0.5)
+            else:
+                return None
+            data = page.get_data()
+            return data.get('basic_info')
+    return None
+
+
+def handle_cls_basic_infos(codes):
+    """Stock Basic Info — CDP navigation-based, batch supported.
+
+    Args:
+        codes: list of stock code strings.
+    Returns:
+        dict of {stock_code: data_or_None, ...}.
+    """
+    seen = set()
+    codes = [c for c in codes if not (c in seen or seen.add(c))]
+
+    if not codes:
+        return {}
+
+    now = time()
+    with _basic_info_cache_lock:
+        for code in codes:
+            _basic_info_pool[code] = now
+        if len(_basic_info_pool) > _BASIC_INFO_MAX_POOL:
+            excess = sorted(_basic_info_pool, key=_basic_info_pool.get)[:len(_basic_info_pool) - _BASIC_INFO_MAX_POOL]
+            for code in excess:
+                del _basic_info_pool[code]
+                _basic_info_cache.pop(code, None)
+                _basic_info_cache_ts.pop(code, None)
+
+    result = {}
+    missing = []
+    with _basic_info_cache_lock:
+        for code in codes:
+            cached = _basic_info_cache.get(code)
+            if cached is not None:
+                ts = _basic_info_cache_ts.get(code, 0)
+                if now - ts < _MAX_CACHE_AGE:
+                    result[code] = cached
+                else:
+                    missing.append(code)
+            else:
+                missing.append(code)
+
+    for code in missing:
+        data = fetch_cls_basic_info(code)
+        if data:
+            with _basic_info_cache_lock:
+                _basic_info_cache[code] = data
+                _basic_info_cache_ts[code] = time()
+            result[code] = data
+        else:
+            result[code] = None
+
+    return result
+
+
+def _basic_info_prefetch_loop():
+    """Background thread: refresh basic info for all auto-registered stocks."""
+    while True:
+        try:
+            ttl, _ = _china_trading_ttl()
+            interval = max(_BASIC_INFO_POOL_REFRESH, ttl)
+            sleep(interval)
+            with _basic_info_cache_lock:
+                codes = list(_basic_info_pool.keys())
+            if not codes:
+                continue
+            for code in codes:
+                data = fetch_cls_basic_info(code)
+                if data:
+                    with _basic_info_cache_lock:
+                        _basic_info_cache[code] = data
+                        _basic_info_cache_ts[code] = time()
+        except Exception as e:
+            print(f'[basic_info] prefetch error: {e}')
+
+
 def _f10_prefetch_loop():
     """Background thread: refresh F10 for all auto-registered stocks."""
     while True:
@@ -1325,6 +1428,13 @@ def build_health_payload(base_url, check_sources=False):
         'status': 'configured',
     })
 
+    feeds.append({
+        'name': 'CLS Stock Basic Info (个股基本信息)',
+        'path': '/stock/basic_info',
+        'url': base_url + '/stock/basic_info',
+        'status': 'requires_chrome_cdp',
+    })
+
     return {
         'status': status,
         'cache_ttl': CACHE_TTL,
@@ -1496,6 +1606,31 @@ class RSSHandler(BaseHTTPRequestHandler):
             self._send_text(200, 'application/json; charset=utf-8',
                             body, cache=True, write_body=write_body)
             return
+        if path == '/stock/basic_info':
+            params = parse_qs(parsed.query)
+            if 'code' not in params:
+                self._send_text(400, 'application/json; charset=utf-8',
+                                json.dumps({'error': 'Missing ?code= parameter. Usage: /stock/basic_info?code=sh600519 or /stock/basic_info?code=sh600519,sz000001'}),
+                                cache=False, write_body=write_body)
+                return
+            codes_str = params['code'][0]
+            stock_codes = [c.strip() for c in codes_str.split(',') if c.strip()]
+            if not stock_codes:
+                self._send_text(400, 'application/json; charset=utf-8',
+                                json.dumps({'error': 'No valid stock codes provided.'}),
+                                cache=False, write_body=write_body)
+                return
+            if len(stock_codes) > _MAX_BATCH_SIZE:
+                stock_codes = stock_codes[:_MAX_BATCH_SIZE]
+            data = handle_cls_basic_infos(stock_codes)
+            if len(stock_codes) == 1:
+                body = json.dumps({'basic_info': data.get(stock_codes[0])},
+                                  ensure_ascii=False, indent=2)
+            else:
+                body = json.dumps(data, ensure_ascii=False, indent=2)
+            self._send_text(200, 'application/json; charset=utf-8',
+                            body, cache=True, write_body=write_body)
+            return
         if path == '/cls/hotplate':
             data = handle_cls_hotplate()
             body = json.dumps(data, ensure_ascii=False, indent=2)
@@ -1596,7 +1731,8 @@ class RSSHandler(BaseHTTPRequestHandler):
                       '<a href="/stock/data?code=sz300139">Stock Detail JSON (sz300139)</a> | '
                        '<a href="/stock/fundflow?code=sh600519">Stock Fund Flow JSON (sh600519)</a> | '
                         '<a href="/stock/timeline?code=sh600519">Stock Timeline JSON (sh600519)</a> | '
-                        '<a href="/stock/f10?code=sh600519">Stock F10 JSON (sh600519)</a> | '
+                         '<a href="/stock/f10?code=sh600519">Stock F10 JSON (sh600519)</a> | '
+                         '<a href="/stock/basic_info?code=sh600519">Stock Basic Info JSON (sh600519)</a> | '
                         '<a href="/opml.xml">Import OPML</a> | '
                       '<a href="/healthz?check=1">Source check</a></p>')
         lines.append('<p>Add any URL above to your RSS reader.</p></body></html>')
@@ -1672,6 +1808,7 @@ def main():
     threading.Thread(target=_fundflow_prefetch_loop, daemon=True).start()
     threading.Thread(target=_timeline_prefetch_loop, daemon=True).start()
     threading.Thread(target=_f10_prefetch_loop, daemon=True).start()
+    threading.Thread(target=_basic_info_prefetch_loop, daemon=True).start()
 
     print(f'China Finance RSS Bridge running on http://localhost:{PORT}')
     print(f'Cache TTL: {CACHE_TTL}s | Timeout: {REQUEST_TIMEOUT}s')
@@ -1689,9 +1826,10 @@ def main():
     print(f'  http://localhost:{PORT}/stock/fundflow  — Stock Fund Flow (JSON, no CDP needed)')
     print(f'  http://localhost:{PORT}/stock/timeline  — Stock Timeline (JSON, no CDP needed)')
     print(f'  http://localhost:{PORT}/stock/f10  — Stock F10 Financial Summary (JSON, no CDP needed)')
+    print(f'  http://localhost:{PORT}/stock/basic_info  — Stock Basic Info (JSON, needs Chrome CDP)')
     print(f'  http://localhost:{PORT}/opml.xml  — OPML subscription list')
     print(f'  http://localhost:{PORT}/healthz?check=1  — Source health check')
-    print(f'\nNote: Xueqiu, Finance Market, Quotation and Stock Detail require Chrome with CDP enabled.\n      Hotplate, Stock Fund Flow and Stock Timeline do NOT require CDP — they use direct API calls with signing.')
+    print(f'\nNote: Xueqiu, Finance Market, Quotation, Stock Detail and Stock Basic Info require Chrome with CDP enabled.\n      Hotplate, Stock Fund Flow, Stock Timeline and Stock F10 do NOT require CDP — they use direct API calls with signing.')
     print(f'Visit http://localhost:{PORT}/ for the web index.\n')
 
     server = BoundedThreadPoolServer(('0.0.0.0', PORT), RSSHandler)
