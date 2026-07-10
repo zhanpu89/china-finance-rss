@@ -1549,7 +1549,7 @@ class RSSHandler(BaseHTTPRequestHandler):
                 stock_codes = stock_codes[:_MAX_BATCH_SIZE]
             data = handle_cls_fundflow(stock_codes)
             if len(stock_codes) == 1:
-                body = json.dumps({'fund_flow': data.get(stock_codes[0])},
+                body = json.dumps({stock_codes[0]: data.get(stock_codes[0])},
                                   ensure_ascii=False, indent=2)
             else:
                 body = json.dumps(data, ensure_ascii=False, indent=2)
@@ -1574,7 +1574,7 @@ class RSSHandler(BaseHTTPRequestHandler):
                 stock_codes = stock_codes[:_MAX_BATCH_SIZE]
             data = handle_cls_timeline(stock_codes)
             if len(stock_codes) == 1:
-                body = json.dumps({'timeline': data.get(stock_codes[0])},
+                body = json.dumps({stock_codes[0]: data.get(stock_codes[0])},
                                   ensure_ascii=False, indent=2)
             else:
                 body = json.dumps(data, ensure_ascii=False, indent=2)
@@ -1599,7 +1599,7 @@ class RSSHandler(BaseHTTPRequestHandler):
                 stock_codes = stock_codes[:_MAX_BATCH_SIZE]
             data = handle_cls_f10(stock_codes)
             if len(stock_codes) == 1:
-                body = json.dumps({'f10': data.get(stock_codes[0])},
+                body = json.dumps({stock_codes[0]: data.get(stock_codes[0])},
                                   ensure_ascii=False, indent=2)
             else:
                 body = json.dumps(data, ensure_ascii=False, indent=2)
@@ -1624,7 +1624,7 @@ class RSSHandler(BaseHTTPRequestHandler):
                 stock_codes = stock_codes[:_MAX_BATCH_SIZE]
             data = handle_cls_basic_infos(stock_codes)
             if len(stock_codes) == 1:
-                body = json.dumps({'basic_info': data.get(stock_codes[0])},
+                body = json.dumps({stock_codes[0]: data.get(stock_codes[0])},
                                   ensure_ascii=False, indent=2)
             else:
                 body = json.dumps(data, ensure_ascii=False, indent=2)
