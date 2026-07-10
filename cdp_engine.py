@@ -759,13 +759,13 @@ class CDPPage:
             with self._ws_lock:
                 self._evaluate(
                     'window.__cdp_api={};window.__cdp_refetch={}',
-                    timeout=5)
+                    timeout=3)
                 self._send_recv({'id': self._next_id(), 'method': 'Page.navigate',
-                                 'params': {'url': url}}, timeout=15)
-            deadline = time.time() + 20
-            while time.time() < deadline:
+                                 'params': {'url': url}}, timeout=10)
+            load_deadline = time.time() + timeout
+            while time.time() < load_deadline:
                 try:
-                    msg = self._recv(timeout=5)
+                    msg = self._recv(timeout=2)
                     if msg.get('method') == 'Page.loadEventFired':
                         break
                 except:

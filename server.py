@@ -687,10 +687,10 @@ def handle_cls_stock(stock_code, timeout=30):
     page = cdp_engine.get_page('cls_stock')
     if not page:
         return {'error': 'Stock page not initialized.'}
-    deadline = time() + min(timeout, 15)
+    deadline = time() + min(timeout, 10)
     ok = False
     while time() < deadline:
-        if page.navigate_stock(stock_code, timeout=timeout, tabs=()):
+        if page.navigate_stock(stock_code, timeout=min(timeout, 8), tabs=()):
             ok = True
             break
         sleep(0.5)
@@ -977,9 +977,9 @@ def fetch_cls_f10(stock_code):
     if cdp_engine and cdp_engine.ready:
         page = cdp_engine.get_page('cls_stock')
         if page:
-            deadline = time() + 15
+            deadline = time() + 10
             while time() < deadline:
-                if page.navigate_stock(stock_code, tabs=('f10',)):
+                if page.navigate_stock(stock_code, tabs=('f10',), timeout=6):
                     break
                 sleep(0.5)
             else:
@@ -998,9 +998,9 @@ def _f10_direct_fetch(stock_code):
     if cdp_engine and cdp_engine.ready:
         page = cdp_engine.get_page('cls_stock')
         if page:
-            deadline = time() + 15
+            deadline = time() + 10
             while time() < deadline:
-                if page.navigate_stock(stock_code, tabs=('f10',)):
+                if page.navigate_stock(stock_code, tabs=('f10',), timeout=6):
                     break
                 sleep(0.5)
             else:
@@ -1052,7 +1052,11 @@ def handle_cls_f10(codes):
             else:
                 missing.append(code)
 
+    batch_deadline = time() + 28
     for code in missing:
+        if time() >= batch_deadline:
+            result[code] = None
+            continue
         data = fetch_cls_f10(code)
         if data:
             with _f10_cache_lock:
@@ -1076,9 +1080,9 @@ def fetch_cls_basic_info(stock_code):
     if cdp_engine and cdp_engine.ready:
         page = cdp_engine.get_page('cls_stock')
         if page:
-            deadline = time() + 20
+            deadline = time() + 10
             while time() < deadline:
-                if page.navigate_stock(stock_code, tabs=('f10',)):
+                if page.navigate_stock(stock_code, tabs=('f10',), timeout=6):
                     break
                 sleep(0.5)
             else:
@@ -1137,7 +1141,11 @@ def handle_cls_basic_infos(codes):
             else:
                 missing.append(code)
 
+    batch_deadline = time() + 28  # cap entire batch to prevent handler timeout
     for code in missing:
+        if time() >= batch_deadline:
+            result[code] = None
+            continue
         data = fetch_cls_basic_info(code)
         if data:
             with _basic_info_cache_lock:
