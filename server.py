@@ -680,7 +680,8 @@ def handle_cls_stock(stock_code, timeout=30):
     page = cdp_engine.get_page('cls_stock')
     if not page:
         return {'error': 'Stock page not initialized.'}
-    page.navigate_stock(stock_code, timeout=timeout, tabs=())
+    if not page.navigate_stock(stock_code, timeout=timeout, tabs=()):
+        return {'error': f'Failed to navigate to stock {stock_code}'}
     data = page.get_data()
     data.pop('stock_quote', None)
     data.pop('timeline', None)
@@ -960,8 +961,7 @@ def fetch_cls_f10(stock_code):
     global cdp_engine
     if cdp_engine and cdp_engine.ready:
         page = cdp_engine.get_page('cls_stock')
-        if page:
-            page.navigate_stock(stock_code, tabs=('f10',))
+        if page and page.navigate_stock(stock_code, tabs=('f10',)):
             data = page.get_data()
             result = {}
             _fill_missing(result, data, _F10_EXPECTED_KEYS)
@@ -975,8 +975,7 @@ def _f10_direct_fetch(stock_code):
     global cdp_engine
     if cdp_engine and cdp_engine.ready:
         page = cdp_engine.get_page('cls_stock')
-        if page:
-            page.navigate_stock(stock_code, tabs=('f10',))
+        if page and page.navigate_stock(stock_code, tabs=('f10',)):
             data = page.get_data()
             result = {}
             _fill_missing(result, data, _F10_EXPECTED_KEYS)
