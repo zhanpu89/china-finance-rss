@@ -1066,24 +1066,35 @@ def handle_cls_f10(codes):
 
 
 def fetch_cls_basic_info(stock_code):
-    """Fetch basic info via CDP page navigation.
+    """Fetch basic info via CDP page navigation with F10 tab click.
 
-    Navigates the shared cls_stock page to the target stock and
-    extracts basic_info (name, code, industry, etc.).
+    Navigates the shared cls_stock page to the target stock, clicks
+    the F10 tab to capture company_info, and returns basic_info merged
+    with sector_name (申万一级行业, from IndustryName).
     """
     global cdp_engine
     if cdp_engine and cdp_engine.ready:
         page = cdp_engine.get_page('cls_stock')
         if page:
-            deadline = time() + 15
+            deadline = time() + 20
             while time() < deadline:
-                if page.navigate_stock(stock_code, tabs=()):
+                if page.navigate_stock(stock_code, tabs=('f10',)):
                     break
                 sleep(0.5)
             else:
                 return None
             data = page.get_data()
-            return data.get('basic_info')
+            result = data.get('basic_info')
+            ci = data.get('stock_company_info')
+            if isinstance(ci, dict):
+                ci_bi = ci.get('basic_info', {})
+                sector = ci_bi.get('IndustryName')
+                if sector:
+                    if result is None:
+                        result = {}
+                    # IndustryName format: "食品饮料-白酒Ⅱ-白酒Ⅲ" → take first level
+                    result['sector_name'] = sector.split('-')[0]
+            return result
     return None
 
 
