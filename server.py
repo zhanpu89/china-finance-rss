@@ -35,6 +35,7 @@ from time import sleep, time
 from email.utils import formatdate
 from xml.etree import ElementTree as ET
 
+
 from cdp_engine import ensure_chrome, find_tab, execute_js, CDPEngine
 
 # Configuration via environment variables
@@ -484,6 +485,90 @@ def handle_ths_kuaixun(feed_url=None):
         items,
         feed_url=feed_url
     )
+
+
+def handle_ths_longhu():
+    """THS Longhu (同花顺龙虎榜) — full table with top5 buy/sell brokerages.
+
+    Returns a list of dicts, one per stock:
+        {code, name, price, change_pct, turnover, net_buy,
+         buy_top5: [{name, buy, sell, net}],
+         sell_top5: [{name, buy, sell, net}]}
+    """
+    # Step 1 — stock list from /ifmarket/lhbtable (flat table, no nesting)
+    url = 'https://data.10jqka.com.cn/ifmarket/lhbtable'
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
+        'Referer': 'https://data.10jqka.com.cn/market/longhu/',
+        'X-Requested-With': 'XMLHttpRequest',
+    }
+    req = Request(url, headers=headers)
+    with urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
+        stock_html = resp.read().decode('gbk', errors='replace')
+
+    rows = re.findall(r'<tr[^>]*>(.*?)</tr>', stock_html, re.DOTALL)
+    stocks = []
+    for row in rows:
+        cells = re.findall(r'<td[^>]*>(.*?)</td>', row, re.DOTALL)
+        if len(cells) < 7:
+            continue
+        code = re.sub(r'<[^>]+>', '', cells[1]).strip()
+        if not code.isdigit():
+            continue
+        stocks.append({
+            'code': code,
+            'name': re.sub(r'<[^>]+>', '', cells[2]).strip(),
+            'price': re.sub(r'<[^>]+>', '', cells[3]).strip(),
+            'change_pct': re.sub(r'<[^>]+>', '', cells[4]).strip(),
+            'turnover': re.sub(r'<[^>]+>', '', cells[5]).strip(),
+            'net_buy': re.sub(r'<[^>]+>', '', cells[6]).strip(),
+        })
+
+    # Step 2 — brokerage tables from full page
+    page_url = 'https://data.10jqka.com.cn/market/longhu/'
+    page_headers = {
+        'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
+        'Accept-Language': 'zh-CN,zh;q=0.9',
+    }
+    req = Request(page_url, headers=page_headers)
+    with urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
+        page_html = resp.read().decode('gbk', errors='replace')
+
+    all_tables = re.findall(r'<table[^>]*>(.*?)</table>', page_html, re.DOTALL)
+    broker_idx = 0
+    for i, tbl in enumerate(all_tables):
+        ths = re.findall(r'<th[^>]*>(.*?)</th>', tbl, re.DOTALL)
+        if not ths:
+            continue
+        label = re.sub(r'<[^>]+>', '', ths[0]).strip()
+        if '买入金额最大的前5名营业部' not in label and '卖出金额最大的前5名营业部' not in label:
+            continue
+
+        entries = []
+        for bro_row in re.findall(r'<tr[^>]*>(.*?)</tr>', tbl, re.DOTALL):
+            bro_cells = re.findall(r'<td[^>]*>(.*?)</td>', bro_row, re.DOTALL)
+            if len(bro_cells) < 4:
+                continue
+            name = re.sub(r'<[^>]+>', '', bro_cells[0])
+            name = next((p for p in name.split('\n') if p.strip()), '').strip()
+            if not name or name == '营业部名称':
+                continue
+            entries.append({
+                'name': name,
+                'buy': re.sub(r'<[^>]+>', '', bro_cells[1]).strip() + '万',
+                'sell': re.sub(r'<[^>]+>', '', bro_cells[2]).strip() + '万',
+                'net': re.sub(r'<[^>]+>', '', bro_cells[3]).strip() + '万',
+            })
+
+        if not entries:
+            continue
+        kind = 'buy_top5' if '买入' in label else 'sell_top5'
+        stock_idx = broker_idx // 2
+        if stock_idx < len(stocks):
+            stocks[stock_idx][kind] = entries
+        broker_idx += 1
+
+    return {'data': stocks, 'total': len(stocks)}
 
 
 def handle_jin10_flash(feed_url=None):
@@ -1656,6 +1741,12 @@ class RSSHandler(BaseHTTPRequestHandler):
             self._send_text(200, 'application/json; charset=utf-8',
                             body, cache=True, write_body=write_body)
             return
+        if path == '/ths/longhu':
+            data = handle_ths_longhu()
+            body = json.dumps(data, ensure_ascii=False, indent=2)
+            self._send_text(200, 'application/json; charset=utf-8',
+                            body, cache=False, write_body=write_body)
+            return
         if path in ROUTES:
             self._serve_feed(path, base_url, write_body=write_body)
             return
@@ -1746,7 +1837,8 @@ class RSSHandler(BaseHTTPRequestHandler):
                       '<a href="/finance/timeline">Finance Timeline JSON</a> | '
                       '<a href="/quotation/market">Quotation Market JSON</a> | '
                       '<a href="/market/timeline">Market Index Timeline JSON</a> | '
-                      '<a href="/cls/hotplate">Hotplate JSON (板块)</a> | '
+                       '<a href="/cls/hotplate">Hotplate JSON (板块)</a> | '
+                       '<a href="/ths/longhu">THS Longhu JSON (龙虎榜)</a> | '
                       '<a href="/stock/data?code=sz300139">Stock Detail JSON (sz300139)</a> | '
                        '<a href="/stock/fundflow?code=sh600519">Stock Fund Flow JSON (sh600519)</a> | '
                         '<a href="/stock/timeline?code=sh600519">Stock Timeline JSON (sh600519)</a> | '
