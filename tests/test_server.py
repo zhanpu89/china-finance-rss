@@ -2,12 +2,23 @@ import unittest
 from email.utils import parsedate_to_datetime
 from xml.etree import ElementTree as ET
 
-import server
+from utils import (
+    generate_rss,
+    generate_error_rss,
+    generate_opml,
+    parse_china_datetime_to_rfc822,
+    cls_sign_params,
+    parse_cls_items,
+    extract_jin10_public_app_id,
+    parse_jin10_items,
+    parse_wallstreetcn_items,
+)
+from server import ROUTES, handle_cls_hotplate, build_health_payload
 
 
 class FeedGenerationTests(unittest.TestCase):
     def test_generate_rss_includes_atom_self_link_when_feed_url_given(self):
-        xml = server.generate_rss(
+        xml = generate_rss(
             "Example",
             "https://example.com",
             "Example feed",
@@ -24,7 +35,7 @@ class FeedGenerationTests(unittest.TestCase):
         self.assertEqual(atom_link.attrib["type"], "application/rss+xml")
 
     def test_generate_error_rss_returns_valid_feed_with_diagnostic_item(self):
-        xml = server.generate_error_rss(
+        xml = generate_error_rss(
             "CLS Telegraph",
             "https://www.cls.cn/telegraph",
             "CLS feed",
@@ -41,7 +52,7 @@ class FeedGenerationTests(unittest.TestCase):
         self.assertEqual(item.find("guid").attrib["isPermaLink"], "false")
 
     def test_generate_opml_lists_all_builtin_feeds_with_absolute_urls(self):
-        xml = server.generate_opml("https://feeds.example.com")
+        xml = generate_opml("https://feeds.example.com", ROUTES)
         root = ET.fromstring(xml)
         urls = {
             outline.attrib["xmlUrl"]
@@ -61,7 +72,7 @@ class FeedGenerationTests(unittest.TestCase):
 class TimeParsingTests(unittest.TestCase):
     def test_parse_china_datetime_to_rfc822_treats_source_time_as_utc_plus_8(self):
         dt = parsedate_to_datetime(
-            server.parse_china_datetime_to_rfc822("2026-06-12 16:00:00")
+            parse_china_datetime_to_rfc822("2026-06-12 16:00:00")
         )
 
         self.assertEqual(dt.hour, 8)
@@ -80,7 +91,7 @@ class SourceParserTests(unittest.TestCase):
         }
 
         self.assertEqual(
-            server.cls_sign_params(params),
+            cls_sign_params(params),
             "e11ef7d616d8f9a2f056e6df1aefc4d4",
         )
 
@@ -96,7 +107,7 @@ class SourceParserTests(unittest.TestCase):
             }
         }
 
-        items = server.parse_cls_items(payload)
+        items = parse_cls_items(payload)
 
         self.assertEqual(items[0]["title"], "LME期铜收涨216美元")
         self.assertEqual(items[0]["description"], "财联社6月13日电，LME期铜收涨216美元。")
@@ -106,7 +117,7 @@ class SourceParserTests(unittest.TestCase):
     def test_extract_jin10_public_app_id_from_frontend_bundle(self):
         bundle = 'headers:{"x-app-id":"public-web-app-id","x-version":t,handleError:!0}'
 
-        self.assertEqual(server.extract_jin10_public_app_id(bundle), "public-web-app-id")
+        self.assertEqual(extract_jin10_public_app_id(bundle), "public-web-app-id")
 
     def test_parse_jin10_items_maps_nested_flash_data(self):
         payload = {
@@ -121,7 +132,7 @@ class SourceParserTests(unittest.TestCase):
             }]
         }
 
-        items = server.parse_jin10_items(payload)
+        items = parse_jin10_items(payload)
 
         self.assertEqual(items[0]["title"], "CME补上周末交易")
         self.assertEqual(items[0]["description"], "周末定价权大重估")
@@ -129,22 +140,19 @@ class SourceParserTests(unittest.TestCase):
         self.assertEqual(items[0]["guid"], "jin10_20260612233021430800")
 
     def test_handle_cls_hotplate_returns_three_plate_keys(self):
-        """The handler returns a dict with plate_industry/concept/area keys.
-        Each value is a dict (data from API or error if fetch fails)."""
-        result = server.handle_cls_hotplate()
+        result = handle_cls_hotplate()
         for key in ('plate_industry', 'plate_concept', 'plate_area'):
             self.assertIn(key, result)
             self.assertIsInstance(result[key], dict)
 
     def test_handle_cls_hotplate_includes_hot_plates(self):
-        """The handler includes a hot_plates key with 6 items (3 top + 3 last)."""
-        result = server.handle_cls_hotplate()
+        result = handle_cls_hotplate()
         self.assertIn('hot_plates', result)
         self.assertIsInstance(result['hot_plates'], list)
         self.assertEqual(len(result['hot_plates']), 6)
 
     def test_healthz_payload_includes_hotplate_endpoint(self):
-        payload = server.build_health_payload("https://feeds.example.com")
+        payload = build_health_payload("https://feeds.example.com")
         paths = {f['path'] for f in payload['feeds']}
         self.assertIn('/cls/hotplate', paths)
 
@@ -162,7 +170,7 @@ class SourceParserTests(unittest.TestCase):
             }
         }
 
-        items = server.parse_wallstreetcn_items(payload)
+        items = parse_wallstreetcn_items(payload)
 
         self.assertEqual(items[0]["title"], "意大利银行板块收涨超3%")
         self.assertEqual(items[0]["description"], "德国DAX 30指数初步收涨1.66%。")

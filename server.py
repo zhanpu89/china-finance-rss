@@ -16,431 +16,78 @@ Dependencies:
 """
 
 import atexit
-import os
 import json
+import os
 import random
 import re
 import signal
 import sys
 import threading
-import urllib.request
-import hashlib
-from concurrent.futures import ThreadPoolExecutor, TimeoutError
-from html import unescape
+import time
+from concurrent.futures import ThreadPoolExecutor
+from email.utils import formatdate
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.request import Request, urlopen
-from urllib.parse import parse_qs, urlencode, urlparse
-from datetime import datetime, timedelta, timezone
-from time import sleep, time
-from email.utils import formatdate
-from xml.etree import ElementTree as ET
-
+from urllib.parse import parse_qs, urlencode
 
 from cdp_engine import ensure_chrome, find_tab, execute_js, CDPEngine
-
-# Configuration via environment variables
-PORT = int(os.getenv('PORT', '8053'))
-CDP_URL = os.getenv('CDP_URL', 'http://localhost:9222')  # Chrome DevTools Protocol URL
-CACHE_TTL = int(os.getenv('CACHE_TTL', '300'))  # Cache TTL in seconds (default: 5 min)
-REQUEST_TIMEOUT = int(os.getenv('REQUEST_TIMEOUT', '10'))
-PUBLIC_BASE_URL = os.getenv('PUBLIC_BASE_URL', '').rstrip('/')
-
-# In-memory cache with thread safety
-cache = {}
-feed_cache = {}
-jin10_public_headers = None
-_cache_lock = threading.Lock()
-_feed_cache_lock = threading.Lock()
-_feed_fetch_locks = {}
-_feed_fetch_locks_lock = threading.Lock()
-_fetch_inflight = {}        # url -> threading.Event for cache stampede protection
-MAX_CACHE_SIZE = 200
-MAX_FEED_CACHE_SIZE = 100
-CACHE_JITTER = 0.2  # ±20% random jitter on TTL to stagger expiry
-
-VALID_STOCK_CODE = re.compile(r'^(sh|sz|bj)\d{6}$', re.IGNORECASE)
-MAX_WORKERS = int(os.getenv('MAX_WORKERS', '20'))  # Max concurrent request threads
-
-
-def _expires_at(ttl=None):
-    """Return an absolute expiry timestamp with ±CACHE_JITTER random jitter.
-    
-    Args:
-        ttl: Custom TTL in seconds (defaults to CACHE_TTL). Use per-URL TTL
-             offsets to stagger expiry across related URLs.
-    """
-    base = (ttl if ttl is not None else CACHE_TTL)
-    return time() + base * (1 + random.uniform(-CACHE_JITTER, CACHE_JITTER))
+from config import (
+    PORT, CACHE_TTL, REQUEST_TIMEOUT, PUBLIC_BASE_URL, MAX_WORKERS,
+    _MAX_BATCH_SIZE,
+    _FINANCE_EXPECTED_KEYS, _QUOTATION_EXPECTED_KEYS,
+    _HOTPLATE_BASE_URL, _HOTPLATE_HEADERS,
+    cdp_engine, _china_trading_ttl,
+)
+from cache import fetch_json, feed_cache, _feed_cache_lock, _feed_fetch_locks, \
+    _feed_fetch_locks_lock, MAX_FEED_CACHE_SIZE, CACHE_JITTER, _fill_missing
+from utils import (
+    generate_rss, generate_error_rss, generate_opml, count_rss_items,
+    parse_cls_items, parse_jin10_items, parse_wallstreetcn_items,
+    cls_sign_params, get_jin10_public_headers,
+    strip_html, timestamp_to_rfc822, parse_china_datetime_to_rfc822, escape_xml,
+)
+from stock_api import (
+    handle_cls_stock, handle_cls_fundflow, handle_cls_timeline,
+    handle_cls_f10, handle_cls_basic_infos,
+    fetch_cls_fundflow, fetch_cls_timeline,
+    _fundflow_prefetch_loop, _timeline_prefetch_loop,
+    _f10_prefetch_loop, _basic_info_prefetch_loop,
+)
 
 
-def _cache_put(d, key, value, ttl=None):
-    """Write to a cache dict with LRU eviction and jittered expiry.
-    
-    Args:
-        ttl: Custom TTL override (defaults to CACHE_TTL in _expires_at).
-    """
-    with _cache_lock:
-        if len(d) >= MAX_CACHE_SIZE:
-            oldest = min(d, key=lambda k: d[k]['time'])
-            del d[oldest]
-        d[key] = {'data': value, 'time': time(), 'expires_at': _expires_at(ttl)}
-
-
-def _cache_fresh(entry):
-    """Check if a cache entry is still within its jittered expiry window."""
-    return entry and time() < entry['expires_at']
-
-
-def fetch_json(url, headers=None, ttl=None):
-    """Fetch URL with in-memory cache and stampede protection.
-
-    Uses a per-URL Event for leader election:
-      - First thread to create the Event becomes leader and fetches upstream
-      - Followers wait on the Event, then read from cache
-      - If leader fails, the first follower after cleanup becomes the new leader
-      - Follower fallback also writes to cache to prevent cascading misses
-
-    Args:
-        ttl: Custom TTL override for the cache entry (defaults to CACHE_TTL).
-             Use per-URL offsets to stagger expiry across related URLs.
-    """
-    now = time()
-    with _cache_lock:
-        entry = cache.get(url)
-        if _cache_fresh(entry):
-            return entry['data']
-
-    with _cache_lock:
-        if url in _fetch_inflight:
-            event = _fetch_inflight[url]
-            is_leader = False
-        else:
-            _fetch_inflight[url] = threading.Event()
-            event = _fetch_inflight[url]
-            is_leader = True
-
-    if is_leader:
-        try:
-            req = Request(url, headers=headers or {})
-            with urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
-                data = resp.read().decode('utf-8')
-            _cache_put(cache, url, data, ttl=ttl)
-            return data
-        finally:
-            event.set()
-            with _cache_lock:
-                _fetch_inflight.pop(url, None)
-    else:
-        event.wait(timeout=REQUEST_TIMEOUT)
-        with _cache_lock:
-            entry = cache.get(url)
-            if _cache_fresh(entry):
-                return entry['data']
-        req = Request(url, headers=headers or {})
-        with urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
-            data = resp.read().decode('utf-8')
-        _cache_put(cache, url, data, ttl=ttl)
-        return data
-
-
-def escape_xml(text):
-    """Escape special XML characters."""
-    return (str(text)
-            .replace('&', '&amp;')
-            .replace('<', '&lt;')
-            .replace('>', '&gt;')
-            .replace('"', '&quot;')
-            .replace("'", '&apos;'))
-
-
-def timestamp_to_rfc822(ts):
-    """Convert Unix timestamp to RFC 822 date string."""
-    return formatdate(timeval=ts, localtime=False, usegmt=True)
-
-
-def parse_china_datetime_to_rfc822(value):
-    """Parse a China-local datetime string into an RFC 822 UTC date."""
-    dt = datetime.strptime(value, '%Y-%m-%d %H:%M:%S')
-    dt = dt.replace(tzinfo=timezone(timedelta(hours=8)))
-    return formatdate(timeval=dt.timestamp(), localtime=False, usegmt=True)
-
-
-def strip_html(text):
-    """Strip simple HTML tags from upstream snippets."""
-    text = re.sub(r'<[^>]+>', '', str(text or ''))
-    return unescape(re.sub(r'\s+', ' ', text)).strip()
-
-
-def clean_title(text, max_len=120):
-    """Truncate title to first sentence, max max_len chars."""
-    text = text.strip()
-    if len(text) <= max_len:
-        return text
-    truncated = text[:max_len]
-    for punct in ('。', '！', '？', '；', '\n'):
-        idx = truncated.rfind(punct)
-        if idx > max_len // 3:
-            return text[:idx + 1]
-    for punct in ('，', ', '):
-        idx = truncated.rfind(punct)
-        if idx > max_len // 3:
-            return text[:idx]
-    return truncated + '…'
-
-
-def cls_serialize_sign_value(value, key):
-    """Serialize a value the same way the CLS frontend signs params."""
-    if value is None:
-        return None
-    if isinstance(value, (str, int, float, bool)):
-        return f'{key}={value}'
-    if isinstance(value, list):
-        if not value:
-            return f'{key}[]'
-        return '&'.join(filter(None, (
-            cls_serialize_sign_value(item, f'{key}[{index}]')
-            for index, item in enumerate(value)
-        )))
-    if isinstance(value, dict):
-        return '&'.join(filter(None, (
-            cls_serialize_sign_value(value[item_key], f'{key}[{item_key}]')
-            for item_key in sorted(value, key=lambda item: str(item).upper())
-        )))
-    return None
-
-
-def cls_sign_params(params):
-    """Sign CLS request params using the public web frontend algorithm."""
-    serialized = '&'.join(filter(None, (
-        cls_serialize_sign_value(params[key], key)
-        for key in sorted(params, key=lambda item: str(item).upper())
-    )))
-    sha1_digest = hashlib.sha1(serialized.encode('utf-8')).hexdigest()
-    return hashlib.md5(sha1_digest.encode('utf-8')).hexdigest()
-
-
-def extract_jin10_public_app_id(bundle_text):
-    """Extract Jin10's public frontend app id from its web bundle."""
-    match = re.search(r'"x-app-id":"([^"]+)"', bundle_text)
-    if not match:
-        raise ValueError('Jin10 public app id not found in frontend bundle')
-    return match.group(1)
-
-
-def get_jin10_public_headers():
-    """Build Jin10 headers from public frontend assets without hardcoded ids."""
-    global jin10_public_headers
-    with _cache_lock:
-        if jin10_public_headers:
-            return dict(jin10_public_headers)
-
-    base_headers = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.jin10.com/'}
-    html = fetch_json('https://www.jin10.com/', base_headers)
-    script_match = re.search(r'(?:https:)?//www\.jin10\.com/new/js/index\.[^"\']+\.js', html)
-    if not script_match:
-        script_match = re.search(r'/new/js/index\.[^"\']+\.js', html)
-    if not script_match:
-        raise ValueError('Jin10 frontend bundle not found')
-
-    script_url = script_match.group(0)
-    if script_url.startswith('//'):
-        script_url = 'https:' + script_url
-    elif script_url.startswith('/'):
-        script_url = 'https://www.jin10.com' + script_url
-
-    bundle = fetch_json(script_url, base_headers)
-    app_id = extract_jin10_public_app_id(bundle)
-
-    with _cache_lock:
-        if jin10_public_headers:
-            return dict(jin10_public_headers)
-        jin10_public_headers = {
-            'User-Agent': 'Mozilla/5.0',
-            'Accept': 'application/json,text/plain,*/*',
-            'Referer': 'https://www.jin10.com/',
-            'Origin': 'https://www.jin10.com',
-            'x-app-id': app_id,
-            'x-version': '1.0.0',
-        }
-    return dict(jin10_public_headers)
-
-
-def generate_rss(title, link, description, items, feed_url=None):
-    """Generate standard RSS 2.0 XML."""
-    xml = f'''<?xml version="1.0" encoding="UTF-8"?>
-<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">
-<channel>
-<title>{escape_xml(title)}</title>
-<link>{escape_xml(link)}</link>
-<description>{escape_xml(description)}</description>
-<lastBuildDate>{formatdate(timeval=None, localtime=False, usegmt=True)}</lastBuildDate>
-'''
-    if feed_url:
-        xml += (f'<atom:link href="{escape_xml(feed_url)}" rel="self" '
-                'type="application/rss+xml"/>\n')
-
-    for item in items:
-        xml += '<item>\n'
-        xml += f'<title>{escape_xml(item["title"])}</title>\n'
-        xml += f'<link>{escape_xml(item["link"])}</link>\n'
-        xml += f'<description>{escape_xml(item["description"])}</description>\n'
-        xml += f'<pubDate>{item["pubDate"]}</pubDate>\n'
-        xml += f'<guid isPermaLink="false">{escape_xml(item["guid"])}</guid>\n'
-        xml += '</item>\n'
-
-    xml += '</channel>\n</rss>'
-    return xml
-
-
-def parse_cls_items(payload):
-    """Convert CLS roll_data payload into RSS item dictionaries."""
-    items = []
-    for item in payload.get('data', {}).get('roll_data', []):
-        item_id = item.get('id', '')
-        content = item.get('content', '')
-        title = clean_title(item.get('brief') or content, max_len=120)
-        items.append({
-            'title': title,
-            'link': f'https://www.cls.cn/detail/{item_id}',
-            'description': content,
-            'pubDate': timestamp_to_rfc822(item.get('ctime', 0)),
-            'guid': f'cls_{item_id}',
-        })
-    return items
-
-
-def parse_jin10_items(payload):
-    """Convert Jin10 flash API payload into RSS item dictionaries."""
-    items = []
-    for item in payload.get('data', []):
-        item_id = item.get('id', '')
-        data = item.get('data') or {}
-        title = data.get('title') or strip_html(data.get('content', ''))[:100]
-        content = strip_html(data.get('content') or title)
-        link = data.get('source_link') or f'https://flash.jin10.com/detail/{item_id}'
-        try:
-            pubdate = parse_china_datetime_to_rfc822(item.get('time', ''))
-        except Exception:
-            pubdate = formatdate(timeval=None, localtime=False, usegmt=True)
-
-        items.append({
-            'title': title,
-            'link': link,
-            'description': content,
-            'pubDate': pubdate,
-            'guid': f'jin10_{item_id}',
-        })
-    return items
-
-
-def parse_wallstreetcn_items(payload):
-    """Convert Wallstreetcn live API payload into RSS item dictionaries."""
-    items = []
-    for item in payload.get('data', {}).get('items', []):
-        item_id = item.get('id', '')
-        description = item.get('content_text') or strip_html(item.get('content', ''))
-        title = item.get('title') or description[:100]
-        pub_ts = item.get('display_time') or item.get('created_at') or 0
-
-        items.append({
-            'title': title,
-            'link': item.get('uri') or f'https://wallstreetcn.com/livenews/{item_id}',
-            'description': description,
-            'pubDate': timestamp_to_rfc822(int(pub_ts)),
-            'guid': f'wallstreetcn_{item_id}',
-        })
-    return items
-
-
-def generate_error_rss(title, link, description, error, feed_url=None):
-    """Generate a valid RSS feed that explains an upstream failure."""
-    error_text = str(error) or error.__class__.__name__
-    items = [{
-        'title': f'{title} temporarily unavailable',
-        'link': link,
-        'description': f'Upstream fetch failed: {error_text}',
-        'pubDate': formatdate(timeval=None, localtime=False, usegmt=True),
-        'guid': f'error_{title}'
-    }]
-    return generate_rss(title, link, description, items, feed_url=feed_url)
-
-
-def generate_opml(base_url):
-    """Generate an OPML subscription list for all built-in feeds."""
-    base_url = (base_url or '').rstrip('/')
-    xml = f'''<?xml version="1.0" encoding="UTF-8"?>
-<opml version="2.0">
-<head>
-<title>China Finance RSS Bridge feeds</title>
-</head>
-<body>
-<outline text="China Finance RSS Bridge" title="China Finance RSS Bridge">
-'''
-    for path, info in ROUTES.items():
-        xml += (f'<outline text="{escape_xml(info["name"])}" title="{escape_xml(info["name"])}" '
-                f'type="rss" xmlUrl="{escape_xml(base_url + path)}"/>\n')
-
-    xueqiu_path = '/xueqiu/user/1247347556'
-    xueqiu_name = 'Xueqiu User Example (雪球)'
-    xml += (f'<outline text="{escape_xml(xueqiu_name)}" title="{escape_xml(xueqiu_name)}" '
-            f'type="rss" xmlUrl="{escape_xml(base_url + xueqiu_path)}"/>\n')
-    xml += '</outline>\n</body>\n</opml>'
-    return xml
-
-
-# ── Source handlers ──────────────────────────────────────────────────────────
+# ── Source handlers ────────────────────────────────────────────────────────
 
 def handle_cls_telegraph(feed_url=None):
     """CLS Telegraph (财联社电报) - Real-time financial news flashes."""
     url = 'https://www.cls.cn/v1/roll/get_roll_list'
     params = {
-        'refresh_type': 1,
-        'rn': 50,
-        'last_time': 0,
-        'os': 'web',
-        'sv': '8.7.9',
-        'app': 'CailianpressWeb',
+        'refresh_type': 1, 'rn': 50, 'last_time': 0,
+        'os': 'web', 'sv': '8.7.9', 'app': 'CailianpressWeb',
     }
     params['sign'] = cls_sign_params(params)
     headers = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.cls.cn/telegraph'}
-
     data = json.loads(fetch_json(f'{url}?{urlencode(params)}', headers))
-
-    return generate_rss(
-        '财联社电报',
-        'https://www.cls.cn/telegraph',
-        '财联社实时快讯',
-        parse_cls_items(data),
-        feed_url=feed_url
-    )
+    return generate_rss('财联社电报', 'https://www.cls.cn/telegraph',
+                        '财联社实时快讯', parse_cls_items(data), feed_url=feed_url)
 
 
 def handle_eastmoney_kuaixun(feed_url=None):
     """Eastmoney 7x24 News (东方财富快讯)."""
     url = 'https://newsapi.eastmoney.com/kuaixun/v1/getlist_102_ajaxResult_50_1_.html'
     headers = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://kuaixun.eastmoney.com/'}
-
     data = fetch_json(url, headers)
     match = re.search(r'var ajaxResult=(\{.*\})', data, re.DOTALL)
     if not match:
-        return generate_rss(
-            '东方财富快讯',
-            'https://kuaixun.eastmoney.com/',
-            '东方财富7x24快讯',
-            [],
-            feed_url=feed_url
-        )
-
+        return generate_rss('东方财富快讯', 'https://kuaixun.eastmoney.com/',
+                            '东方财富7x24快讯', [], feed_url=feed_url)
     result = json.loads(match.group(1))
     items = []
-
     for item in result.get('LivesList', []):
         showtime = item.get('showtime', '')
         try:
             pubdate = parse_china_datetime_to_rfc822(showtime)
         except Exception:
             pubdate = formatdate(timeval=None, localtime=False, usegmt=True)
-
         digest = item.get('digest', '')
         items.append({
             'title': item.get('title', ''),
@@ -449,14 +96,8 @@ def handle_eastmoney_kuaixun(feed_url=None):
             'pubDate': pubdate,
             'guid': f"eastmoney_{item.get('newsid', '')}"
         })
-
-    return generate_rss(
-        '东方财富快讯',
-        'https://kuaixun.eastmoney.com/',
-        '东方财富7x24快讯',
-        items,
-        feed_url=feed_url
-    )
+    return generate_rss('东方财富快讯', 'https://kuaixun.eastmoney.com/',
+                        '东方财富7x24快讯', items, feed_url=feed_url)
 
 
 def handle_ths_kuaixun(feed_url=None):
@@ -466,10 +107,8 @@ def handle_ths_kuaixun(feed_url=None):
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         'Referer': 'https://news.10jqka.com.cn/'
     }
-
     data = json.loads(fetch_json(url, headers))
     items = []
-
     for item in data.get('data', {}).get('list', []):
         digest = item.get('digest') or item.get('remark', '')
         items.append({
@@ -479,32 +118,19 @@ def handle_ths_kuaixun(feed_url=None):
             'pubDate': timestamp_to_rfc822(int(item.get('ctime', 0))),
             'guid': f"ths_{item.get('seq', '')}"
         })
-
-    return generate_rss(
-        '同花顺快讯',
-        'https://news.10jqka.com.cn/',
-        '同花顺7x24快讯',
-        items,
-        feed_url=feed_url
-    )
+    return generate_rss('同花顺快讯', 'https://news.10jqka.com.cn/',
+                        '同花顺7x24快讯', items, feed_url=feed_url)
 
 
 def handle_ths_longhu():
-    """THS Longhu (同花顺龙虎榜) — full table with top5 buy/sell brokerages.
-
-    Returns a list of dicts, one per stock:
-        {code, name, price, change_pct, turnover, net_buy,
-         buy_top5: [{name, buy, sell, net}],
-         sell_top5: [{name, buy, sell, net}]}
-    """
-    # Step 1 — stock list from /ifmarket/lhbtable (flat table, no nesting)
-    url = 'https://data.10jqka.com.cn/ifmarket/lhbtable'
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
-        'Referer': 'https://data.10jqka.com.cn/market/longhu/',
-        'X-Requested-With': 'XMLHttpRequest',
-    }
-    req = Request(url, headers=headers)
+    """THS Longhu (同花顺龙虎榜) — full table with top5 buy/sell brokerages."""
+    req = Request(
+        'https://data.10jqka.com.cn/ifmarket/lhbtable',
+        headers={
+            'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
+            'Referer': 'https://data.10jqka.com.cn/market/longhu/',
+            'X-Requested-With': 'XMLHttpRequest',
+        })
     with urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
         stock_html = resp.read().decode('gbk', errors='replace')
 
@@ -526,26 +152,24 @@ def handle_ths_longhu():
             'net_buy': re.sub(r'<[^>]+>', '', cells[6]).strip(),
         })
 
-    # Step 2 — brokerage tables from full page
-    page_url = 'https://data.10jqka.com.cn/market/longhu/'
-    page_headers = {
-        'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
-        'Accept-Language': 'zh-CN,zh;q=0.9',
-    }
-    req = Request(page_url, headers=page_headers)
-    with urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
+    page_req = Request(
+        'https://data.10jqka.com.cn/market/longhu/',
+        headers={
+            'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
+            'Accept-Language': 'zh-CN,zh;q=0.9',
+        })
+    with urlopen(page_req, timeout=REQUEST_TIMEOUT) as resp:
         page_html = resp.read().decode('gbk', errors='replace')
 
     all_tables = re.findall(r'<table[^>]*>(.*?)</table>', page_html, re.DOTALL)
     broker_idx = 0
-    for i, tbl in enumerate(all_tables):
+    for tbl in all_tables:
         ths = re.findall(r'<th[^>]*>(.*?)</th>', tbl, re.DOTALL)
         if not ths:
             continue
         label = re.sub(r'<[^>]+>', '', ths[0]).strip()
         if '买入金额最大的前5名营业部' not in label and '卖出金额最大的前5名营业部' not in label:
             continue
-
         entries = []
         for bro_row in re.findall(r'<tr[^>]*>(.*?)</tr>', tbl, re.DOTALL):
             bro_cells = re.findall(r'<td[^>]*>(.*?)</td>', bro_row, re.DOTALL)
@@ -561,7 +185,6 @@ def handle_ths_longhu():
                 'sell': re.sub(r'<[^>]+>', '', bro_cells[2]).strip() + '万',
                 'net': re.sub(r'<[^>]+>', '', bro_cells[3]).strip() + '万',
             })
-
         if not entries:
             continue
         kind = 'buy_top5' if '买入' in label else 'sell_top5'
@@ -569,7 +192,6 @@ def handle_ths_longhu():
         if stock_idx < len(stocks):
             stocks[stock_idx][kind] = entries
         broker_idx += 1
-
     return {'data': stocks, 'total': len(stocks)}
 
 
@@ -577,13 +199,8 @@ def handle_jin10_flash(feed_url=None):
     """Jin10 7x24 flash news (金十快讯)."""
     url = 'https://flash-api.jin10.com/get_flash_list?channel=-8200&limit=50'
     data = json.loads(fetch_json(url, get_jin10_public_headers()))
-    return generate_rss(
-        '金十快讯',
-        'https://www.jin10.com/',
-        '金十数据7x24快讯',
-        parse_jin10_items(data),
-        feed_url=feed_url
-    )
+    return generate_rss('金十快讯', 'https://www.jin10.com/',
+                        '金十数据7x24快讯', parse_jin10_items(data), feed_url=feed_url)
 
 
 def handle_wallstreetcn_live(feed_url=None):
@@ -594,111 +211,15 @@ def handle_wallstreetcn_live(feed_url=None):
         'Accept': 'application/json,text/plain,*/*',
         'Referer': 'https://wallstreetcn.com/live',
     }
-
     data = json.loads(fetch_json(url, headers))
-    return generate_rss(
-        '华尔街见闻快讯',
-        'https://wallstreetcn.com/live',
-        '华尔街见闻7x24快讯',
-        parse_wallstreetcn_items(data),
-        feed_url=feed_url
-    )
+    return generate_rss('华尔街见闻快讯', 'https://wallstreetcn.com/live',
+                        '华尔街见闻7x24快讯', parse_wallstreetcn_items(data), feed_url=feed_url)
 
 
-
-
-
-# Global CDP engine instance (initialized in main)
-cdp_engine = None
-
-
-# Expected CDP data keys per page — ensures external callers always get a
-# consistent schema (missing keys → null) instead of silent omissions.
-_FINANCE_EXPECTED_KEYS = frozenset({
-    'market_sentiment', 'articles', 'advance_decline',
-    'live_refresh', 'anchor', 'basic_info',
-})
-
-_QUOTATION_EXPECTED_KEYS = frozenset({
-    'hot_plate', 'stock_ranking', 'stock_ipo',
-    'bj_stock_info', 'index_home', 'basic_info',
-})
-
-_STOCK_EXPECTED_KEYS = frozenset({
-    'articles', 'stock_plate',
-    'stock_announcement', 'stock_detail',
-})
-
-# x-quote.cls.cn API base for hotplate data
-_HOTPLATE_BASE_URL = 'https://x-quote.cls.cn/web_quote/plate/plate_list'
-_HOTPLATE_HEADERS = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.cls.cn/hotplate'}
-
-# Fund flow REST API (no CDP needed — direct REST call)
-_FUNDFLOW_BASE_URL = 'https://x-quote.cls.cn/quote/stock/fundflow'
-_FUNDFLOW_HEADERS = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.cls.cn/stock'}
-
-# Background prefetch cache for fund flow (30-stock pool)
-_fundflow_cache = {}            # stock_code -> data dict
-_fundflow_cache_ts = {}         # stock_code -> timestamp of last update
-_fundflow_pool = {}             # stock_code -> last_access_time (for LRU evict)
-_fundflow_cache_lock = threading.Lock()
-_FUNDFLOW_POOL_REFRESH = 25     # seconds between refresh cycles
-_FUNDFLOW_MAX_POOL = 500        # safety cap to prevent OOM from runaway queries
-_MAX_CACHE_AGE = 120            # max age (seconds) for cached entries before forcing re-fetch
-_MAX_BATCH_SIZE = 50             # max stock codes per batch request
-
-# Stock timeline REST API
-_TIMELINE_BASE_URL = 'https://x-quote.cls.cn/quote/stock/tline'
-_TIMELINE_HEADERS = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.cls.cn/stock'}
-
-# Background prefetch cache for timeline
-_timeline_cache = {}
-_timeline_cache_ts = {}
-_timeline_pool = {}
-_timeline_cache_lock = threading.Lock()
-_TIMELINE_POOL_REFRESH = 30
-_TIMELINE_MAX_POOL = 300
-
-# Stock F10 (financial summary) REST API
-_F10_BASE_URL = 'https://x-quote.cls.cn/quote/stock/f10'
-_F10_HEADERS = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.cls.cn/stock'}
-_F10_EXPECTED_KEYS = frozenset({
-    'stock_company_info',
-})
-
-_f10_cache = {}
-_f10_cache_ts = {}
-_f10_pool = {}
-_f10_cache_lock = threading.Lock()
-_F10_POOL_REFRESH = 60
-_F10_MAX_POOL = 300
-
-# Stock Basic Info cache (CDP navigation-based, no REST fallback)
-_basic_info_cache = {}
-_basic_info_cache_ts = {}
-_basic_info_pool = {}
-_basic_info_cache_lock = threading.Lock()
-_BASIC_INFO_POOL_REFRESH = 120
-_BASIC_INFO_MAX_POOL = 300
-
-
-def _fill_missing(result, data, expected_keys):
-    """Fill expected keys not in data as null, preserving extra keys."""
-    for key in expected_keys:
-        result[key] = data.get(key)
-    for k, v in data.items():
-        if k not in expected_keys:
-            result[k] = v
-
+# ── CDP-based JSON handlers ────────────────────────────────────────────────
 
 def handle_finance_market(feed_url=None):
-    """CLS Finance Market Data (财联社看盘) via Chrome CDP.
-
-    Returns JSON with market heat, index data, stock pools, and live feed.
-    Data is continuously collected by a persistent CDP page (see cdp_engine.py).
-    Once collected, _last_data persists across reconnections — external
-    callers always get data once initial collection completes.
-    """
+    """CLS Finance Market Data (财联社看盘) via Chrome CDP."""
     global cdp_engine
     if not cdp_engine or not cdp_engine.ready:
         return {'error': 'Chrome CDP not available. See README.'}
@@ -717,14 +238,7 @@ def handle_finance_market(feed_url=None):
 
 
 def handle_cls_quotation(feed_url=None):
-    """CLS Quotation Market Data (财联社行情) via Chrome CDP.
-
-    Returns JSON with index timelines, advance/decline distribution,
-    hot sectors, stock rankings, NEEQ/BSE data, and IPO info.
-    Data is continuously collected by a persistent CDP page (see cdp_engine.py).
-    Once collected, _last_data persists across reconnections — external
-    callers always get data once initial collection completes.
-    """
+    """CLS Quotation Market Data (财联社行情) via Chrome CDP."""
     global cdp_engine
     if not cdp_engine or not cdp_engine.ready:
         return {'error': 'Chrome CDP not available. See README.'}
@@ -739,638 +253,31 @@ def handle_cls_quotation(feed_url=None):
 
 
 def handle_market_timeline():
-    """CLS Market Index Timeline (指数分时图) — extracted from quotation CDP page."""
+    """CLS Market Index Timeline (指数分时图) — from quotation CDP page."""
     global cdp_engine
     if not cdp_engine or not cdp_engine.ready:
         return {'error': 'Chrome CDP not available. See README.'}
     page = cdp_engine.get_page('cls_quotation')
     if not page:
         return {'error': 'Quotation page not initialized.'}
-    data = page.get_data()
-    return data.get('timeline')
+    return page.get_data().get('timeline')
 
 
 def handle_finance_timeline():
-    """CLS Finance Market Timeline — extracted from finance CDP page."""
+    """CLS Finance Market Timeline — from finance CDP page."""
     global cdp_engine
     if not cdp_engine or not cdp_engine.ready:
         return {'error': 'Chrome CDP not available. See README.'}
     page = cdp_engine.get_page('cls_finance')
     if not page:
         return {'error': 'Finance page not initialized.'}
-    data = page.get_data()
-    return data.get('timeline')
+    return page.get_data().get('timeline')
 
 
-def handle_cls_stock(stock_code, timeout=30):
-    """CLS Stock Detail Data (财联社个股详情) via persistent CDP page.
-
-    Reuses a single hidden tab; navigates to the requested stock code,
-    waits for fresh data, caches the result, and returns immediately.
-    """
-    global cdp_engine
-    if not cdp_engine or not cdp_engine.ready:
-        return {'error': 'Chrome CDP not available. See README.'}
-    page = cdp_engine.get_page('cls_stock_data')
-    if not page:
-        page = cdp_engine.get_page('cls_stock')
-    if not page:
-        return {'error': 'Stock page not initialized.'}
-    deadline = time() + min(timeout, 10)
-    ok = False
-    while time() < deadline:
-        if page.navigate_stock(stock_code, timeout=min(timeout, 8), tabs=()):
-            ok = True
-            break
-        sleep(0.5)
-    if not ok:
-        return {'error': f'Failed to navigate to stock {stock_code}'}
-    data = page.get_data()
-    data.pop('stock_quote', None)
-    data.pop('basic_info', None)
-    data.pop('timeline', None)
-    data.pop('stock_f10', None)
-    data.pop('stock_company_info', None)
-    result = {}
-    _fill_missing(result, data, _STOCK_EXPECTED_KEYS)
-    return result
-
-
-def fetch_cls_fundflow(stock_code):
-    """Fetch fund flow — REST first, CDP evaluate_fetch fallback.
-
-    Uses fetch_json cache (15s TTL) for user-facing requests.
-    The background prefetch loop uses _fundflow_direct_fetch instead.
-    """
-    url = f'{_FUNDFLOW_BASE_URL}?secu_code={stock_code}'
-    try:
-        raw = json.loads(fetch_json(url, _FUNDFLOW_HEADERS, ttl=15))
-        if raw.get('code') == 200:
-            return raw.get('data')
-    except Exception:
-        pass
-
-    # Fallback: CDP evaluate_fetch (anti-ban)
-    global cdp_engine
-    if cdp_engine and cdp_engine.ready:
-        page = cdp_engine.get_page('cls_fundflow')
-        if page:
-            result = page.evaluate_fetch(url, timeout=15)
-            if result and isinstance(result, dict) and result.get('code') == 200:
-                return result.get('data')
-    return None
-
-
-def _fundflow_direct_fetch(stock_code):
-    """Fetch fund flow data via CDP browser context (anti-ban).
-
-    Uses the persistent cls_fundflow page's JavaScript runtime to fire
-    a fetch() call — request comes from the browser (same IP, cookies,
-    headers as a real CLS user). Falls back to direct REST if CDP is
-    not available or fails.
-    """
-    global cdp_engine
-    if cdp_engine and cdp_engine.ready:
-        page = cdp_engine.get_page('cls_fundflow')
-        if page:
-            url = f'{_FUNDFLOW_BASE_URL}?secu_code={stock_code}'
-            result = page.evaluate_fetch(url, timeout=15)
-            if result and isinstance(result, dict) and result.get('code') == 200:
-                return result.get('data')
-            # Evaluate may return the raw data differently; check for error field
-            if result and isinstance(result, dict) and result.get('error'):
-                print(f'[fundflow] CDP fetch error for {stock_code}: {result["error"]}')
-
-    # Fallback: direct REST call (no browser protection)
-    req = Request(f'{_FUNDFLOW_BASE_URL}?secu_code={stock_code}',
-                   headers=_FUNDFLOW_HEADERS)
-    try:
-        with urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
-            raw = json.loads(resp.read().decode('utf-8'))
-            if raw.get('code') == 200:
-                return raw.get('data')
-    except Exception:
-        pass
-    return None
-
-
-def handle_cls_fundflow(codes):
-    """Fund Flow Data (资金流向) — REST-based, batch supported, no CDP needed.
-
-    Args:
-        codes: list of stock code strings.
-    Returns:
-        dict of {stock_code: data_or_None, ...}.
-    Auto-registers all codes into the background prefetch pool
-    with LRU eviction when _FUNDFLOW_MAX_POOL is exceeded.
-    """
-    # Deduplicate while preserving order
-    seen = set()
-    codes = [c for c in codes if not (c in seen or seen.add(c))]
-
-    if not codes:
-        return {}
-
-    now = time()
-    with _fundflow_cache_lock:
-        for code in codes:
-            _fundflow_pool[code] = now
-        # LRU evict: trim pool to max size, remove oldest entries
-        if len(_fundflow_pool) > _FUNDFLOW_MAX_POOL:
-            excess = sorted(_fundflow_pool, key=_fundflow_pool.get)[:len(_fundflow_pool) - _FUNDFLOW_MAX_POOL]
-            for code in excess:
-                del _fundflow_pool[code]
-                _fundflow_cache.pop(code, None)
-                _fundflow_cache_ts.pop(code, None)
-
-    result = {}
-    missing = []
-    with _fundflow_cache_lock:
-        for code in codes:
-            cached = _fundflow_cache.get(code)
-            if cached is not None:
-                ts = _fundflow_cache_ts.get(code, 0)
-                if now - ts < _MAX_CACHE_AGE:
-                    result[code] = cached
-                else:
-                    missing.append(code)
-            else:
-                missing.append(code)
-
-    for code in missing:
-        data = fetch_cls_fundflow(code)
-        if data:
-            with _fundflow_cache_lock:
-                _fundflow_cache[code] = data
-                _fundflow_cache_ts[code] = time()
-            result[code] = data
-        else:
-            result[code] = None
-
-    return result
-
-
-def _fundflow_prefetch_loop():
-    """Background thread: refresh fund flow for all auto-registered stocks.
-
-    Runs every FUNDFLOW_POOL_REFRESH seconds (trading hours) or 300s (off-hours).
-    Bypasses fetch_json cache so data is always fresh.
-    One failed stock does not block others.
-    """
-    while True:
-        try:
-            ttl, _ = _china_trading_ttl()
-            interval = max(_FUNDFLOW_POOL_REFRESH, ttl)
-            sleep(interval)
-            with _fundflow_cache_lock:
-                codes = list(_fundflow_pool.keys())
-            if not codes:
-                continue
-            for code in codes:
-                data = _fundflow_direct_fetch(code)
-                if data:
-                    with _fundflow_cache_lock:
-                        _fundflow_cache[code] = data
-                        _fundflow_cache_ts[code] = time()
-        except Exception as e:
-            print(f'[fundflow] prefetch error: {e}')
-
-
-def fetch_cls_timeline(stock_code):
-    """Fetch stock timeline — REST first, CDP evaluate_fetch fallback."""
-    url = f'{_TIMELINE_BASE_URL}?secu_code={stock_code}'
-    try:
-        raw = json.loads(fetch_json(url, _TIMELINE_HEADERS, ttl=15))
-        if raw.get('code') == 200:
-            return raw.get('data')
-    except Exception:
-        pass
-
-    global cdp_engine
-    if cdp_engine and cdp_engine.ready:
-        page = cdp_engine.get_page('cls_fundflow')
-        if page:
-            result = page.evaluate_fetch(url, timeout=15)
-            if result and isinstance(result, dict) and result.get('code') == 200:
-                return result.get('data')
-    return None
-
-
-def _timeline_direct_fetch(stock_code):
-    """Fetch timeline data via CDP browser context (anti-ban)."""
-    global cdp_engine
-    if cdp_engine and cdp_engine.ready:
-        page = cdp_engine.get_page('cls_fundflow')
-        if page:
-            url = f'{_TIMELINE_BASE_URL}?secu_code={stock_code}'
-            result = page.evaluate_fetch(url, timeout=15)
-            if result and isinstance(result, dict) and result.get('code') == 200:
-                return result.get('data')
-            if result and isinstance(result, dict) and result.get('error'):
-                print(f'[timeline] CDP fetch error for {stock_code}: {result["error"]}')
-
-    req = Request(f'{_TIMELINE_BASE_URL}?secu_code={stock_code}',
-                   headers=_TIMELINE_HEADERS)
-    try:
-        with urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
-            raw = json.loads(resp.read().decode('utf-8'))
-            if raw.get('code') == 200:
-                return raw.get('data')
-    except Exception:
-        pass
-    return None
-
-
-def handle_cls_timeline(codes):
-    """Stock Timeline Data (分时图) — REST-based, batch supported.
-
-    Args:
-        codes: list of stock code strings.
-    Returns:
-        dict of {stock_code: data_or_None, ...}.
-    """
-    seen = set()
-    codes = [c for c in codes if not (c in seen or seen.add(c))]
-
-    if not codes:
-        return {}
-
-    now = time()
-    with _timeline_cache_lock:
-        for code in codes:
-            _timeline_pool[code] = now
-        if len(_timeline_pool) > _TIMELINE_MAX_POOL:
-            excess = sorted(_timeline_pool, key=_timeline_pool.get)[:len(_timeline_pool) - _TIMELINE_MAX_POOL]
-            for code in excess:
-                del _timeline_pool[code]
-                _timeline_cache.pop(code, None)
-                _timeline_cache_ts.pop(code, None)
-
-    result = {}
-    missing = []
-    with _timeline_cache_lock:
-        for code in codes:
-            cached = _timeline_cache.get(code)
-            if cached is not None:
-                ts = _timeline_cache_ts.get(code, 0)
-                if now - ts < _MAX_CACHE_AGE:
-                    result[code] = cached
-                else:
-                    missing.append(code)
-            else:
-                missing.append(code)
-
-    for code in missing:
-        data = fetch_cls_timeline(code)
-        if data:
-            with _timeline_cache_lock:
-                _timeline_cache[code] = data
-                _timeline_cache_ts[code] = time()
-            result[code] = data
-        else:
-            result[code] = None
-
-    return result
-
-
-def _timeline_prefetch_loop():
-    """Background thread: refresh timeline for all auto-registered stocks."""
-    while True:
-        try:
-            ttl, _ = _china_trading_ttl()
-            interval = max(_TIMELINE_POOL_REFRESH, ttl)
-            sleep(interval)
-            with _timeline_cache_lock:
-                codes = list(_timeline_pool.keys())
-            if not codes:
-                continue
-            for code in codes:
-                data = _timeline_direct_fetch(code)
-                if data:
-                    with _timeline_cache_lock:
-                        _timeline_cache[code] = data
-                        _timeline_cache_ts[code] = time()
-        except Exception as e:
-            print(f'[timeline] prefetch error: {e}')
-
-
-def fetch_cls_f10(stock_code, deadline=None):
-    """Fetch company info — CDP page navigation (clicks F10 tab).
-
-    Page navigation captures company_info (industry, plates, etc.).
-    REST fallback is unavailable — this API only loads via F10 tab click.
-
-    Args:
-        stock_code: stock code string.
-        deadline: optional absolute deadline (time.time()), overrides default 10s.
-    """
-    global cdp_engine
-    if cdp_engine and cdp_engine.ready:
-        page = cdp_engine.get_page('cls_stock_f10') or cdp_engine.get_page('cls_stock')
-        if page:
-            deadline = deadline or time() + 10
-            ok = False
-            while time() < deadline:
-                timeout = min(8, deadline - time() - 0.5)
-                if timeout < 1:
-                    break
-                if page.navigate_stock(stock_code, tabs=('f10',), timeout=timeout):
-                    ok = True
-                    break
-                sleep(0.5)
-            if not ok:
-                return None
-            data = page.get_data()
-            result = {}
-            _fill_missing(result, data, _F10_EXPECTED_KEYS)
-            if result:
-                return result.get('stock_company_info')
-    return None
-
-
-def _f10_direct_fetch(stock_code, deadline=None):
-    """Fetch company info via CDP page navigation (anti-ban).
-
-    Args:
-        stock_code: stock code string.
-        deadline: optional absolute deadline (time.time()), overrides default 10s.
-    """
-    global cdp_engine
-    if cdp_engine and cdp_engine.ready:
-        page = cdp_engine.get_page('cls_stock_f10') or cdp_engine.get_page('cls_stock')
-        if page:
-            deadline = deadline or time() + 10
-            ok = False
-            while time() < deadline:
-                timeout = min(8, deadline - time() - 0.5)
-                if timeout < 1:
-                    break
-                if page.navigate_stock(stock_code, tabs=('f10',), timeout=timeout):
-                    ok = True
-                    break
-                sleep(0.5)
-            if not ok:
-                return None
-            data = page.get_data()
-            result = {}
-            _fill_missing(result, data, _F10_EXPECTED_KEYS)
-            if result:
-                return result.get('stock_company_info')
-    return None
-
-
-def handle_cls_f10(codes):
-    """Stock F10 Financial Summary — REST-based, batch supported.
-
-    Args:
-        codes: list of stock code strings.
-    Returns:
-        dict of {stock_code: data_or_None, ...}.
-    """
-    seen = set()
-    codes = [c for c in codes if not (c in seen or seen.add(c))]
-
-    if not codes:
-        return {}
-
-    result = {}
-    valid = []
-    for code in codes:
-        if VALID_STOCK_CODE.match(code):
-            valid.append(code)
-        else:
-            result[code] = None
-    codes = valid
-
-    now = time()
-    with _f10_cache_lock:
-        for code in codes:
-            _f10_pool[code] = now
-        if len(_f10_pool) > _F10_MAX_POOL:
-            excess = sorted(_f10_pool, key=_f10_pool.get)[:len(_f10_pool) - _F10_MAX_POOL]
-            for code in excess:
-                del _f10_pool[code]
-                _f10_cache.pop(code, None)
-                _f10_cache_ts.pop(code, None)
-
-    missing = []
-    with _f10_cache_lock:
-        for code in codes:
-            cached = _f10_cache.get(code)
-            if cached is not None:
-                ts = _f10_cache_ts.get(code, 0)
-                if now - ts < _MAX_CACHE_AGE:
-                    result[code] = cached
-                else:
-                    missing.append(code)
-            else:
-                missing.append(code)
-
-    batch_deadline = time() + 25
-    missing_count = len(missing)
-    for i, code in enumerate(missing):
-        remaining = batch_deadline - time()
-        if remaining <= 0:
-            result[code] = None
-            continue
-        per_stock = remaining / (missing_count - i)
-        per_stock = max(5, min(8, per_stock))
-        data = fetch_cls_f10(code, deadline=time() + per_stock)
-        if data:
-            with _f10_cache_lock:
-                _f10_cache[code] = data
-                _f10_cache_ts[code] = time()
-            result[code] = data
-        else:
-            result[code] = None
-
-    return result
-
-
-def fetch_cls_basic_info(stock_code, deadline=None):
-    """Fetch basic info via CDP page navigation with F10 tab click.
-
-    Navigates the shared cls_stock page to the target stock, clicks
-    the F10 tab to capture company_info, and returns basic_info merged
-    with sector_name (申万一级行业, from IndustryName).
-
-    Args:
-        stock_code: stock code string.
-        deadline: optional absolute deadline (time.time()), overrides default 10s.
-    """
-    global cdp_engine
-    if cdp_engine and cdp_engine.ready:
-        page = cdp_engine.get_page('cls_stock_basic_info') or cdp_engine.get_page('cls_stock')
-        if page:
-            deadline = deadline or time() + 10
-            ok = False
-            while time() < deadline:
-                timeout = min(8, deadline - time() - 0.5)
-                if timeout < 1:
-                    break
-                if page.navigate_stock(stock_code, tabs=('f10',), timeout=timeout):
-                    ok = True
-                    break
-                sleep(0.5)
-            if not ok:
-                return None
-            data = page.get_data()
-            result = data.get('basic_info')
-            ci = data.get('stock_company_info')
-            if isinstance(ci, dict):
-                ci_bi = ci.get('basic_info', {})
-                sector = ci_bi.get('IndustryName')
-                if sector:
-                    if result is None:
-                        result = {}
-                    # IndustryName format: "食品饮料-白酒Ⅱ-白酒Ⅲ" → take first level
-                    result['sector_name'] = sector.split('-')[0]
-            return result
-    return None
-
-
-def handle_cls_basic_infos(codes):
-    """Stock Basic Info — CDP navigation-based, batch supported.
-
-    Args:
-        codes: list of stock code strings.
-    Returns:
-        dict of {stock_code: data_or_None, ...}.
-    """
-    seen = set()
-    codes = [c for c in codes if not (c in seen or seen.add(c))]
-
-    if not codes:
-        return {}
-
-    result = {}
-    valid = []
-    for code in codes:
-        if VALID_STOCK_CODE.match(code):
-            valid.append(code)
-        else:
-            result[code] = None
-    codes = valid
-
-    now = time()
-    with _basic_info_cache_lock:
-        for code in codes:
-            _basic_info_pool[code] = now
-        if len(_basic_info_pool) > _BASIC_INFO_MAX_POOL:
-            excess = sorted(_basic_info_pool, key=_basic_info_pool.get)[:len(_basic_info_pool) - _BASIC_INFO_MAX_POOL]
-            for code in excess:
-                del _basic_info_pool[code]
-                _basic_info_cache.pop(code, None)
-                _basic_info_cache_ts.pop(code, None)
-
-    missing = []
-    with _basic_info_cache_lock:
-        for code in codes:
-            cached = _basic_info_cache.get(code)
-            if cached is not None:
-                ts = _basic_info_cache_ts.get(code, 0)
-                if now - ts < _MAX_CACHE_AGE:
-                    result[code] = cached
-                else:
-                    missing.append(code)
-            else:
-                missing.append(code)
-
-    batch_deadline = time() + 25
-    missing_count = len(missing)
-    for i, code in enumerate(missing):
-        remaining = batch_deadline - time()
-        if remaining <= 0:
-            result[code] = None
-            continue
-        per_stock = remaining / (missing_count - i)
-        per_stock = max(5, min(8, per_stock))
-        data = fetch_cls_basic_info(code, deadline=time() + per_stock)
-        if data:
-            with _basic_info_cache_lock:
-                _basic_info_cache[code] = data
-                _basic_info_cache_ts[code] = time()
-            result[code] = data
-        else:
-            result[code] = None
-
-    return result
-
-
-def _basic_info_prefetch_loop():
-    """Background thread: refresh basic info for all auto-registered stocks."""
-    while True:
-        try:
-            ttl, _ = _china_trading_ttl()
-            interval = max(_BASIC_INFO_POOL_REFRESH, ttl)
-            sleep(interval)
-            with _basic_info_cache_lock:
-                codes = list(_basic_info_pool.keys())
-            if not codes:
-                continue
-            for code in codes:
-                # Limit each prefetch to 4s to avoid blocking user requests
-                data = fetch_cls_basic_info(code, deadline=time() + 4)
-                if data:
-                    with _basic_info_cache_lock:
-                        _basic_info_cache[code] = data
-                        _basic_info_cache_ts[code] = time()
-        except Exception as e:
-            print(f'[basic_info] prefetch error: {e}')
-
-
-def _f10_prefetch_loop():
-    """Background thread: refresh F10 for all auto-registered stocks."""
-    while True:
-        try:
-            ttl, _ = _china_trading_ttl()
-            interval = max(_F10_POOL_REFRESH, ttl)
-            sleep(interval)
-            with _f10_cache_lock:
-                codes = list(_f10_pool.keys())
-            if not codes:
-                continue
-            for code in codes:
-                # Limit each prefetch to 4s to avoid blocking user requests
-                data = _f10_direct_fetch(code, deadline=time() + 4)
-                if data:
-                    with _f10_cache_lock:
-                        _f10_cache[code] = data
-                        _f10_cache_ts[code] = time()
-        except Exception as e:
-            print(f'[f10] prefetch error: {e}')
-
-
-def _china_trading_ttl():
-    """Return (base_ttl, stagger_step) for China A-share trading status.
-
-    Trading hours (Mon-Fri, UTC+8): 09:30-11:30, 13:00-15:00.
-    During trading → short TTL (30s) to keep quant data fresh.
-    Outside trading → normal TTL (300s).
-    """
-    now_utc = datetime.now(timezone.utc)
-    now_cst = now_utc + timedelta(hours=8)
-    if now_cst.weekday() >= 5:
-        return (300, 90)                    # weekend, long TTL
-    h, m = now_cst.hour, now_cst.minute
-    in_morning = (h == 9 and m >= 30) or (10 <= h <= 10) or (h == 11 and m <= 30)
-    in_afternoon = (13 <= h <= 14)
-    if in_morning or in_afternoon:
-        return (30, 15)                     # trading hours, short TTL
-    return (300, 90)                        # night / pre-market, long TTL
-
+# ── Hotplate ───────────────────────────────────────────────────────────────
 
 def handle_cls_hotplate(feed_url=None):
-    """CLS Hotplate Data (财联社板块) — uses same sign mechanism as telegraph.
-
-    Returns:
-      plate_industry / plate_concept / plate_area — plate list per type
-      hot_plates — combined top 3 + last 3 hot sectors by fund flow (6 total)
-
-    Cache strategy: each plate type gets a staggered TTL so the three entries
-    do not expire simultaneously, preventing burst re-fetches.
-    During trading hours base=30s, off-hours base=300s.
-    """
+    """CLS Hotplate Data (财联社板块) — uses same sign mechanism as telegraph."""
     result = {}
     hot_plates = None
     _BASE_TTL, _STAGGER = _china_trading_ttl()
@@ -1387,7 +294,6 @@ def handle_cls_hotplate(feed_url=None):
                                         ttl=_BASE_TTL + _TTL_OFFSETS[ptype]))
             data = raw.get('data') or raw
             result[f'plate_{ptype}'] = data
-            # Extract hot plates (6 = 3 top + 3 last) from first successful response
             if hot_plates is None:
                 mfd = data.get('main_fund_diff') or {}
                 top = mfd.get('top_main_fund_diff') or []
@@ -1401,19 +307,14 @@ def handle_cls_hotplate(feed_url=None):
     return result
 
 
-def xueqiu_fetch_via_cdp(api_path):
-    """Fetch Xueqiu API via Chrome CDP to bypass WAF.
+# ── Xueqiu (CDP-based) ─────────────────────────────────────────────────────
 
-    Requires:
-    - Chrome running with --remote-debugging-port
-    - A Xueqiu tab open and logged in
-    - pip install websocket-client
-    """
+def xueqiu_fetch_via_cdp(api_path):
+    """Fetch Xueqiu API via Chrome CDP to bypass WAF."""
     try:
-        import websocket  # noqa: lazy import
+        import websocket
     except ImportError:
         return None
-
     try:
         ws_url = find_tab('xueqiu')
         if not ws_url:
@@ -1426,19 +327,12 @@ def xueqiu_fetch_via_cdp(api_path):
 
 
 def handle_xueqiu_user(uid, feed_url=None):
-    """Xueqiu user timeline (雪球用户动态).
-
-    Uses Chrome CDP to bypass Alibaba Cloud WAF.
-    """
+    """Xueqiu user timeline (雪球用户动态) via Chrome CDP."""
     data = xueqiu_fetch_via_cdp(f'/v4/statuses/user_timeline.json?user_id={uid}&page=1&type=0')
-
     if not data:
-        return generate_rss(
-            '雪球用户动态', f'https://xueqiu.com/u/{uid}',
-            'Error: Chrome CDP not available or Xueqiu tab not found. '
-            'See README for setup instructions.', [], feed_url=feed_url
-        )
-
+        return generate_rss('雪球用户动态', f'https://xueqiu.com/u/{uid}',
+                            'Error: Chrome CDP not available or Xueqiu tab not found. '
+                            'See README for setup instructions.', [], feed_url=feed_url)
     items = []
     for item in data.get('statuses', []):
         created_at = item.get('created_at', 0) // 1000
@@ -1449,18 +343,12 @@ def handle_xueqiu_user(uid, feed_url=None):
             'pubDate': timestamp_to_rfc822(created_at),
             'guid': f"xueqiu_{item.get('id', '')}"
         })
-
     username = data.get('statuses', [{}])[0].get('user', {}).get('screen_name', uid)
-    return generate_rss(
-        f'雪球-{username}',
-        f'https://xueqiu.com/u/{uid}',
-        f'{username}的雪球动态',
-        items,
-        feed_url=feed_url
-    )
+    return generate_rss(f'雪球-{username}', f'https://xueqiu.com/u/{uid}',
+                        f'{username}的雪球动态', items, feed_url=feed_url)
 
 
-# ── HTTP Server ──────────────────────────────────────────────────────────────
+# ── Route table ─────────────────────────────────────────────────────────────
 
 ROUTES = {
     '/cls/telegraph': {
@@ -1501,11 +389,7 @@ ROUTES = {
 }
 
 
-def count_rss_items(xml):
-    """Return the number of RSS items in a generated feed."""
-    root = ET.fromstring(xml)
-    return len(root.findall('./channel/item'))
-
+# ── Health payload ──────────────────────────────────────────────────────────
 
 def build_health_payload(base_url, check_sources=False):
     """Build a JSON-serializable health payload."""
@@ -1519,7 +403,6 @@ def build_health_payload(base_url, check_sources=False):
             'url': base_url + path,
             'status': 'configured',
         }
-
         if check_sources:
             try:
                 xml = info['handler'](feed_url=base_url + path)
@@ -1529,94 +412,64 @@ def build_health_payload(base_url, check_sources=False):
                 entry['status'] = 'error'
                 entry['error'] = str(exc)
                 status = 'degraded'
-
         feeds.append(entry)
 
-    feeds.append({
-        'name': 'Xueqiu User Example (雪球)',
-        'path': '/xueqiu/user/1247347556',
-        'url': base_url + '/xueqiu/user/1247347556',
-        'status': 'requires_chrome_cdp',
-    })
+    feeds.append({'name': 'Xueqiu User Example (雪球)',
+                  'path': '/xueqiu/user/1247347556',
+                  'url': base_url + '/xueqiu/user/1247347556',
+                  'status': 'requires_chrome_cdp'})
+    feeds.append({'name': 'CLS Finance Market (财联社看盘)',
+                  'path': '/finance/market',
+                  'url': base_url + '/finance/market',
+                  'status': 'requires_chrome_cdp'})
+    feeds.append({'name': 'CLS Quotation Market (财联社行情)',
+                  'path': '/quotation/market',
+                  'url': base_url + '/quotation/market',
+                  'status': 'requires_chrome_cdp'})
+    feeds.append({'name': 'CLS Stock Detail (财联社个股详情)',
+                  'path': '/stock/data',
+                  'url': base_url + '/stock/data',
+                  'status': 'requires_chrome_cdp'})
+    feeds.append({'name': 'CLS Stock Fund Flow (财联社个股资金流向)',
+                  'path': '/stock/fundflow',
+                  'url': base_url + '/stock/fundflow',
+                  'status': 'configured'})
+    feeds.append({'name': 'CLS Hotplate (财联社板块)',
+                  'path': '/cls/hotplate',
+                  'url': base_url + '/cls/hotplate',
+                  'status': 'configured'})
+    feeds.append({'name': 'CLS Stock Timeline (个股分时图)',
+                  'path': '/stock/timeline',
+                  'url': base_url + '/stock/timeline',
+                  'status': 'configured'})
+    feeds.append({'name': 'CLS Stock F10 (个股F10财务概要)',
+                  'path': '/stock/f10',
+                  'url': base_url + '/stock/f10',
+                  'status': 'configured'})
+    feeds.append({'name': 'CLS Stock Basic Info (个股基本信息)',
+                  'path': '/stock/basic_info',
+                  'url': base_url + '/stock/basic_info',
+                  'status': 'requires_chrome_cdp'})
 
-    feeds.append({
-        'name': 'CLS Finance Market (财联社看盘)',
-        'path': '/finance/market',
-        'url': base_url + '/finance/market',
-        'status': 'requires_chrome_cdp',
-    })
+    return {'status': status, 'cache_ttl': CACHE_TTL,
+            'request_timeout': REQUEST_TIMEOUT, 'feeds': feeds}
 
-    feeds.append({
-        'name': 'CLS Quotation Market (财联社行情)',
-        'path': '/quotation/market',
-        'url': base_url + '/quotation/market',
-        'status': 'requires_chrome_cdp',
-    })
 
-    feeds.append({
-        'name': 'CLS Stock Detail (财联社个股详情)',
-        'path': '/stock/data',
-        'url': base_url + '/stock/data',
-        'status': 'requires_chrome_cdp',
-    })
-
-    feeds.append({
-        'name': 'CLS Stock Fund Flow (财联社个股资金流向)',
-        'path': '/stock/fundflow',
-        'url': base_url + '/stock/fundflow',
-        'status': 'configured',
-    })
-
-    feeds.append({
-        'name': 'CLS Hotplate (财联社板块)',
-        'path': '/cls/hotplate',
-        'url': base_url + '/cls/hotplate',
-        'status': 'configured',
-    })
-
-    feeds.append({
-        'name': 'CLS Stock Timeline (个股分时图)',
-        'path': '/stock/timeline',
-        'url': base_url + '/stock/timeline',
-        'status': 'configured',
-    })
-
-    feeds.append({
-        'name': 'CLS Stock F10 (个股F10财务概要)',
-        'path': '/stock/f10',
-        'url': base_url + '/stock/f10',
-        'status': 'configured',
-    })
-
-    feeds.append({
-        'name': 'CLS Stock Basic Info (个股基本信息)',
-        'path': '/stock/basic_info',
-        'url': base_url + '/stock/basic_info',
-        'status': 'requires_chrome_cdp',
-    })
-
-    return {
-        'status': status,
-        'cache_ttl': CACHE_TTL,
-        'request_timeout': REQUEST_TIMEOUT,
-        'feeds': feeds,
-    }
-
+# ── HTTP Server ─────────────────────────────────────────────────────────────
 
 class RSSHandler(BaseHTTPRequestHandler):
     """HTTP request handler for RSS feeds."""
 
-    timeout = 30  # seconds — prevents slow clients from tying up worker threads
+    timeout = 30
 
     def log_error(self, format, *args):
         if format == 'Request timed out: %r':
-            return  # suppress — harmless slow client connections
+            return
         self.log_message(format, *args)
 
     def log_date_time_string(self):
-        """Return current Beijing time (UTC+8) for access logs."""
         from time import strftime, gmtime
-        return strftime('%d/%b/%Y %H:%M:%S', gmtime(time() + 28800))
+        return strftime('%d/%b/%Y %H:%M:%S', gmtime(time.time() + 28800))
 
     def log_message(self, format, *args):
         sys.stderr.write(f"[{self.log_date_time_string()}] {format % args}\n")
@@ -1643,7 +496,7 @@ class RSSHandler(BaseHTTPRequestHandler):
             return
         if path == '/opml.xml':
             self._send_text(200, 'text/x-opml; charset=utf-8',
-                            generate_opml(base_url), write_body=write_body)
+                            generate_opml(base_url, ROUTES), write_body=write_body)
             return
         if path == '/healthz':
             query = parse_qs(parsed.query)
@@ -1655,151 +508,41 @@ class RSSHandler(BaseHTTPRequestHandler):
                             body, cache=False, write_body=write_body)
             return
         if path == '/finance/market':
-            data = handle_finance_market()
-            body = json.dumps(data, ensure_ascii=False, indent=2)
-            self._send_text(200, 'application/json; charset=utf-8',
-                            body, cache=True, write_body=write_body)
+            self._send_json(handle_finance_market(), write_body=write_body)
             return
         if path == '/finance/timeline':
-            data = handle_finance_timeline()
-            body = json.dumps(data, ensure_ascii=False, indent=2)
-            self._send_text(200, 'application/json; charset=utf-8',
-                            body, cache=True, write_body=write_body)
+            self._send_json(handle_finance_timeline(), write_body=write_body)
             return
         if path == '/quotation/market':
-            data = handle_cls_quotation()
-            body = json.dumps(data, ensure_ascii=False, indent=2)
-            self._send_text(200, 'application/json; charset=utf-8',
-                            body, cache=True, write_body=write_body)
+            self._send_json(handle_cls_quotation(), write_body=write_body)
             return
         if path == '/market/timeline':
-            data = handle_market_timeline()
-            body = json.dumps(data, ensure_ascii=False, indent=2)
-            self._send_text(200, 'application/json; charset=utf-8',
-                            body, cache=True, write_body=write_body)
+            self._send_json(handle_market_timeline(), write_body=write_body)
             return
         if path == '/stock/data':
             params = parse_qs(parsed.query)
             if 'code' not in params:
-                self._send_text(400, 'application/json; charset=utf-8',
-                                json.dumps({'error': 'Missing ?code= parameter. Usage: /stock/data?code=sh600519'}),
-                                cache=False, write_body=write_body)
+                self._send_error('Missing ?code= parameter. Usage: /stock/data?code=sh600519')
                 return
-            stock_code = params['code'][0]
-            data = handle_cls_stock(stock_code)
-            body = json.dumps(data, ensure_ascii=False, indent=2)
-            self._send_text(200, 'application/json; charset=utf-8',
-                            body, cache=True, write_body=write_body)
+            self._send_json(handle_cls_stock(params['code'][0]), write_body=write_body)
             return
         if path == '/stock/fundflow':
-            params = parse_qs(parsed.query)
-            if 'code' not in params:
-                self._send_text(400, 'application/json; charset=utf-8',
-                                json.dumps({'error': 'Missing ?code= parameter. Usage: /stock/fundflow?code=sh600519 or /stock/fundflow?code=sh600519,sz000001'}),
-                                cache=False, write_body=write_body)
-                return
-            codes_str = params['code'][0]
-            stock_codes = [c.strip() for c in codes_str.split(',') if c.strip()]
-            if not stock_codes:
-                self._send_text(400, 'application/json; charset=utf-8',
-                                json.dumps({'error': 'No valid stock codes provided.'}),
-                                cache=False, write_body=write_body)
-                return
-            if len(stock_codes) > _MAX_BATCH_SIZE:
-                stock_codes = stock_codes[:_MAX_BATCH_SIZE]
-            data = handle_cls_fundflow(stock_codes)
-            if len(stock_codes) == 1:
-                body = json.dumps({stock_codes[0]: data.get(stock_codes[0])},
-                                  ensure_ascii=False, indent=2)
-            else:
-                body = json.dumps(data, ensure_ascii=False, indent=2)
-            self._send_text(200, 'application/json; charset=utf-8',
-                            body, cache=True, write_body=write_body)
+            self._handle_stock_batch(parsed, handle_cls_fundflow, write_body=write_body)
             return
         if path == '/stock/timeline':
-            params = parse_qs(parsed.query)
-            if 'code' not in params:
-                self._send_text(400, 'application/json; charset=utf-8',
-                                json.dumps({'error': 'Missing ?code= parameter. Usage: /stock/timeline?code=sh600519 or /stock/timeline?code=sh600519,sz000001'}),
-                                cache=False, write_body=write_body)
-                return
-            codes_str = params['code'][0]
-            stock_codes = [c.strip() for c in codes_str.split(',') if c.strip()]
-            if not stock_codes:
-                self._send_text(400, 'application/json; charset=utf-8',
-                                json.dumps({'error': 'No valid stock codes provided.'}),
-                                cache=False, write_body=write_body)
-                return
-            if len(stock_codes) > _MAX_BATCH_SIZE:
-                stock_codes = stock_codes[:_MAX_BATCH_SIZE]
-            data = handle_cls_timeline(stock_codes)
-            if len(stock_codes) == 1:
-                body = json.dumps({stock_codes[0]: data.get(stock_codes[0])},
-                                  ensure_ascii=False, indent=2)
-            else:
-                body = json.dumps(data, ensure_ascii=False, indent=2)
-            self._send_text(200, 'application/json; charset=utf-8',
-                            body, cache=True, write_body=write_body)
+            self._handle_stock_batch(parsed, handle_cls_timeline, write_body=write_body)
             return
         if path == '/stock/f10':
-            params = parse_qs(parsed.query)
-            if 'code' not in params:
-                self._send_text(400, 'application/json; charset=utf-8',
-                                json.dumps({'error': 'Missing ?code= parameter. Usage: /stock/f10?code=sh600519 or /stock/f10?code=sh600519,sz000001'}),
-                                cache=False, write_body=write_body)
-                return
-            codes_str = params['code'][0]
-            stock_codes = [c.strip() for c in codes_str.split(',') if c.strip()]
-            if not stock_codes:
-                self._send_text(400, 'application/json; charset=utf-8',
-                                json.dumps({'error': 'No valid stock codes provided.'}),
-                                cache=False, write_body=write_body)
-                return
-            if len(stock_codes) > _MAX_BATCH_SIZE:
-                stock_codes = stock_codes[:_MAX_BATCH_SIZE]
-            data = handle_cls_f10(stock_codes)
-            if len(stock_codes) == 1:
-                body = json.dumps({stock_codes[0]: data.get(stock_codes[0])},
-                                  ensure_ascii=False, indent=2)
-            else:
-                body = json.dumps(data, ensure_ascii=False, indent=2)
-            self._send_text(200, 'application/json; charset=utf-8',
-                            body, cache=True, write_body=write_body)
+            self._handle_stock_batch(parsed, handle_cls_f10, write_body=write_body)
             return
         if path == '/stock/basic_info':
-            params = parse_qs(parsed.query)
-            if 'code' not in params:
-                self._send_text(400, 'application/json; charset=utf-8',
-                                json.dumps({'error': 'Missing ?code= parameter. Usage: /stock/basic_info?code=sh600519 or /stock/basic_info?code=sh600519,sz000001'}),
-                                cache=False, write_body=write_body)
-                return
-            codes_str = params['code'][0]
-            stock_codes = [c.strip() for c in codes_str.split(',') if c.strip()]
-            if not stock_codes:
-                self._send_text(400, 'application/json; charset=utf-8',
-                                json.dumps({'error': 'No valid stock codes provided.'}),
-                                cache=False, write_body=write_body)
-                return
-            if len(stock_codes) > _MAX_BATCH_SIZE:
-                stock_codes = stock_codes[:_MAX_BATCH_SIZE]
-            data = handle_cls_basic_infos(stock_codes)
-            if len(stock_codes) == 1:
-                body = json.dumps({stock_codes[0]: data.get(stock_codes[0])},
-                                  ensure_ascii=False, indent=2)
-            else:
-                body = json.dumps(data, ensure_ascii=False, indent=2)
-            self._send_text(200, 'application/json; charset=utf-8',
-                            body, cache=True, write_body=write_body)
+            self._handle_stock_batch(parsed, handle_cls_basic_infos, write_body=write_body)
             return
         if path == '/cls/hotplate':
-            data = handle_cls_hotplate()
-            body = json.dumps(data, ensure_ascii=False, indent=2)
-            self._send_text(200, 'application/json; charset=utf-8',
-                            body, cache=True, write_body=write_body)
+            self._send_json(handle_cls_hotplate(), write_body=write_body)
             return
         if path == '/ths/longhu':
-            data = handle_ths_longhu()
-            body = json.dumps(data, ensure_ascii=False, indent=2)
+            body = json.dumps(handle_ths_longhu(), ensure_ascii=False, indent=2)
             self._send_text(200, 'application/json; charset=utf-8',
                             body, cache=False, write_body=write_body)
             return
@@ -1809,17 +552,47 @@ class RSSHandler(BaseHTTPRequestHandler):
         if path.startswith('/xueqiu/user/'):
             uid = path.split('/')[-1]
             feed_url = base_url + path
-            xml = self._get_or_fetch_feed(
-                path, lambda: handle_xueqiu_user(uid, feed_url=feed_url))
+            xml = self._get_or_fetch_feed(path, lambda: handle_xueqiu_user(uid, feed_url=feed_url))
             self._send_text(200, 'application/rss+xml; charset=utf-8',
                             xml, write_body=write_body)
             return
 
         self.send_error(404, 'Not Found. Visit / for available feeds.')
 
+    def _handle_stock_batch(self, parsed, handler, write_body=True):
+        params = parse_qs(parsed.query)
+        if 'code' not in params:
+            self._send_error('Missing ?code= parameter. Usage: /stock/...?code=sh600519 or ...?code=sh600519,sz000001')
+            return
+        codes_str = params['code'][0]
+        stock_codes = [c.strip() for c in codes_str.split(',') if c.strip()]
+        if not stock_codes:
+            self._send_error('No valid stock codes provided.')
+            return
+        if len(stock_codes) > _MAX_BATCH_SIZE:
+            stock_codes = stock_codes[:_MAX_BATCH_SIZE]
+        data = handler(stock_codes)
+        if len(stock_codes) == 1:
+            body = json.dumps({stock_codes[0]: data.get(stock_codes[0])},
+                              ensure_ascii=False, indent=2)
+        else:
+            body = json.dumps(data, ensure_ascii=False, indent=2)
+        self._send_text(200, 'application/json; charset=utf-8',
+                        body, cache=True, write_body=write_body)
+
+    def _send_error(self, msg):
+        body = json.dumps({'error': msg}, ensure_ascii=False, indent=2)
+        self._send_text(400, 'application/json; charset=utf-8',
+                        body, cache=False, write_body=True)
+
+    def _send_json(self, data, write_body=True):
+        body = json.dumps(data, ensure_ascii=False, indent=2)
+        self._send_text(200, 'application/json; charset=utf-8',
+                        body, cache=True, write_body=write_body)
+
     def _get_or_fetch_feed(self, path, fetch_func):
-        """Thread-safe feed cache lookup with stampede protection and LRU eviction."""
-        now = time()
+        """Thread-safe feed cache with stampede protection and LRU eviction."""
+        now = time.time()
         with _feed_cache_lock:
             cached = feed_cache.get(path)
             if cached and now < cached['expires_at']:
@@ -1833,7 +606,7 @@ class RSSHandler(BaseHTTPRequestHandler):
         with lock:
             with _feed_cache_lock:
                 cached = feed_cache.get(path)
-                if cached and time() < cached['expires_at']:
+                if cached and time.time() < cached['expires_at']:
                     return cached['xml']
             try:
                 xml = fetch_func()
@@ -1846,21 +619,20 @@ class RSSHandler(BaseHTTPRequestHandler):
                     del feed_cache[oldest]
                     _feed_fetch_locks.pop(oldest, None)
                 feed_cache[path] = {
-                    'xml': xml, 'time': time(),
-                    'expires_at': time() + CACHE_TTL * (1 + random.uniform(-CACHE_JITTER, CACHE_JITTER))
+                    'xml': xml, 'time': time.time(),
+                    'expires_at': time.time() + CACHE_TTL * (1 + random.uniform(-CACHE_JITTER, CACHE_JITTER))
                 }
         return xml
 
     def _serve_feed(self, path, base_url, write_body=True):
         handler = ROUTES[path]['handler']
         feed_url = base_url + path
-
         try:
             xml = self._get_or_fetch_feed(path, lambda: handler(feed_url=feed_url))
         except Exception as exc:
             info = ROUTES[path]
-            xml = generate_error_rss(info['title'], info['link'], info['description'], exc, feed_url=feed_url)
-
+            xml = generate_error_rss(info['title'], info['link'],
+                                     info['description'], exc, feed_url=feed_url)
         self._send_text(200, 'application/rss+xml; charset=utf-8',
                         xml, write_body=write_body)
 
@@ -1888,7 +660,7 @@ class RSSHandler(BaseHTTPRequestHandler):
                  '<body><h1>🇨🇳 China Finance RSS Bridge</h1><ul>']
         for path, info in ROUTES.items():
             lines.append(f'<li><a href="{path}">{info["name"]}</a></li>')
-        lines.append(f'<li><a href="/xueqiu/user/1247347556">Xueqiu User Example (雪球)</a></li>')
+        lines.append('<li><a href="/xueqiu/user/1247347556">Xueqiu User Example (雪球)</a></li>')
         lines.append('</ul><p><a href="/finance/market">Finance Market JSON</a> | '
                       '<a href="/finance/timeline">Finance Timeline JSON</a> | '
                       '<a href="/quotation/market">Quotation Market JSON</a> | '
@@ -1909,12 +681,7 @@ class RSSHandler(BaseHTTPRequestHandler):
 
 
 class BoundedThreadPoolServer(ThreadingHTTPServer):
-    """HTTPServer with a fixed-size thread pool instead of per-request threads.
-
-    Prevents thread explosion on 2C2G hardware under burst traffic.
-    Falls back to the parent's thread-per-request for truly concurrent CDP requests,
-    but the pool limits how many in-flight requests can consume worker threads.
-    """
+    """HTTPServer with a fixed-size thread pool instead of per-request threads."""
 
     allow_reuse_address = True
     daemon_threads = True
@@ -1931,12 +698,7 @@ class BoundedThreadPoolServer(ThreadingHTTPServer):
         super().server_close()
 
 
-def warm_jin10_headers():
-    try:
-        get_jin10_public_headers()
-    except Exception:
-        pass
-
+# ── CDP init ────────────────────────────────────────────────────────────────
 
 def init_cdp():
     """Initialize CDP engine with persistent CLS pages."""
@@ -1950,21 +712,18 @@ def init_cdp():
         return
     cdp_engine.add_page('cls_finance', 'https://www.cls.cn/finance')
     cdp_engine.add_page('cls_quotation', 'https://www.cls.cn/quotation')
-    # Stock navigation pages — separate pages per endpoint to avoid lock contention
-    cdp_engine.add_page('cls_stock_data', 'https://www.cls.cn/stock?code=sz300139',
-                        heartbeat=False)
-    cdp_engine.add_page('cls_stock_basic_info', 'https://www.cls.cn/stock?code=sz300139',
-                        heartbeat=False)
-    cdp_engine.add_page('cls_stock_f10', 'https://www.cls.cn/stock?code=sz300139',
-                        heartbeat=False)
-    # Legacy fallback (used if new pages fail to initialize)
-    cdp_engine.add_page('cls_stock', 'https://www.cls.cn/stock?code=sz300139',
-                        heartbeat=False)
-    # Lightweight pages for fund flow and timeline API calls
-    cdp_engine.add_page('cls_fundflow', 'https://www.cls.cn/stock',
-                        heartbeat=False)
-    print(f'  ✓ CDP engine ready — finance, quotation, 3 stock pages & fundflow')
+    cdp_engine.add_page('cls_stock_data', 'https://www.cls.cn/stock?code=sz300139', heartbeat=False)
+    cdp_engine.add_page('cls_stock_basic_info', 'https://www.cls.cn/stock?code=sz300139', heartbeat=False)
+    cdp_engine.add_page('cls_stock_f10', 'https://www.cls.cn/stock?code=sz300139', heartbeat=False)
+    cdp_engine.add_page('cls_stock', 'https://www.cls.cn/stock?code=sz300139', heartbeat=False)
+    cdp_engine.add_page('cls_fundflow', 'https://www.cls.cn/stock', heartbeat=False)
+    print('  ✓ CDP engine ready — finance, quotation, 3 stock pages & fundflow')
+    # Sync global in config.py so stock_api sees it
+    import config
+    config.cdp_engine = cdp_engine
 
+
+# ── Main entry point ────────────────────────────────────────────────────────
 
 def main():
     def _signal_handler(signum, frame):
@@ -1978,6 +737,7 @@ def main():
         if cdp_engine:
             cdp_engine.shutdown()
 
+    from utils import warm_jin10_headers
     threading.Thread(target=warm_jin10_headers, daemon=True).start()
     threading.Thread(target=init_cdp, daemon=True).start()
     threading.Thread(target=_fundflow_prefetch_loop, daemon=True).start()
@@ -2004,7 +764,6 @@ def main():
     print(f'  http://localhost:{PORT}/stock/basic_info  — Stock Basic Info (JSON, needs Chrome CDP)')
     print(f'  http://localhost:{PORT}/opml.xml  — OPML subscription list')
     print(f'  http://localhost:{PORT}/healthz?check=1  — Source health check')
-    print(f'\nNote: Xueqiu, Finance Market, Quotation, Stock Detail and Stock Basic Info require Chrome with CDP enabled.\n      Hotplate, Stock Fund Flow, Stock Timeline and Stock F10 do NOT require CDP — they use direct API calls with signing.')
     print(f'Visit http://localhost:{PORT}/ for the web index.\n')
 
     server = BoundedThreadPoolServer(('0.0.0.0', PORT), RSSHandler)

@@ -12,7 +12,7 @@ RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list 2>/dev/
         libgbm1 libpango-1.0-0 libcairo2 libasound2 && \
     rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt server.py cdp_engine.py ./
+COPY requirements.txt *.py ./
 RUN pip install --no-cache-dir -r requirements.txt
 
 ENV PORT=8053 PYTHONUNBUFFERED=1 MAX_WORKERS=10
