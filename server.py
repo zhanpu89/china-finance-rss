@@ -57,6 +57,8 @@ _fetch_inflight = {}        # url -> threading.Event for cache stampede protecti
 MAX_CACHE_SIZE = 200
 MAX_FEED_CACHE_SIZE = 100
 CACHE_JITTER = 0.2  # ±20% random jitter on TTL to stagger expiry
+
+VALID_STOCK_CODE = re.compile(r'^(sh|sz|bj)\d{6}$', re.IGNORECASE)
 MAX_WORKERS = int(os.getenv('MAX_WORKERS', '20'))  # Max concurrent request threads
 
 
@@ -1052,22 +1054,31 @@ def _timeline_prefetch_loop():
             print(f'[timeline] prefetch error: {e}')
 
 
-def fetch_cls_f10(stock_code):
+def fetch_cls_f10(stock_code, deadline=None):
     """Fetch company info — CDP page navigation (clicks F10 tab).
 
     Page navigation captures company_info (industry, plates, etc.).
     REST fallback is unavailable — this API only loads via F10 tab click.
+
+    Args:
+        stock_code: stock code string.
+        deadline: optional absolute deadline (time.time()), overrides default 10s.
     """
     global cdp_engine
     if cdp_engine and cdp_engine.ready:
         page = cdp_engine.get_page('cls_stock_f10') or cdp_engine.get_page('cls_stock')
         if page:
-            deadline = time() + 10
+            deadline = deadline or time() + 10
+            ok = False
             while time() < deadline:
-                if page.navigate_stock(stock_code, tabs=('f10',), timeout=8):
+                timeout = min(8, deadline - time() - 0.5)
+                if timeout < 1:
+                    break
+                if page.navigate_stock(stock_code, tabs=('f10',), timeout=timeout):
+                    ok = True
                     break
                 sleep(0.5)
-            else:
+            if not ok:
                 return None
             data = page.get_data()
             result = {}
@@ -1077,18 +1088,28 @@ def fetch_cls_f10(stock_code):
     return None
 
 
-def _f10_direct_fetch(stock_code):
-    """Fetch company info via CDP page navigation (anti-ban)."""
+def _f10_direct_fetch(stock_code, deadline=None):
+    """Fetch company info via CDP page navigation (anti-ban).
+
+    Args:
+        stock_code: stock code string.
+        deadline: optional absolute deadline (time.time()), overrides default 10s.
+    """
     global cdp_engine
     if cdp_engine and cdp_engine.ready:
         page = cdp_engine.get_page('cls_stock_f10') or cdp_engine.get_page('cls_stock')
         if page:
-            deadline = time() + 10
+            deadline = deadline or time() + 10
+            ok = False
             while time() < deadline:
-                if page.navigate_stock(stock_code, tabs=('f10',), timeout=8):
+                timeout = min(8, deadline - time() - 0.5)
+                if timeout < 1:
+                    break
+                if page.navigate_stock(stock_code, tabs=('f10',), timeout=timeout):
+                    ok = True
                     break
                 sleep(0.5)
-            else:
+            if not ok:
                 return None
             data = page.get_data()
             result = {}
@@ -1112,6 +1133,15 @@ def handle_cls_f10(codes):
     if not codes:
         return {}
 
+    result = {}
+    valid = []
+    for code in codes:
+        if VALID_STOCK_CODE.match(code):
+            valid.append(code)
+        else:
+            result[code] = None
+    codes = valid
+
     now = time()
     with _f10_cache_lock:
         for code in codes:
@@ -1123,7 +1153,6 @@ def handle_cls_f10(codes):
                 _f10_cache.pop(code, None)
                 _f10_cache_ts.pop(code, None)
 
-    result = {}
     missing = []
     with _f10_cache_lock:
         for code in codes:
@@ -1137,12 +1166,16 @@ def handle_cls_f10(codes):
             else:
                 missing.append(code)
 
-    batch_deadline = time() + 28
-    for code in missing:
-        if time() >= batch_deadline:
+    batch_deadline = time() + 25
+    missing_count = len(missing)
+    for i, code in enumerate(missing):
+        remaining = batch_deadline - time()
+        if remaining <= 0:
             result[code] = None
             continue
-        data = fetch_cls_f10(code)
+        per_stock = remaining / (missing_count - i)
+        per_stock = max(5, min(8, per_stock))
+        data = fetch_cls_f10(code, deadline=time() + per_stock)
         if data:
             with _f10_cache_lock:
                 _f10_cache[code] = data
@@ -1154,23 +1187,32 @@ def handle_cls_f10(codes):
     return result
 
 
-def fetch_cls_basic_info(stock_code):
+def fetch_cls_basic_info(stock_code, deadline=None):
     """Fetch basic info via CDP page navigation with F10 tab click.
 
     Navigates the shared cls_stock page to the target stock, clicks
     the F10 tab to capture company_info, and returns basic_info merged
     with sector_name (申万一级行业, from IndustryName).
+
+    Args:
+        stock_code: stock code string.
+        deadline: optional absolute deadline (time.time()), overrides default 10s.
     """
     global cdp_engine
     if cdp_engine and cdp_engine.ready:
         page = cdp_engine.get_page('cls_stock_basic_info') or cdp_engine.get_page('cls_stock')
         if page:
-            deadline = time() + 10
+            deadline = deadline or time() + 10
+            ok = False
             while time() < deadline:
-                if page.navigate_stock(stock_code, tabs=('f10',), timeout=8):
+                timeout = min(8, deadline - time() - 0.5)
+                if timeout < 1:
+                    break
+                if page.navigate_stock(stock_code, tabs=('f10',), timeout=timeout):
+                    ok = True
                     break
                 sleep(0.5)
-            else:
+            if not ok:
                 return None
             data = page.get_data()
             result = data.get('basic_info')
@@ -1201,6 +1243,15 @@ def handle_cls_basic_infos(codes):
     if not codes:
         return {}
 
+    result = {}
+    valid = []
+    for code in codes:
+        if VALID_STOCK_CODE.match(code):
+            valid.append(code)
+        else:
+            result[code] = None
+    codes = valid
+
     now = time()
     with _basic_info_cache_lock:
         for code in codes:
@@ -1212,7 +1263,6 @@ def handle_cls_basic_infos(codes):
                 _basic_info_cache.pop(code, None)
                 _basic_info_cache_ts.pop(code, None)
 
-    result = {}
     missing = []
     with _basic_info_cache_lock:
         for code in codes:
@@ -1226,12 +1276,16 @@ def handle_cls_basic_infos(codes):
             else:
                 missing.append(code)
 
-    batch_deadline = time() + 28  # cap entire batch to prevent handler timeout
-    for code in missing:
-        if time() >= batch_deadline:
+    batch_deadline = time() + 25
+    missing_count = len(missing)
+    for i, code in enumerate(missing):
+        remaining = batch_deadline - time()
+        if remaining <= 0:
             result[code] = None
             continue
-        data = fetch_cls_basic_info(code)
+        per_stock = remaining / (missing_count - i)
+        per_stock = max(5, min(8, per_stock))
+        data = fetch_cls_basic_info(code, deadline=time() + per_stock)
         if data:
             with _basic_info_cache_lock:
                 _basic_info_cache[code] = data
@@ -1255,7 +1309,8 @@ def _basic_info_prefetch_loop():
             if not codes:
                 continue
             for code in codes:
-                data = fetch_cls_basic_info(code)
+                # Limit each prefetch to 4s to avoid blocking user requests
+                data = fetch_cls_basic_info(code, deadline=time() + 4)
                 if data:
                     with _basic_info_cache_lock:
                         _basic_info_cache[code] = data
@@ -1276,7 +1331,8 @@ def _f10_prefetch_loop():
             if not codes:
                 continue
             for code in codes:
-                data = _f10_direct_fetch(code)
+                # Limit each prefetch to 4s to avoid blocking user requests
+                data = _f10_direct_fetch(code, deadline=time() + 4)
                 if data:
                     with _f10_cache_lock:
                         _f10_cache[code] = data

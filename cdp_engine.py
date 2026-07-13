@@ -747,11 +747,12 @@ class CDPPage:
         """
         url = f'https://www.cls.cn/stock?code={stock_code}'
         # Fast path: skip navigation if cache already has fresh data for this code
-        cached = self._last_data.get('basic_info', {}).get('data', {}).get('secu_code')
+        cached = ((self._last_data.get('basic_info') or {}).get('data') or {}).get('secu_code')
         if cached == stock_code:
             return True
-        if not self._navigate_lock.acquire(blocking=False):
-            return self._last_data.get('basic_info', {}).get('data', {}).get('secu_code') == stock_code
+        # Wait up to 1.5s for lock if held by prefetch
+        if not self._navigate_lock.acquire(timeout=1.5):
+            return ((self._last_data.get('basic_info') or {}).get('data') or {}).get('secu_code') == stock_code
         try:
             if not self._ensure_ws():
                 return False
@@ -776,6 +777,8 @@ class CDPPage:
                 except:
                     break
             deadline = time.time() + timeout
+            last_seen_code = None
+            stable_count = 0
             while time.time() < deadline:
                 self.refresh()
                 data = self.get_data()
@@ -797,6 +800,16 @@ class CDPPage:
                             time.sleep(1)
                             self.refresh()
                     return True
+                # Fail fast: page settled on a wrong stock code
+                secu_code = bi.get('secu_code')
+                if secu_code:
+                    if secu_code == last_seen_code:
+                        stable_count += 1
+                    else:
+                        last_seen_code = secu_code
+                        stable_count = 0
+                    if stable_count >= 3:
+                        break
                 time.sleep(0.5)
             self.refresh()
             data = self.get_data()
