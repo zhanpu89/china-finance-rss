@@ -27,6 +27,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from email.utils import formatdate
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 from urllib.parse import parse_qs, urlencode
 
