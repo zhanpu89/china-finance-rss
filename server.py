@@ -57,7 +57,7 @@ _fetch_inflight = {}        # url -> threading.Event for cache stampede protecti
 MAX_CACHE_SIZE = 200
 MAX_FEED_CACHE_SIZE = 100
 CACHE_JITTER = 0.2  # ±20% random jitter on TTL to stagger expiry
-MAX_WORKERS = int(os.getenv('MAX_WORKERS', '10'))  # Max concurrent request threads
+MAX_WORKERS = int(os.getenv('MAX_WORKERS', '20'))  # Max concurrent request threads
 
 
 def _expires_at(ttl=None):
@@ -769,7 +769,9 @@ def handle_cls_stock(stock_code, timeout=30):
     global cdp_engine
     if not cdp_engine or not cdp_engine.ready:
         return {'error': 'Chrome CDP not available. See README.'}
-    page = cdp_engine.get_page('cls_stock')
+    page = cdp_engine.get_page('cls_stock_data')
+    if not page:
+        page = cdp_engine.get_page('cls_stock')
     if not page:
         return {'error': 'Stock page not initialized.'}
     deadline = time() + min(timeout, 10)
@@ -793,21 +795,11 @@ def handle_cls_stock(stock_code, timeout=30):
 
 
 def fetch_cls_fundflow(stock_code):
-    """Fetch fund flow — CDP evaluate_fetch first, REST fallback.
+    """Fetch fund flow — REST first, CDP evaluate_fetch fallback.
 
     Uses fetch_json cache (15s TTL) for user-facing requests.
     The background prefetch loop uses _fundflow_direct_fetch instead.
     """
-    global cdp_engine
-    if cdp_engine and cdp_engine.ready:
-        page = cdp_engine.get_page('cls_fundflow')
-        if page:
-            url = f'{_FUNDFLOW_BASE_URL}?secu_code={stock_code}'
-            result = page.evaluate_fetch(url, timeout=15)
-            if result and isinstance(result, dict) and result.get('code') == 200:
-                return result.get('data')
-
-    # Fallback: use fetch_json with cache
     url = f'{_FUNDFLOW_BASE_URL}?secu_code={stock_code}'
     try:
         raw = json.loads(fetch_json(url, _FUNDFLOW_HEADERS, ttl=15))
@@ -815,6 +807,15 @@ def fetch_cls_fundflow(stock_code):
             return raw.get('data')
     except Exception:
         pass
+
+    # Fallback: CDP evaluate_fetch (anti-ban)
+    global cdp_engine
+    if cdp_engine and cdp_engine.ready:
+        page = cdp_engine.get_page('cls_fundflow')
+        if page:
+            result = page.evaluate_fetch(url, timeout=15)
+            if result and isinstance(result, dict) and result.get('code') == 200:
+                return result.get('data')
     return None
 
 
@@ -934,16 +935,7 @@ def _fundflow_prefetch_loop():
 
 
 def fetch_cls_timeline(stock_code):
-    """Fetch stock timeline — CDP evaluate_fetch first, REST fallback."""
-    global cdp_engine
-    if cdp_engine and cdp_engine.ready:
-        page = cdp_engine.get_page('cls_fundflow')
-        if page:
-            url = f'{_TIMELINE_BASE_URL}?secu_code={stock_code}'
-            result = page.evaluate_fetch(url, timeout=15)
-            if result and isinstance(result, dict) and result.get('code') == 200:
-                return result.get('data')
-
+    """Fetch stock timeline — REST first, CDP evaluate_fetch fallback."""
     url = f'{_TIMELINE_BASE_URL}?secu_code={stock_code}'
     try:
         raw = json.loads(fetch_json(url, _TIMELINE_HEADERS, ttl=15))
@@ -951,6 +943,14 @@ def fetch_cls_timeline(stock_code):
             return raw.get('data')
     except Exception:
         pass
+
+    global cdp_engine
+    if cdp_engine and cdp_engine.ready:
+        page = cdp_engine.get_page('cls_fundflow')
+        if page:
+            result = page.evaluate_fetch(url, timeout=15)
+            if result and isinstance(result, dict) and result.get('code') == 200:
+                return result.get('data')
     return None
 
 
@@ -1060,11 +1060,11 @@ def fetch_cls_f10(stock_code):
     """
     global cdp_engine
     if cdp_engine and cdp_engine.ready:
-        page = cdp_engine.get_page('cls_stock')
+        page = cdp_engine.get_page('cls_stock_f10') or cdp_engine.get_page('cls_stock')
         if page:
             deadline = time() + 10
             while time() < deadline:
-                if page.navigate_stock(stock_code, tabs=('f10',), timeout=6):
+                if page.navigate_stock(stock_code, tabs=('f10',), timeout=8):
                     break
                 sleep(0.5)
             else:
@@ -1081,11 +1081,11 @@ def _f10_direct_fetch(stock_code):
     """Fetch company info via CDP page navigation (anti-ban)."""
     global cdp_engine
     if cdp_engine and cdp_engine.ready:
-        page = cdp_engine.get_page('cls_stock')
+        page = cdp_engine.get_page('cls_stock_f10') or cdp_engine.get_page('cls_stock')
         if page:
             deadline = time() + 10
             while time() < deadline:
-                if page.navigate_stock(stock_code, tabs=('f10',), timeout=6):
+                if page.navigate_stock(stock_code, tabs=('f10',), timeout=8):
                     break
                 sleep(0.5)
             else:
@@ -1163,11 +1163,11 @@ def fetch_cls_basic_info(stock_code):
     """
     global cdp_engine
     if cdp_engine and cdp_engine.ready:
-        page = cdp_engine.get_page('cls_stock')
+        page = cdp_engine.get_page('cls_stock_basic_info') or cdp_engine.get_page('cls_stock')
         if page:
             deadline = time() + 10
             while time() < deadline:
-                if page.navigate_stock(stock_code, tabs=('f10',), timeout=6):
+                if page.navigate_stock(stock_code, tabs=('f10',), timeout=8):
                     break
                 sleep(0.5)
             else:
@@ -1883,7 +1883,7 @@ def warm_jin10_headers():
 
 
 def init_cdp():
-    """Initialize CDP engine with persistent CLS finance page."""
+    """Initialize CDP engine with persistent CLS pages."""
     global cdp_engine
     if not ensure_chrome():
         print('  ✗ Chrome not available. CDP endpoints will return errors.')
@@ -1894,12 +1894,20 @@ def init_cdp():
         return
     cdp_engine.add_page('cls_finance', 'https://www.cls.cn/finance')
     cdp_engine.add_page('cls_quotation', 'https://www.cls.cn/quotation')
+    # Stock navigation pages — separate pages per endpoint to avoid lock contention
+    cdp_engine.add_page('cls_stock_data', 'https://www.cls.cn/stock?code=sz300139',
+                        heartbeat=False)
+    cdp_engine.add_page('cls_stock_basic_info', 'https://www.cls.cn/stock?code=sz300139',
+                        heartbeat=False)
+    cdp_engine.add_page('cls_stock_f10', 'https://www.cls.cn/stock?code=sz300139',
+                        heartbeat=False)
+    # Legacy fallback (used if new pages fail to initialize)
     cdp_engine.add_page('cls_stock', 'https://www.cls.cn/stock?code=sz300139',
                         heartbeat=False)
-    # Lightweight page for fund flow API calls — no heartbeat, no navigation
+    # Lightweight pages for fund flow and timeline API calls
     cdp_engine.add_page('cls_fundflow', 'https://www.cls.cn/stock',
                         heartbeat=False)
-    print(f'  ✓ CDP engine ready — finance, quotation, stock & fundflow pages')
+    print(f'  ✓ CDP engine ready — finance, quotation, 3 stock pages & fundflow')
 
 
 def main():

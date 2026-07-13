@@ -746,14 +746,19 @@ class CDPPage:
                   ()                   — no tabs, fastest (~2-3s total).
         """
         url = f'https://www.cls.cn/stock?code={stock_code}'
+        # Fast path: skip navigation if cache already has fresh data for this code
+        cached = self._last_data.get('basic_info', {}).get('data', {}).get('secu_code')
+        if cached == stock_code:
+            return True
         if not self._navigate_lock.acquire(blocking=False):
             return self._last_data.get('basic_info', {}).get('data', {}).get('secu_code') == stock_code
         try:
             if not self._ensure_ws():
                 return False
-            self.cache.clear()
-            self._last_data.clear()
-            self._last_data_ts.clear()
+            with self._lock:
+                self.cache.clear()
+                self._last_data.clear()
+                self._last_data_ts.clear()
             self._key_last_seen.clear()
             self._api_urls.clear()
             with self._ws_lock:
@@ -785,11 +790,11 @@ class CDPPage:
                     if not is_bse:
                         if 'fund_flow' in tabs:
                             self._click_fund_flow_tab()
-                            time.sleep(2)
+                            time.sleep(1)
                             self.refresh()
                         if 'f10' in tabs:
                             self._click_f10_tab()
-                            time.sleep(2)
+                            time.sleep(1)
                             self.refresh()
                     return True
                 time.sleep(0.5)
@@ -828,7 +833,7 @@ class CDPPage:
             })()
         """
         try:
-            self._evaluate(js, timeout=5)
+            self._evaluate(js, timeout=3)
         except Exception:
             pass
 
@@ -860,7 +865,7 @@ class CDPPage:
             })()
         """
         try:
-            self._evaluate(js, timeout=5)
+            self._evaluate(js, timeout=3)
         except Exception:
             pass
 
