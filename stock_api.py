@@ -4,6 +4,7 @@ All CDP-based endpoints use `config.cdp_engine` (set by server.py init).
 """
 
 import json
+import os
 import threading
 from time import sleep, time
 from urllib.parse import urlencode
@@ -445,7 +446,7 @@ _basic_info_pool = {}
 _basic_info_cache_lock = threading.Lock()
 
 # Shared sector name cache (industry rarely changes, long TTL + file persistence)
-_SECTOR_CACHE_FILE = 'sector_cache.json'
+_SECTOR_CACHE_FILE = 'data/sector_cache.json'
 _sector_cache = {}
 _sector_cache_lock = threading.Lock()
 
@@ -474,6 +475,7 @@ def _save_sector_cache():
     try:
         with _sector_cache_lock:
             data = dict(_sector_cache)
+        os.makedirs(os.path.dirname(_SECTOR_CACHE_FILE), exist_ok=True)
         with open(_SECTOR_CACHE_FILE, 'w') as f:
             json.dump(data, f, ensure_ascii=False)
     except Exception as e:

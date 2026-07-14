@@ -12,7 +12,7 @@ services:
       - MAX_WORKERS=10
       - PUBLIC_BASE_URL=
     volumes:
-      - ./sector_cache.json:/app/sector_cache.json
+      - ./data:/app/data
     mem_limit: 2g
     mem_reservation: 1g
     logging:

@@ -20,4 +20,4 @@ build/
 *cookies*
 chrome-profile/
 chrome-user-data/
-sector_cache.json
+data/
