@@ -52,6 +52,21 @@ _TIMELINE_HEADERS = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.cls.cn
 _F10_BASE_URL = 'https://x-quote.cls.cn/quote/stock/f10'
 _F10_HEADERS = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.cls.cn/stock'}
 
+_ANNOUNCEMENT_BASE_URL = 'https://x-quote.cls.cn/quote/index/ann'
+_ANNOUNCEMENT_HEADERS = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.cls.cn/stock'}
+
+# Basic info REST API (direct access, no CDP needed)
+_BASIC_INFO_BASE_URL = 'https://x-quote.cls.cn/quote/stock/basic'
+_BASIC_INFO_HEADERS = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.cls.cn/stock'}
+
+# Stock detail REST API (direct access, no CDP needed)
+_STOCK_DETAIL_BASE_URL = 'https://x-quote.cls.cn/quote/stock/detail'
+_STOCK_DETAIL_HEADERS = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.cls.cn/stock'}
+
+# Company info REST API (needs in-browser auth via CDP evaluate_fetch)
+_COMPANY_INFO_BASE_URL = 'https://x-quote.cls.cn/quote/stock/company_info'
+_COMPANY_INFO_HEADERS = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.cls.cn/stock'}
+
 # Pool refresh intervals and caps
 _FUNDFLOW_POOL_REFRESH = 25
 _FUNDFLOW_MAX_POOL = 500
@@ -61,6 +76,8 @@ _F10_POOL_REFRESH = 60
 _F10_MAX_POOL = 300
 _BASIC_INFO_POOL_REFRESH = 120
 _BASIC_INFO_MAX_POOL = 300
+_ANNOUNCEMENT_POOL_REFRESH = 60
+_ANNOUNCEMENT_MAX_POOL = 300
 
 # Shared runtime globals (set by server.py init)
 cdp_engine = None

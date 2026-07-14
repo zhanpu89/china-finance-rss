@@ -48,11 +48,13 @@ from utils import (
     strip_html, timestamp_to_rfc822, parse_china_datetime_to_rfc822, escape_xml,
 )
 from stock_api import (
-    handle_cls_stock, handle_cls_fundflow, handle_cls_timeline,
-    handle_cls_f10, handle_cls_basic_infos,
+    handle_cls_stock, handle_cls_stock_batch, handle_cls_fundflow,
+    handle_cls_timeline, handle_cls_f10, handle_cls_basic_infos,
+    handle_cls_announcement,
     fetch_cls_fundflow, fetch_cls_timeline,
     _fundflow_prefetch_loop, _timeline_prefetch_loop,
     _f10_prefetch_loop, _basic_info_prefetch_loop,
+    _announcement_prefetch_loop,
 )
 
 
@@ -521,11 +523,7 @@ class RSSHandler(BaseHTTPRequestHandler):
             self._send_json(handle_market_timeline(), write_body=write_body)
             return
         if path == '/stock/data':
-            params = parse_qs(parsed.query)
-            if 'code' not in params:
-                self._send_error('Missing ?code= parameter. Usage: /stock/data?code=sh600519')
-                return
-            self._send_json(handle_cls_stock(params['code'][0]), write_body=write_body)
+            self._handle_stock_batch(parsed, handle_cls_stock_batch, write_body=write_body)
             return
         if path == '/stock/fundflow':
             self._handle_stock_batch(parsed, handle_cls_fundflow, write_body=write_body)
@@ -538,6 +536,9 @@ class RSSHandler(BaseHTTPRequestHandler):
             return
         if path == '/stock/basic_info':
             self._handle_stock_batch(parsed, handle_cls_basic_infos, write_body=write_body)
+            return
+        if path == '/stock/announcement':
+            self._handle_stock_batch(parsed, handle_cls_announcement, write_body=write_body)
             return
         if path == '/cls/hotplate':
             self._send_json(handle_cls_hotplate(), write_body=write_body)
@@ -672,8 +673,9 @@ class RSSHandler(BaseHTTPRequestHandler):
                        '<a href="/stock/fundflow?code=sh600519">Stock Fund Flow JSON (sh600519)</a> | '
                         '<a href="/stock/timeline?code=sh600519">Stock Timeline JSON (sh600519)</a> | '
                          '<a href="/stock/f10?code=sh600519">Stock F10 JSON (sh600519)</a> | '
-                         '<a href="/stock/basic_info?code=sh600519">Stock Basic Info JSON (sh600519)</a> | '
-                        '<a href="/opml.xml">Import OPML</a> | '
+                          '<a href="/stock/basic_info?code=sh600519">Stock Basic Info JSON (sh600519)</a> | '
+                          '<a href="/stock/announcement?code=sh600519">Stock Announcement JSON (sh600519)</a> | '
+                         '<a href="/opml.xml">Import OPML</a> | '
                       '<a href="/healthz?check=1">Source check</a></p>')
         lines.append('<p>Add any URL above to your RSS reader.</p></body></html>')
         html = '\n'.join(lines)
@@ -718,10 +720,13 @@ def init_cdp():
     cdp_engine.add_page('cls_stock_f10', 'https://www.cls.cn/stock?code=sz300139', heartbeat=False)
     cdp_engine.add_page('cls_stock', 'https://www.cls.cn/stock?code=sz300139', heartbeat=False)
     cdp_engine.add_page('cls_fundflow', 'https://www.cls.cn/stock', heartbeat=False)
+    cdp_engine.add_page('cls_announcement', 'https://www.cls.cn/stock', heartbeat=False)
     print('  ✓ CDP engine ready — finance, quotation, 3 stock pages & fundflow')
-    # Sync global in config.py so stock_api sees it
+    # Sync global in config.py and stock_api.py so both modules see it
     import config
     config.cdp_engine = cdp_engine
+    import stock_api
+    stock_api.cdp_engine = cdp_engine
 
 
 # ── Main entry point ────────────────────────────────────────────────────────
@@ -745,6 +750,7 @@ def main():
     threading.Thread(target=_timeline_prefetch_loop, daemon=True).start()
     threading.Thread(target=_f10_prefetch_loop, daemon=True).start()
     threading.Thread(target=_basic_info_prefetch_loop, daemon=True).start()
+    threading.Thread(target=_announcement_prefetch_loop, daemon=True).start()
 
     print(f'China Finance RSS Bridge running on http://localhost:{PORT}')
     print(f'Cache TTL: {CACHE_TTL}s | Timeout: {REQUEST_TIMEOUT}s')
@@ -763,6 +769,7 @@ def main():
     print(f'  http://localhost:{PORT}/stock/timeline  — Stock Timeline (JSON, no CDP needed)')
     print(f'  http://localhost:{PORT}/stock/f10  — Stock F10 Financial Summary (JSON, no CDP needed)')
     print(f'  http://localhost:{PORT}/stock/basic_info  — Stock Basic Info (JSON, needs Chrome CDP)')
+    print(f'  http://localhost:{PORT}/stock/announcement  — Stock Announcement (JSON, no CDP needed)')
     print(f'  http://localhost:{PORT}/opml.xml  — OPML subscription list')
     print(f'  http://localhost:{PORT}/healthz?check=1  — Source health check')
     print(f'Visit http://localhost:{PORT}/ for the web index.\n')

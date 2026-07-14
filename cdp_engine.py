@@ -25,7 +25,7 @@ from urllib.parse import urlparse
 
 
 CDP_URL = os.getenv('CDP_URL', 'http://localhost:9222')
-_chrome_restart_lock = threading.Lock()
+_chrome_restart_lock = threading.RLock()  # RLock so full_chrome_restart→ensure_chrome doesn't deadlock
 _last_chrome_restart = 0
 
 API_KEY_MAP = {
@@ -225,6 +225,30 @@ def ensure_chrome(cdp_url=CDP_URL):
             except:
                 time.sleep(1)
         return False
+
+
+def full_chrome_restart(cdp_url=CDP_URL):
+    """Kill ALL Chrome processes and start fresh — thread-safe, single-threaded.
+
+    Unlike ensure_chrome (which only starts Chrome if missing), this *always* kills
+    and restarts. Acquires _chrome_restart_lock so concurrent ensure_chrome() calls
+    from other pages block safely, then find Chrome already running.
+
+    After this returns, ALL old CDP connections are broken. Each CDPPage must
+    reconnect via _reconnect() or _ensure_ws().
+    """
+    global _last_chrome_restart
+    port = urlparse(cdp_url).port or 9222
+    host = urlparse(cdp_url).hostname or 'localhost'
+    print(f'[CDP] full_chrome_restart: killing Chrome on port {port}, starting fresh...')
+    with _chrome_restart_lock:
+        _kill_chrome_on_port(port)
+        _last_chrome_restart = 0  # allow ensure_chrome to proceed
+        ok = ensure_chrome(cdp_url)
+        if ok:
+            _last_chrome_restart = time.time()
+        print(f'[CDP] full_chrome_restart: {"OK" if ok else "FAILED"}')
+        return ok
 
 
 def find_tab(pattern, cdp_url=CDP_URL):
@@ -736,8 +760,32 @@ class CDPPage:
                 time.sleep(2)
         return False
 
+    _nav_restart_counter = 0
+    _MAX_PAGE_NAV_BEFORE_RECONNECT = 30
+
+    def _maybe_reconnect(self):
+        """Restart Chrome entirely after threshold navigations to free memory.
+
+        Uses centralized full_chrome_restart() so only ONE thread kills/starts
+        Chrome. Other pages' ensure_chrome() calls block on _chrome_restart_lock
+        and find the fresh Chrome already running — no duplicate instances.
+        """
+        CDPPage._nav_restart_counter += 1
+        if CDPPage._nav_restart_counter >= self._MAX_PAGE_NAV_BEFORE_RECONNECT:
+            CDPPage._nav_restart_counter = 0
+            print(f"[CDP:{self.name}] nav threshold ({self._MAX_PAGE_NAV_BEFORE_RECONNECT}) reached, "
+                  f"full Chrome restart...")
+            full_chrome_restart(f"http://{self.cdp_host}:{self.cdp_port}")
+            # Reconnect this page to the fresh Chrome (clears cache, creates new tab)
+            self._reconnect()
+            return True
+        return False
+
     def navigate_stock(self, stock_code, timeout=15, tabs=('fund_flow', 'f10')):
         """Navigate to a stock code, wait for fresh data, return True on success.
+
+        Fair queuing via blocking lock (no timeout+retry) — avoids wasted
+        CPU and retry deadlines under concurrent load.
 
         Args:
             tabs: Which tab sections to click after navigation.
@@ -750,25 +798,24 @@ class CDPPage:
         cached = ((self._last_data.get('basic_info') or {}).get('data') or {}).get('secu_code')
         if cached == stock_code:
             return True
-        # Wait up to 1.5s for lock if held by prefetch
-        if not self._navigate_lock.acquire(timeout=1.5):
-            return ((self._last_data.get('basic_info') or {}).get('data') or {}).get('secu_code') == stock_code
+        # Block until lock acquired — fair queuing across concurrent requests
+        wait_start = time.time()
+        self._navigate_lock.acquire()
         try:
+            remaining = timeout - (time.time() - wait_start)
+            if remaining < 2:
+                return ((self._last_data.get('basic_info') or {}).get('data') or {}).get('secu_code') == stock_code
+            # Free Chrome renderer processes by reconnecting page periodically
+            self._maybe_reconnect()
             if not self._ensure_ws():
                 return False
-            with self._lock:
-                self.cache.clear()
-                self._last_data.clear()
-                self._last_data_ts.clear()
-            self._key_last_seen.clear()
-            self._api_urls.clear()
             with self._ws_lock:
                 self._evaluate(
                     'window.__cdp_api={};window.__cdp_refetch={}',
                     timeout=3)
                 self._send_recv({'id': self._next_id(), 'method': 'Page.navigate',
-                                 'params': {'url': url}}, timeout=10)
-            load_deadline = time.time() + timeout
+                                 'params': {'url': url}}, timeout=min(10, remaining))
+            load_deadline = time.time() + min(15, remaining)
             while time.time() < load_deadline:
                 try:
                     msg = self._recv(timeout=2)
@@ -776,7 +823,7 @@ class CDPPage:
                         break
                 except:
                     break
-            deadline = time.time() + timeout
+            deadline = time.time() + max(2, remaining)
             last_seen_code = None
             stable_count = 0
             while time.time() < deadline:
