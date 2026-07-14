@@ -53,7 +53,7 @@ from stock_api import (
     handle_cls_announcement,
     fetch_cls_fundflow, fetch_cls_timeline,
     _fundflow_prefetch_loop, _timeline_prefetch_loop,
-    _f10_prefetch_loop, _basic_info_prefetch_loop,
+    _f10_prefetch_loop,
     _announcement_prefetch_loop,
 )
 
@@ -706,27 +706,34 @@ class BoundedThreadPoolServer(ThreadingHTTPServer):
 def init_cdp():
     """Initialize CDP engine with persistent CLS pages."""
     global cdp_engine
-    if not ensure_chrome():
-        print('  ✗ Chrome not available. CDP endpoints will return errors.')
-        return
-    cdp_engine = CDPEngine()
-    if not cdp_engine.start():
-        print('  ✗ Failed to connect to Chrome CDP.')
-        return
-    cdp_engine.add_page('cls_finance', 'https://www.cls.cn/finance')
-    cdp_engine.add_page('cls_quotation', 'https://www.cls.cn/quotation')
-    cdp_engine.add_page('cls_stock_data', 'https://www.cls.cn/stock?code=sz300139', heartbeat=False)
-    cdp_engine.add_page('cls_stock_basic_info', 'https://www.cls.cn/stock?code=sz300139', heartbeat=False)
-    cdp_engine.add_page('cls_stock_f10', 'https://www.cls.cn/stock?code=sz300139', heartbeat=False)
-    cdp_engine.add_page('cls_stock', 'https://www.cls.cn/stock?code=sz300139', heartbeat=False)
-    cdp_engine.add_page('cls_fundflow', 'https://www.cls.cn/stock', heartbeat=False)
-    cdp_engine.add_page('cls_announcement', 'https://www.cls.cn/stock', heartbeat=False)
-    print('  ✓ CDP engine ready — finance, quotation, 3 stock pages & fundflow')
-    # Sync global in config.py and stock_api.py so both modules see it
-    import config
-    config.cdp_engine = cdp_engine
-    import stock_api
-    stock_api.cdp_engine = cdp_engine
+    try:
+        print('[CDP] init_cdp started')
+        if not ensure_chrome():
+            print('  ✗ Chrome not available. CDP endpoints will return errors.')
+            return
+        cdp_engine = CDPEngine()
+        # Chrome may still be starting — retry connect up to 15s
+        for attempt in range(15):
+            if cdp_engine.start():
+                print(f'[CDP] connected on attempt {attempt+1}')
+                break
+            time.sleep(1)
+        else:
+            print('  ✗ Failed to connect to Chrome CDP after 15s.')
+            return
+        cdp_engine.add_page('cls_finance', 'https://www.cls.cn/finance')
+        cdp_engine.add_page('cls_quotation', 'https://www.cls.cn/quotation')
+        cdp_engine.add_page('cls_stock', 'https://www.cls.cn/stock?code=sz300139', heartbeat=False)
+        for i in range(2, 15):
+            cdp_engine.add_page(f'cls_stock_{i}', 'https://www.cls.cn/stock?code=sz300139', heartbeat=False)
+        cdp_engine.add_page('cls_f10', 'https://www.cls.cn/stock?code=sz300139', heartbeat=False)
+        print('  ✓ CDP engine ready — finance, quotation, 14 stock pages & F10')
+        import config
+        config.cdp_engine = cdp_engine
+    except Exception as e:
+        import traceback
+        print(f'  ✗ init_cdp error: {e}')
+        traceback.print_exc()
 
 
 # ── Main entry point ────────────────────────────────────────────────────────
@@ -749,7 +756,6 @@ def main():
     threading.Thread(target=_fundflow_prefetch_loop, daemon=True).start()
     threading.Thread(target=_timeline_prefetch_loop, daemon=True).start()
     threading.Thread(target=_f10_prefetch_loop, daemon=True).start()
-    threading.Thread(target=_basic_info_prefetch_loop, daemon=True).start()
     threading.Thread(target=_announcement_prefetch_loop, daemon=True).start()
 
     print(f'China Finance RSS Bridge running on http://localhost:{PORT}')

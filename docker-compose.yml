@@ -11,6 +11,8 @@ services:
       - REQUEST_TIMEOUT=10
       - MAX_WORKERS=10
       - PUBLIC_BASE_URL=
+    volumes:
+      - ./sector_cache.json:/app/sector_cache.json
     mem_limit: 2g
     mem_reservation: 1g
     logging:

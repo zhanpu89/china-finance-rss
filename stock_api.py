@@ -9,23 +9,23 @@ from time import sleep, time
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+import config
 from config import (
     REQUEST_TIMEOUT, VALID_STOCK_CODE,
     _MAX_CACHE_AGE, _MAX_BATCH_SIZE,
-    _STOCK_EXPECTED_KEYS, _F10_EXPECTED_KEYS,
+    _F10_EXPECTED_KEYS,
     _FUNDFLOW_BASE_URL, _FUNDFLOW_HEADERS,
     _TIMELINE_BASE_URL, _TIMELINE_HEADERS,
     _F10_BASE_URL, _F10_HEADERS,
     _ANNOUNCEMENT_BASE_URL, _ANNOUNCEMENT_HEADERS,
     _BASIC_INFO_BASE_URL, _BASIC_INFO_HEADERS,
     _STOCK_DETAIL_BASE_URL, _STOCK_DETAIL_HEADERS,
-    _COMPANY_INFO_BASE_URL, _COMPANY_INFO_HEADERS,
     _FUNDFLOW_POOL_REFRESH, _FUNDFLOW_MAX_POOL,
     _TIMELINE_POOL_REFRESH, _TIMELINE_MAX_POOL,
     _F10_POOL_REFRESH, _F10_MAX_POOL,
-    _BASIC_INFO_POOL_REFRESH, _BASIC_INFO_MAX_POOL,
+    _BASIC_INFO_MAX_POOL,
     _ANNOUNCEMENT_POOL_REFRESH, _ANNOUNCEMENT_MAX_POOL,
-    cdp_engine, _china_trading_ttl,
+    _china_trading_ttl,
 )
 from cache import fetch_json, _fill_missing
 from utils import cls_sign_params
@@ -49,6 +49,26 @@ _fundflow_pool = {}
 _fundflow_cache_lock = threading.Lock()
 
 
+def _evaluate_fetch_any(url, timeout=8):
+    """Try evaluate_fetch on any available page. Returns parsed dict or None."""
+    if not config.cdp_engine or not config.cdp_engine.ready:
+        return None
+    deadline = time() + timeout
+    for name in _STOCK_NAV_PAGES[:3] + ('cls_finance', 'cls_quotation'):
+        if time() >= deadline:
+            break
+        page = config.cdp_engine.get_page(name)
+        if not page:
+            continue
+        try:
+            result = page.evaluate_fetch(url, timeout=min(deadline - time(), 2))
+            if result and isinstance(result, dict):
+                return result
+        except Exception:
+            pass
+    return None
+
+
 def fetch_cls_fundflow(stock_code):
     """Fetch fund flow — REST first, CDP evaluate_fetch fallback."""
     url = f'{_FUNDFLOW_BASE_URL}?secu_code={stock_code}'
@@ -58,28 +78,17 @@ def fetch_cls_fundflow(stock_code):
             return raw.get('data')
     except Exception:
         pass
-    global cdp_engine
-    if cdp_engine and cdp_engine.ready:
-        page = cdp_engine.get_page('cls_fundflow')
-        if page:
-            result = page.evaluate_fetch(url, timeout=15)
-            if result and isinstance(result, dict) and result.get('code') == 200:
-                return result.get('data')
+    result = _evaluate_fetch_any(url)
+    if result and result.get('code') == 200:
+        return result.get('data')
     return None
 
 
 def _fundflow_direct_fetch(stock_code):
     """Fetch fund flow via CDP browser context (anti-ban), REST fallback."""
-    global cdp_engine
-    if cdp_engine and cdp_engine.ready:
-        page = cdp_engine.get_page('cls_fundflow')
-        if page:
-            url = f'{_FUNDFLOW_BASE_URL}?secu_code={stock_code}'
-            result = page.evaluate_fetch(url, timeout=15)
-            if result and isinstance(result, dict) and result.get('code') == 200:
-                return result.get('data')
-            if result and isinstance(result, dict) and result.get('error'):
-                print(f'[fundflow] CDP fetch error for {stock_code}: {result["error"]}')
+    result = _evaluate_fetch_any(f'{_FUNDFLOW_BASE_URL}?secu_code={stock_code}')
+    if result and result.get('code') == 200:
+        return result.get('data')
     req = Request(f'{_FUNDFLOW_BASE_URL}?secu_code={stock_code}',
                    headers=_FUNDFLOW_HEADERS)
     try:
@@ -175,28 +184,17 @@ def fetch_cls_timeline(stock_code):
             return raw.get('data')
     except Exception:
         pass
-    global cdp_engine
-    if cdp_engine and cdp_engine.ready:
-        page = cdp_engine.get_page('cls_fundflow')
-        if page:
-            result = page.evaluate_fetch(url, timeout=15)
-            if result and isinstance(result, dict) and result.get('code') == 200:
-                return result.get('data')
+    result = _evaluate_fetch_any(url)
+    if result and result.get('code') == 200:
+        return result.get('data')
     return None
 
 
 def _timeline_direct_fetch(stock_code):
     """Fetch timeline via CDP browser context (anti-ban), REST fallback."""
-    global cdp_engine
-    if cdp_engine and cdp_engine.ready:
-        page = cdp_engine.get_page('cls_fundflow')
-        if page:
-            url = f'{_TIMELINE_BASE_URL}?secu_code={stock_code}'
-            result = page.evaluate_fetch(url, timeout=15)
-            if result and isinstance(result, dict) and result.get('code') == 200:
-                return result.get('data')
-            if result and isinstance(result, dict) and result.get('error'):
-                print(f'[timeline] CDP fetch error for {stock_code}: {result["error"]}')
+    result = _evaluate_fetch_any(f'{_TIMELINE_BASE_URL}?secu_code={stock_code}')
+    if result and result.get('code') == 200:
+        return result.get('data')
     req = Request(f'{_TIMELINE_BASE_URL}?secu_code={stock_code}',
                    headers=_TIMELINE_HEADERS)
     try:
@@ -284,17 +282,36 @@ _f10_cache_lock = threading.Lock()
 
 
 def _navigate_f10(page, stock_code, deadline):
-    """Helper: single-shot navigate_stock with F10 tab click.
-
-    Unlike the old retry loop, this calls navigate_stock once with the
-    full remaining time. navigate_stock internally uses a blocking lock
-    (fair queuing) so concurrent requests wait their turn without wasting
-    CPU on retries.
-    """
+    """Navigate stock — skip pages that are busy beyond a short wait."""
     remaining = deadline - time()
     if remaining < 2:
         return False
+    try:
+        if not page._navigate_lock.acquire(timeout=0.5):
+            return False
+        page._navigate_lock.release()
+    except AttributeError:
+        return False
     return page.navigate_stock(stock_code, tabs=('f10',), timeout=remaining)
+
+
+def _company_info_matches(ci, stock_code):
+    """Check if company_info data belongs to the requested stock."""
+    if not isinstance(ci, dict):
+        return False
+    bi = ci.get('basic_info') or {}
+    secu = bi.get('SecuCode', '')
+    return secu.upper() == stock_code.upper()
+
+
+def _iter_nav_pages():
+    """Yield CDP stock navigation pages that are available."""
+    if not config.cdp_engine or not config.cdp_engine.ready:
+        return
+    for name in _STOCK_NAV_PAGES:
+        page = config.cdp_engine.get_page(name)
+        if page:
+            yield page
 
 
 def fetch_cls_f10(stock_code, deadline=None):
@@ -303,17 +320,19 @@ def fetch_cls_f10(stock_code, deadline=None):
     Returns company_info data dict: {basic_info, ipo_info, ...}
     matching the original CDP capture format.
     """
-    if cdp_engine and cdp_engine.ready:
-        page = cdp_engine.get_page('cls_stock_f10') or cdp_engine.get_page('cls_stock')
-        if page:
-            deadline = deadline or time() + 10
-            if not _navigate_f10(page, stock_code, deadline):
-                return None
-            data = page.get_data()
-            r = {}
-            _fill_missing(r, data, _F10_EXPECTED_KEYS)
-            if r:
-                return r.get('stock_company_info')
+    if config.cdp_engine and config.cdp_engine.ready:
+        d = deadline or time() + 10
+        for page in _iter_nav_pages():
+            if time() >= d - 1:
+                break
+            if _navigate_f10(page, stock_code, d):
+                data = page.get_data()
+                r = {}
+                _fill_missing(r, data, _F10_EXPECTED_KEYS)
+                if r:
+                    ci = r.get('stock_company_info')
+                    if _company_info_matches(ci, stock_code):
+                        return ci
     return None
 
 
@@ -322,17 +341,19 @@ def _f10_direct_fetch(stock_code, deadline=None):
 
     Used by prefetch loop.
     """
-    if cdp_engine and cdp_engine.ready:
-        page = cdp_engine.get_page('cls_stock_f10') or cdp_engine.get_page('cls_stock')
-        if page:
-            deadline = deadline or time() + 10
-            if not _navigate_f10(page, stock_code, deadline):
-                return None
-            data = page.get_data()
-            r = {}
-            _fill_missing(r, data, _F10_EXPECTED_KEYS)
-            if r:
-                return r.get('stock_company_info')
+    if config.cdp_engine and config.cdp_engine.ready:
+        d = deadline or time() + 10
+        for page in _iter_nav_pages():
+            if time() >= d - 1:
+                break
+            if _navigate_f10(page, stock_code, d):
+                data = page.get_data()
+                r = {}
+                _fill_missing(r, data, _F10_EXPECTED_KEYS)
+                if r:
+                    ci = r.get('stock_company_info')
+                    if _company_info_matches(ci, stock_code):
+                        return ci
     return None
 
 
@@ -423,15 +444,49 @@ _basic_info_cache_ts = {}
 _basic_info_pool = {}
 _basic_info_cache_lock = threading.Lock()
 
-# Shared sector name cache (industry rarely changes, so long TTL is safe)
+# Shared sector name cache (industry rarely changes, long TTL + file persistence)
+_SECTOR_CACHE_FILE = 'sector_cache.json'
 _sector_cache = {}
 _sector_cache_lock = threading.Lock()
+
+
+def _load_sector_cache():
+    """Load persisted sector cache from disk."""
+    try:
+        with open(_SECTOR_CACHE_FILE) as f:
+            data = json.load(f)
+            count = 0
+            with _sector_cache_lock:
+                for k, v in data.items():
+                    if isinstance(v, dict) and 'sector' in v:
+                        _sector_cache[k] = v
+                        count += 1
+            if count:
+                print(f'[sector] loaded {count} entries from {_SECTOR_CACHE_FILE}')
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        print(f'[sector] load error: {e}')
+
+
+def _save_sector_cache():
+    """Persist sector cache to disk asynchronously."""
+    try:
+        with _sector_cache_lock:
+            data = dict(_sector_cache)
+        with open(_SECTOR_CACHE_FILE, 'w') as f:
+            json.dump(data, f, ensure_ascii=False)
+    except Exception as e:
+        print(f'[sector] save error: {e}')
+
+
+_load_sector_cache()
 
 
 def _populate_sector_from_f10(data, code):
     """Extract sector from F10 company_info data and populate shared cache."""
     if isinstance(data, dict):
-        raw = data.get('result') or data
+        raw = data.get('result') or data.get('data') or data
         bi = raw.get('basic_info') or {}
         # company_info API uses SecuCode (camelCase)
         if isinstance(bi, dict):
@@ -442,6 +497,7 @@ def _populate_sector_from_f10(data, code):
                     sector = industry.split('-')[0]
                     with _sector_cache_lock:
                         _sector_cache[code] = {'sector': sector, 'ts': time()}
+                    threading.Thread(target=_save_sector_cache, daemon=True).start()
 
 
 def _extract_sector_name(stock_code):
@@ -458,20 +514,15 @@ def _extract_sector_name(stock_code):
 
     # 2) CDP page cache — check any page that may have company_info
     sector = None
-    if cdp_engine and cdp_engine.ready:
-        for name in ('cls_stock_f10', 'cls_stock_basic_info', 'cls_stock'):
-            page = cdp_engine.get_page(name)
+    if config.cdp_engine and config.cdp_engine.ready:
+        for name in _STOCK_NAV_PAGES:
+            page = config.cdp_engine.get_page(name)
             if page:
                 try:
                     data = page.get_data()
                     ci = data.get('stock_company_info')
-                    if isinstance(ci, dict):
-                        bi = ci.get('basic_info') or {}
-                        # company_info API uses SecuCode (camelCase)
-                        stored_code = bi.get('SecuCode') or bi.get('secu_code') or ''
-                        if stored_code.upper() != stock_code.upper():
-                            continue
-                        industry = bi.get('IndustryName') or ''
+                    if _company_info_matches(ci, stock_code):
+                        industry = (ci.get('basic_info') or {}).get('IndustryName') or ''
                         if industry:
                             sector = industry.split('-')[0]
                             break
@@ -481,35 +532,69 @@ def _extract_sector_name(stock_code):
     if sector:
         with _sector_cache_lock:
             _sector_cache[stock_code] = {'sector': sector, 'ts': time()}
+        threading.Thread(target=_save_sector_cache, daemon=True).start()
     return sector
 
 
-def _navigate_basic_info(page, stock_code, deadline):
-    """Helper: single-shot navigate_stock for basic info.
+_STOCK_NAV_PAGES = ('cls_f10', 'cls_stock', 'cls_stock_2', 'cls_stock_3',
+                     'cls_stock_4', 'cls_stock_5', 'cls_stock_6',
+                     'cls_stock_7', 'cls_stock_8', 'cls_stock_9',
+                     'cls_stock_10', 'cls_stock_11', 'cls_stock_12',
+                     'cls_stock_13', 'cls_stock_14')
 
-    Single attempt with full remaining time — fair queuing in
-    navigate_stock avoids retry waste under concurrent load.
+
+def _navigate_for_sector(stock_code, deadline):
+    """Try navigate_stock on available CDP pages until one succeeds.
+
+    Uses multiple pages with separate _navigate_lock to increase
+    concurrent navigation capacity. Returns (data_dict, sector_str).
     """
-    remaining = deadline - time()
-    if remaining < 2:
-        return False
-    return page.navigate_stock(stock_code, tabs=('f10',), timeout=remaining)
+    for pname in _STOCK_NAV_PAGES:
+        page = config.cdp_engine.get_page(pname)
+        if not page:
+            continue
+        remaining = 15
+        if deadline:
+            remaining = min(remaining, int(deadline - time()))
+        if remaining < 3:
+            continue
+        try:
+            if not page._navigate_lock.acquire(timeout=0.5):
+                continue
+            page._navigate_lock.release()
+        except AttributeError:
+            continue
+        if page.navigate_stock(stock_code, tabs=('f10',), timeout=remaining):
+            poll_deadline = time() + 3
+            while time() < poll_deadline:
+                data = page.get_data()
+                ci = data.get('stock_company_info') or {}
+                if _company_info_matches(ci, stock_code):
+                    raw_sector = (ci.get('basic_info') or {}).get('IndustryName', '')
+                    if raw_sector:
+                        return data, raw_sector.split('-')[0]
+                page.refresh()
+                time.sleep(0.5)
+            data = page.get_data()
+            ci = data.get('stock_company_info') or {}
+            if _company_info_matches(ci, stock_code):
+                raw_sector = (ci.get('basic_info') or {}).get('IndustryName', '')
+                if raw_sector:
+                    return data, raw_sector.split('-')[0]
+    return None, None
 
 
 def fetch_cls_basic_info(stock_code, deadline=None):
-    """Fetch basic info — REST first, shared cache for sector.
+    """Fetch basic info with sector_name (申万一级行业).
 
-    Priority:
-      1) REST API for basic pricing data (<100ms)
-      2) Shared sector cache + CDP page cache (non-blocking, <1ms)
-      3) CDP full navigation (3-5s) if REST fails
-
-    Returns dict: {code, msg, data, [sector_name]} matching original CDP format.
+    Two-phase:
+      1) REST basic_info API for pricing data (<100ms)
+      2) CDP navigate_stock for sector (via F10 tab, distributed across pages)
+    Returns dict with secu_code, price data, and sector_name.
     """
-    global cdp_engine
     result = None
 
-    # 1) REST API — basic pricing & identity data
+    # Phase 1: REST API — fast pricing & identity data
     url = f'{_BASIC_INFO_BASE_URL}?secu_code={stock_code}'
     try:
         raw = json.loads(fetch_json(url, _BASIC_INFO_HEADERS, ttl=_MAX_CACHE_AGE))
@@ -518,38 +603,45 @@ def fetch_cls_basic_info(stock_code, deadline=None):
     except Exception:
         pass
 
-    # 2) Sector name — from shared cache or CDP pages (non-blocking)
+    # Phase 2: Sector name — cache first, then CDP navigation
     sector = _extract_sector_name(stock_code)
-    if sector:
-        if result is None:
-            result = {'code': 200, 'msg': 'success', 'data': {}}
-        elif not isinstance(result.get('data'), dict):
+    if not sector and config.cdp_engine and config.cdp_engine.ready:
+        nav_data, sector = _navigate_for_sector(stock_code, deadline)
+        if sector:
+            _populate_sector_simple(stock_code, sector)
+
+    # Merge sector_name into result
+    if sector and result is not None:
+        if not isinstance(result.get('data'), dict):
             result['data'] = {}
         result['sector_name'] = sector
+        return result
 
     if result is not None:
         return result
 
-    # 3) CDP navigation fallback (full page load, 3-5s)
-    if cdp_engine and cdp_engine.ready:
-        page = cdp_engine.get_page('cls_stock_basic_info') or cdp_engine.get_page('cls_stock')
-        if page:
-            deadline = deadline or time() + 10
-            if not _navigate_basic_info(page, stock_code, deadline):
-                return None
-            data = page.get_data()
-            result = data.get('basic_info')
-            ci = data.get('stock_company_info')
-            if isinstance(ci, dict):
-                ci_bi = ci.get('basic_info', {})
-                sector = ci_bi.get('IndustryName')
-                if sector:
-                    if result is None:
-                        result = {}
-                    result['sector_name'] = sector.split('-')[0]
-                    _populate_sector_from_f10(ci, stock_code)
-            return result
+    # Fallback: full CDP response (only if REST failed but navigation succeeded)
+    if sector:
+        result = nav_data.get('basic_info')
+        if not isinstance(result, dict):
+            result = {'code': 200, 'msg': 'success', 'data': {}}
+            pd = (nav_data.get('basic_info') or {}).get('data')
+            if isinstance(pd, dict):
+                result['data'] = pd
+        elif not isinstance(result.get('data'), dict):
+            result['data'] = {}
+        result['sector_name'] = sector
+        return result
+
     return None
+
+
+def _populate_sector_simple(stock_code, sector):
+    """Set sector into shared cache and persist to disk."""
+    if sector:
+        with _sector_cache_lock:
+            _sector_cache[stock_code] = {'sector': sector, 'ts': time()}
+        threading.Thread(target=_save_sector_cache, daemon=True).start()
 
 
 def handle_cls_basic_infos(codes):
@@ -609,27 +701,6 @@ def handle_cls_basic_infos(codes):
     return result
 
 
-def _basic_info_prefetch_loop():
-    """Background thread: refresh basic info for all auto-registered stocks."""
-    while True:
-        try:
-            ttl, _ = _china_trading_ttl()
-            interval = max(_BASIC_INFO_POOL_REFRESH, ttl)
-            sleep(interval)
-            with _basic_info_cache_lock:
-                codes = list(_basic_info_pool.keys())
-            if not codes:
-                continue
-            for code in codes:
-                data = fetch_cls_basic_info(code, deadline=time() + 4)
-                if data:
-                    with _basic_info_cache_lock:
-                        _basic_info_cache[code] = data
-                        _basic_info_cache_ts[code] = time()
-        except Exception as e:
-            print(f'[basic_info] prefetch error: {e}')
-
-
 # ── Announcement (公告) ─────────────────────────────────────────────────────
 
 _announcement_cache = {}
@@ -647,28 +718,17 @@ def fetch_cls_announcement(stock_code):
             return raw.get('data')
     except Exception:
         pass
-    global cdp_engine
-    if cdp_engine and cdp_engine.ready:
-        page = cdp_engine.get_page('cls_announcement')
-        if page:
-            result = page.evaluate_fetch(url, timeout=15)
-            if result and isinstance(result, dict) and result.get('code') == 200:
-                return result.get('data')
+    result = _evaluate_fetch_any(url)
+    if result and result.get('code') == 200:
+        return result.get('data')
     return None
 
 
 def _announcement_direct_fetch(stock_code):
     """Fetch announcements via CDP browser context (anti-ban), REST fallback."""
-    global cdp_engine
-    if cdp_engine and cdp_engine.ready:
-        page = cdp_engine.get_page('cls_announcement')
-        if page:
-            url = _announcement_url(stock_code)
-            result = page.evaluate_fetch(url, timeout=15)
-            if result and isinstance(result, dict) and result.get('code') == 200:
-                return result.get('data')
-            if result and isinstance(result, dict) and result.get('error'):
-                print(f'[announcement] CDP fetch error for {stock_code}: {result["error"]}')
+    result = _evaluate_fetch_any(_announcement_url(stock_code))
+    if result and result.get('code') == 200:
+        return result.get('data')
     req = Request(_announcement_url(stock_code),
                    headers=_ANNOUNCEMENT_HEADERS)
     try:
@@ -759,7 +819,6 @@ def handle_cls_stock(stock_code, timeout=30):
       - articles:      CDP page navigation (only if needed)
     """
     result = {}
-    global cdp_engine
 
     # 1) stock_detail — REST direct
     try:
@@ -771,42 +830,43 @@ def handle_cls_stock(stock_code, timeout=30):
         pass
 
     # 2) stock_announcement — REST direct (already signed in fetch_cls_announcement)
-    ann = fetch_cls_announcement([stock_code])
-    if ann and stock_code in ann:
-        result['stock_announcement'] = ann[stock_code]
+    ann = fetch_cls_announcement(stock_code)
+    if ann:
+        result['stock_announcement'] = ann
 
     # 3) stock_plate — evaluate_fetch from browser (no navigation, just a fetch)
-    if cdp_engine and cdp_engine.ready:
-        page = cdp_engine.get_page('cls_stock_data') or cdp_engine.get_page('cls_stock')
-        if page:
-            try:
-                result_plate = page.evaluate_fetch(
-                    f'https://x-quote.cls.cn/stock/assoc_plate?secu_code={stock_code}',
-                    timeout=6)
-                if result_plate and isinstance(result_plate, dict):
-                    if 'data' in result_plate:
-                        result['stock_plate'] = result_plate['data']
-                    elif 'code' not in result_plate or result_plate.get('code') in (200, None, ''):
-                        result['stock_plate'] = result_plate
-            except Exception:
-                pass
+    result_plate = _evaluate_fetch_any(
+        f'https://x-quote.cls.cn/stock/assoc_plate?secu_code={stock_code}',
+        timeout=6)
+    if result_plate and isinstance(result_plate, dict):
+        if 'data' in result_plate:
+            result['stock_plate'] = result_plate['data']
+        elif 'code' not in result_plate or result_plate.get('code') in (200, None, ''):
+            result['stock_plate'] = result_plate
 
     # 4) articles — CDP page navigation (index page, no other source)
-    if cdp_engine and cdp_engine.ready:
-        page = cdp_engine.get_page('cls_stock_data') or cdp_engine.get_page('cls_stock')
-        if page:
-            deadline = time() + min(timeout, 8)
-            ok = False
-            while time() < deadline:
-                if page.navigate_stock(stock_code, timeout=min(timeout, 6), tabs=()):
-                    ok = True
-                    break
-                sleep(0.5)
-            if ok:
+    if config.cdp_engine and config.cdp_engine.ready:
+        arts_deadline = time() + min(timeout, 12)
+        for pname in _STOCK_NAV_PAGES:
+            page = config.cdp_engine.get_page(pname)
+            if not page:
+                continue
+            remaining = arts_deadline - time()
+            if remaining < 3:
+                continue
+            try:
+                if not page._navigate_lock.acquire(timeout=0.5):
+                    continue
+                page._navigate_lock.release()
+            except AttributeError:
+                continue
+            if page.navigate_stock(stock_code, timeout=min(remaining, 8), tabs=()):
                 data = page.get_data()
                 for k in ('articles', 'stock_plate', 'stock_detail', 'stock_announcement'):
                     if k not in result and data.get(k) is not None:
                         result[k] = data[k]
+                if 'articles' in result:
+                    break
 
     return result
 

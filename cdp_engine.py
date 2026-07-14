@@ -13,6 +13,7 @@ this reduces API latency from 3-8s to <1ms and captures WebSocket frames.
 """
 
 import atexit
+import gc
 import json
 import os
 import signal
@@ -244,6 +245,7 @@ def full_chrome_restart(cdp_url=CDP_URL):
     with _chrome_restart_lock:
         _kill_chrome_on_port(port)
         _last_chrome_restart = 0  # allow ensure_chrome to proceed
+        gc.collect()
         ok = ensure_chrome(cdp_url)
         if ok:
             _last_chrome_restart = time.time()
