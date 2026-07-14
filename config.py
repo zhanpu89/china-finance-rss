@@ -67,6 +67,25 @@ _STOCK_DETAIL_HEADERS = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.cl
 _COMPANY_INFO_BASE_URL = 'https://x-quote.cls.cn/quote/stock/company_info'
 _COMPANY_INFO_HEADERS = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.cls.cn/stock'}
 
+# 同花顺 data center APIs (public, no auth)
+_TENJQKA_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+                  'AppleWebKit/537.36 (KHTML, like Gecko) '
+                  'Chrome/125.0.0.0 Safari/537.36',
+    'Referer': 'https://data.10jqka.com.cn/',
+}
+
+# 融资融券 (Margin / Securities Lending)
+_MARGIN_URL = 'https://data.10jqka.com.cn/rzrq/fixdata/type'
+_MARGIN_HEADERS = {**_TENJQKA_HEADERS, 'Referer': 'https://data.10jqka.com.cn/market/rzrq/'}
+_MARGIN_CACHE_TTL = 600  # 10 min — data updates once per trading day
+
+# 北向资金 (Northbound Capital /沪深港通)
+_NORTHBOUND_SNAPSHOT_URL = 'https://data.10jqka.com.cn/hsgt/basedata/type/north/'
+_NORTHBOUND_HISTORY_URL = 'https://data.10jqka.com.cn/hsgt/history/type/north/date'
+_NORTHBOUND_HEADERS = {**_TENJQKA_HEADERS, 'Referer': 'https://data.10jqka.com.cn/hsgt/'}
+_NORTHBOUND_CACHE_TTL = 300  # 5 min
+
 # Pool refresh intervals and caps
 _FUNDFLOW_POOL_REFRESH = 25
 _FUNDFLOW_MAX_POOL = 500

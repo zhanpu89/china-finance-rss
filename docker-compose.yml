@@ -14,7 +14,10 @@ services:
     volumes:
       - ./data:/app/data
     mem_limit: 2g
-    mem_reservation: 1g
+    mem_reservation: 256M
+    dns:
+      - 8.8.8.8
+      - 223.5.5.5
     logging:
       driver: json-file
       options:

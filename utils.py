@@ -199,10 +199,6 @@ def generate_opml(base_url, routes):
         xml += (f'<outline text="{escape_xml(info["name"])}" title="{escape_xml(info["name"])}" '
                 f'type="rss" xmlUrl="{escape_xml(base_url + path)}"/>\n')
 
-    xueqiu_path = '/xueqiu/user/1247347556'
-    xueqiu_name = 'Xueqiu User Example (雪球)'
-    xml += (f'<outline text="{escape_xml(xueqiu_name)}" title="{escape_xml(xueqiu_name)}" '
-            f'type="rss" xmlUrl="{escape_xml(base_url + xueqiu_path)}"/>\n')
     xml += '</outline>\n</body>\n</opml>'
     return xml
 

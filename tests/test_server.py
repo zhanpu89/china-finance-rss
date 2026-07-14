@@ -14,6 +14,10 @@ from utils import (
     parse_wallstreetcn_items,
 )
 from server import ROUTES, handle_cls_hotplate, build_health_payload
+from market_api import (
+    _transform_margin, _transform_northbound,
+    handle_margin, handle_northbound, handle_northbound_history,
+)
 
 
 class FeedGenerationTests(unittest.TestCase):
@@ -64,7 +68,6 @@ class FeedGenerationTests(unittest.TestCase):
         self.assertIn("https://feeds.example.com/ths/kuaixun", urls)
         self.assertIn("https://feeds.example.com/jin10/flash", urls)
         self.assertIn("https://feeds.example.com/wallstreetcn/live", urls)
-        self.assertIn("https://feeds.example.com/xueqiu/user/1247347556", urls)
         # Hotplate is a JSON endpoint, not an RSS feed — not in OPML
         self.assertNotIn("https://feeds.example.com/cls/hotplate", urls)
 
@@ -176,6 +179,100 @@ class SourceParserTests(unittest.TestCase):
         self.assertEqual(items[0]["description"], "德国DAX 30指数初步收涨1.66%。")
         self.assertEqual(items[0]["link"], "https://wallstreetcn.com/livenews/3118981")
         self.assertEqual(items[0]["guid"], "wallstreetcn_3118981")
+
+
+class MarketApiTests(unittest.TestCase):
+    """Tests for market-level APIs (融资融券, 北向资金).
+
+    Transform functions are unit-tested; handlers rely on fetch_json caching.
+    """
+
+    def test_transform_margin_parses_raw_data(self):
+        raw = {
+            'date': ['2026-07-13', '2026-07-14'],
+            'item': [
+                {'rzye': 14800000000, 'rqye': 120000000, 'rzmre': 8000000000,
+                 'rzjmr': 500000000, 'rqjmc': -10000000, 'lr': 14920000000, 'zb': 0.45},
+                {'rzye': 14900000000, 'rqye': 115000000, 'rzmre': 7500000000,
+                 'rzjmr': 400000000, 'rqjmc': -5000000, 'lr': 15015000000, 'zb': 0.46},
+            ],
+        }
+        result = _transform_margin(raw)
+        self.assertIsNotNone(result['latest'])
+        self.assertEqual(result['latest']['date'], '2026-07-14')
+        self.assertAlmostEqual(result['latest']['rzye'], 149.0, places=3)
+        self.assertAlmostEqual(result['latest']['lr'], 150.15, places=3)
+        self.assertEqual(len(result['recent']), 2)
+
+    def test_transform_margin_handles_missing_data(self):
+        self.assertEqual(_transform_margin({}),
+                         {'latest': None, 'recent': []})
+        self.assertEqual(_transform_margin({'date': [], 'item': []}),
+                         {'latest': None, 'recent': []})
+
+    def test_transform_margin_to_100m_converts_correctly(self):
+        raw = {
+            'date': ['2026-07-14'],
+            'item': [{'rzye': 15000000000, 'rqye': None, 'rzmre': '--',
+                      'rzjmr': 0, 'rqjmc': -5000000, 'lr': 15000000000, 'zb': 0.42}],
+        }
+        result = _transform_margin(raw)
+        self.assertAlmostEqual(result['latest']['rzye'], 150.0, places=3)
+        self.assertEqual(result['latest']['rqye'], 0.0)  # None → 0
+        self.assertEqual(result['latest']['rzmre'], 0.0)  # '--' → 0
+        self.assertAlmostEqual(result['latest']['rqjmc'], -0.05, places=4)
+
+    def test_transform_northbound_parses_snapshot(self):
+        raw = {
+            'h': {'zjlr': 2500000000, 'syed': 30000000000, 'zed': 52000000000,
+                  'buy_turnover': 18000000000, 'sell_turnover': 15500000000,
+                  'net_turnover': 2500000000, 'state': '开盘', 'up': 500, 'mid': 300, 'down': 200},
+            's': {'zjlr': -500000000, 'syed': 48000000000, 'zed': 52000000000,
+                  'buy_turnover': 12000000000, 'sell_turnover': 12500000000,
+                  'net_turnover': -500000000, 'state': '开盘', 'up': 200, 'mid': 400, 'down': 600},
+            'jlr': 2000000000,
+            'jmr': 1800000000,
+            'market_value': {'data_update_date': '2026-07-14', 'unit': '元'},
+        }
+        result = _transform_northbound(raw)
+        self.assertEqual(result['sh']['net_inflow'], 2500000000)
+        self.assertEqual(result['sz']['net_inflow'], -500000000)
+        self.assertEqual(result['total_net_inflow'], 2000000000)
+        self.assertEqual(result['total_net_buy'], 1800000000)
+        self.assertEqual(result['update_date'], '2026-07-14')
+
+    def test_transform_northbound_handles_empty_data(self):
+        result = _transform_northbound({})
+        self.assertEqual(result['sh']['net_inflow'], 0)
+        self.assertEqual(result['sz']['net_inflow'], 0)
+        self.assertEqual(result['total_net_inflow'], 0)
+
+    def test_handle_margin_error_returns_degraded(self):
+        # Pass an invalid market code → API returns error → degraded response
+        result = handle_margin('invalid')
+        self.assertIn('_error', result)
+        self.assertEqual(result['latest']['rzye'], 0)
+        self.assertEqual(result['latest']['rqye'], 0)
+
+    def test_handle_northbound_returns_unified_structure(self):
+        result = handle_northbound()
+        for key in ('sh', 'sz', 'total_net_inflow', 'total_net_buy'):
+            self.assertIn(key, result)
+        for loc in ('sh', 'sz'):
+            self.assertIn('net_inflow', result[loc])
+            self.assertIn('buy_turnover', result[loc])
+            self.assertIn('sell_turnover', result[loc])
+
+    def test_handle_northbound_history_returns_dict(self):
+        result = handle_northbound_history('day')
+        self.assertIsInstance(result, dict)
+
+    def test_healthz_includes_market_endpoints(self):
+        payload = build_health_payload("https://feeds.example.com")
+        paths = {f['path'] for f in payload['feeds']}
+        self.assertIn('/market/margin', paths)
+        self.assertIn('/market/northbound', paths)
+        self.assertIn('/market/northbound/history', paths)
 
 
 if __name__ == "__main__":

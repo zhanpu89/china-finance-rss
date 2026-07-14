@@ -5,14 +5,14 @@
 Lightweight RSS bridge server that converts Chinese financial news sources
 into standard RSS 2.0 feeds.
 
-Sources: CLS (财联社), Eastmoney (东方财富), THS (同花顺), Xueqiu (雪球)
+Sources: CLS (财联社), Eastmoney (东方财富), THS (同花顺)
 
 Usage:
     python server.py
     PORT=9000 python server.py
 
 Dependencies:
-    - websocket-client (optional, only for Xueqiu CDP mode)
+    - websocket-client (optional, for CDP mode)
 """
 
 import atexit
@@ -31,7 +31,7 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 from urllib.parse import parse_qs, urlencode
 
-from cdp_engine import ensure_chrome, find_tab, execute_js, CDPEngine
+from cdp_engine import ensure_chrome, CDPEngine
 from config import (
     PORT, CACHE_TTL, REQUEST_TIMEOUT, PUBLIC_BASE_URL, MAX_WORKERS,
     _MAX_BATCH_SIZE,
@@ -55,6 +55,9 @@ from stock_api import (
     _fundflow_prefetch_loop, _timeline_prefetch_loop,
     _f10_prefetch_loop,
     _announcement_prefetch_loop,
+)
+from market_api import (
+    handle_margin, handle_northbound, handle_northbound_history,
 )
 
 
@@ -310,47 +313,6 @@ def handle_cls_hotplate(feed_url=None):
     return result
 
 
-# ── Xueqiu (CDP-based) ─────────────────────────────────────────────────────
-
-def xueqiu_fetch_via_cdp(api_path):
-    """Fetch Xueqiu API via Chrome CDP to bypass WAF."""
-    try:
-        import websocket
-    except ImportError:
-        return None
-    try:
-        ws_url = find_tab('xueqiu')
-        if not ws_url:
-            return None
-        return execute_js(ws_url,
-                          f'fetch("{api_path}").then(r=>r.json()).then(d=>JSON.stringify(d))',
-                          timeout=15)
-    except Exception:
-        return None
-
-
-def handle_xueqiu_user(uid, feed_url=None):
-    """Xueqiu user timeline (雪球用户动态) via Chrome CDP."""
-    data = xueqiu_fetch_via_cdp(f'/v4/statuses/user_timeline.json?user_id={uid}&page=1&type=0')
-    if not data:
-        return generate_rss('雪球用户动态', f'https://xueqiu.com/u/{uid}',
-                            'Error: Chrome CDP not available or Xueqiu tab not found. '
-                            'See README for setup instructions.', [], feed_url=feed_url)
-    items = []
-    for item in data.get('statuses', []):
-        created_at = item.get('created_at', 0) // 1000
-        items.append({
-            'title': item.get('title', item.get('text', ''))[:100],
-            'link': f"https://xueqiu.com/{item.get('id', '')}",
-            'description': item.get('description', item.get('text', '')),
-            'pubDate': timestamp_to_rfc822(created_at),
-            'guid': f"xueqiu_{item.get('id', '')}"
-        })
-    username = data.get('statuses', [{}])[0].get('user', {}).get('screen_name', uid)
-    return generate_rss(f'雪球-{username}', f'https://xueqiu.com/u/{uid}',
-                        f'{username}的雪球动态', items, feed_url=feed_url)
-
-
 # ── Route table ─────────────────────────────────────────────────────────────
 
 ROUTES = {
@@ -417,10 +379,6 @@ def build_health_payload(base_url, check_sources=False):
                 status = 'degraded'
         feeds.append(entry)
 
-    feeds.append({'name': 'Xueqiu User Example (雪球)',
-                  'path': '/xueqiu/user/1247347556',
-                  'url': base_url + '/xueqiu/user/1247347556',
-                  'status': 'requires_chrome_cdp'})
     feeds.append({'name': 'CLS Finance Market (财联社看盘)',
                   'path': '/finance/market',
                   'url': base_url + '/finance/market',
@@ -453,6 +411,18 @@ def build_health_payload(base_url, check_sources=False):
                   'path': '/stock/basic_info',
                   'url': base_url + '/stock/basic_info',
                   'status': 'requires_chrome_cdp'})
+    feeds.append({'name': 'Market Margin (融资融券)',
+                  'path': '/market/margin',
+                  'url': base_url + '/market/margin',
+                  'status': 'configured'})
+    feeds.append({'name': 'Market Northbound (北向资金)',
+                  'path': '/market/northbound',
+                  'url': base_url + '/market/northbound',
+                  'status': 'configured'})
+    feeds.append({'name': 'Market Northbound History (北向资金历史)',
+                  'path': '/market/northbound/history',
+                  'url': base_url + '/market/northbound/history',
+                  'status': 'configured'})
 
     return {'status': status, 'cache_ttl': CACHE_TTL,
             'request_timeout': REQUEST_TIMEOUT, 'feeds': feeds}
@@ -548,15 +518,21 @@ class RSSHandler(BaseHTTPRequestHandler):
             self._send_text(200, 'application/json; charset=utf-8',
                             body, cache=False, write_body=write_body)
             return
+        if path == '/market/margin':
+            params = parse_qs(parsed.query)
+            market = params.get('market', ['99'])[0]
+            self._send_json(handle_margin(market), write_body=write_body)
+            return
+        if path == '/market/northbound':
+            self._send_json(handle_northbound(), write_body=write_body)
+            return
+        if path == '/market/northbound/history':
+            params = parse_qs(parsed.query)
+            period = params.get('period', ['day'])[0]
+            self._send_json(handle_northbound_history(period), write_body=write_body)
+            return
         if path in ROUTES:
             self._serve_feed(path, base_url, write_body=write_body)
-            return
-        if path.startswith('/xueqiu/user/'):
-            uid = path.split('/')[-1]
-            feed_url = base_url + path
-            xml = self._get_or_fetch_feed(path, lambda: handle_xueqiu_user(uid, feed_url=feed_url))
-            self._send_text(200, 'application/rss+xml; charset=utf-8',
-                            xml, write_body=write_body)
             return
 
         self.send_error(404, 'Not Found. Visit / for available feeds.')
@@ -657,27 +633,68 @@ class RSSHandler(BaseHTTPRequestHandler):
             self.wfile.write(body_bytes)
 
     def _serve_index(self, write_body=True):
-        """Serve a simple index page listing available feeds."""
-        lines = ['<html><head><title>China Finance RSS Bridge</title></head>',
-                 '<body><h1>🇨🇳 China Finance RSS Bridge</h1><ul>']
+        """Serve a simple index page listing available feeds in a table."""
+        lines = ['<html><head><title>China Finance RSS Bridge</title>',
+                 '<style>',
+                 'body{font-family:-apple-system,BlinkMacSystemFont,sans-serif;max-width:960px;margin:2em auto;padding:0 1em;background:#fafafa;color:#333}',
+                 'h1{color:#111}',
+                 'table{border-collapse:collapse;width:100%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,.1);border-radius:6px;overflow:hidden}',
+                 'th,td{text-align:left;padding:10px 14px;border-bottom:1px solid #eee}',
+                 'th{background:#f0f4f8;font-weight:600;white-space:nowrap}',
+                 'tr:hover{background:#f5f8ff}',
+                 'a{color:#2563eb;text-decoration:none}',
+                 'a:hover{text-decoration:underline}',
+                 '.tag{display:inline-block;font-size:11px;padding:2px 8px;border-radius:10px;font-weight:500}',
+                 '.tag-rss{background:#dcfce7;color:#166534}',
+                 '.tag-json{background:#dbeafe;color:#1e40af}',
+                 '.tag-cdp{background:#fef3c7;color:#92400e}',
+                 '.tag-none{background:#f3f4f6;color:#6b7280}',
+                 '.section{margin:1.5em 0 .5em;font-size:1.1em;font-weight:600;color:#444}',
+                 '</style></head>',
+                 '<body><h1>🇨🇳 China Finance RSS Bridge</h1>',
+                 '<table>',
+                 '<tr><th>Name</th><th>Endpoint</th><th>Example</th><th>Type</th><th>CDP</th></tr>']
+        # RSS feed routes
         for path, info in ROUTES.items():
-            lines.append(f'<li><a href="{path}">{info["name"]}</a></li>')
-        lines.append('<li><a href="/xueqiu/user/1247347556">Xueqiu User Example (雪球)</a></li>')
-        lines.append('</ul><p><a href="/finance/market">Finance Market JSON</a> | '
-                      '<a href="/finance/timeline">Finance Timeline JSON</a> | '
-                      '<a href="/quotation/market">Quotation Market JSON</a> | '
-                      '<a href="/market/timeline">Market Index Timeline JSON</a> | '
-                       '<a href="/cls/hotplate">Hotplate JSON (板块)</a> | '
-                       '<a href="/ths/longhu">THS Longhu JSON (龙虎榜)</a> | '
-                      '<a href="/stock/data?code=sz300139">Stock Detail JSON (sz300139)</a> | '
-                       '<a href="/stock/fundflow?code=sh600519">Stock Fund Flow JSON (sh600519)</a> | '
-                        '<a href="/stock/timeline?code=sh600519">Stock Timeline JSON (sh600519)</a> | '
-                         '<a href="/stock/f10?code=sh600519">Stock F10 JSON (sh600519)</a> | '
-                          '<a href="/stock/basic_info?code=sh600519">Stock Basic Info JSON (sh600519)</a> | '
-                          '<a href="/stock/announcement?code=sh600519">Stock Announcement JSON (sh600519)</a> | '
-                         '<a href="/opml.xml">Import OPML</a> | '
-                      '<a href="/healthz?check=1">Source check</a></p>')
-        lines.append('<p>Add any URL above to your RSS reader.</p></body></html>')
+            lines.append(
+                f'<tr><td>{info["name"]}</td>'
+                f'<td><a href="{path}">{path}</a></td>'
+                f'<td>–</td>'
+                f'<td><span class="tag tag-rss">RSS</span></td>'
+                f'<td><span class="tag tag-none">–</span></td></tr>')
+        # JSON API endpoints
+        json_apis = [
+            ('/finance/market', 'Finance Market Data (财联社看盘)', '/finance/market', True),
+            ('/finance/timeline', 'Finance Timeline (分时图)', '/finance/timeline', True),
+            ('/quotation/market', 'Quotation Market Data (行情)', '/quotation/market', True),
+            ('/market/timeline', 'Market Index Timeline (指数分时图)', '/market/timeline', True),
+            ('/cls/hotplate', 'Hotplate (板块)', '/cls/hotplate', False),
+            ('/ths/longhu', 'THS Longhu (龙虎榜)', '/ths/longhu', False),
+            ('/stock/data', 'Stock Detail (个股详情)', '/stock/data?code=sz300139', True),
+            ('/stock/fundflow', 'Stock Fund Flow (资金流向)', '/stock/fundflow?code=sh600519', False),
+            ('/stock/timeline', 'Stock Timeline (个股分时图)', '/stock/timeline?code=sh600519', False),
+            ('/stock/f10', 'Stock F10 (个股财务概要)', '/stock/f10?code=sh600519', False),
+            ('/stock/basic_info', 'Stock Basic Info (个股基本信息)', '/stock/basic_info?code=sh600519', True),
+            ('/stock/announcement', 'Stock Announcement (个股公告)', '/stock/announcement?code=sh600519', False),
+            ('/market/margin', 'Market Margin (融资融券)', '/market/margin?market=99', False),
+            ('/market/northbound', 'Market Northbound (北向资金)', '/market/northbound', False),
+            ('/market/northbound/history', 'Market Northbound History (北向资金历史)',
+             '/market/northbound/history?period=day', False),
+        ]
+        for path, name, example, needs_cdp in json_apis:
+            cdp_tag = '<span class="tag tag-cdp">CDP</span>' if needs_cdp else '<span class="tag tag-none">–</span>'
+            lines.append(
+                f'<tr><td>{name}</td>'
+                f'<td><a href="{path}">{path}</a></td>'
+                f'<td><a href="{example}">Try</a></td>'
+                f'<td><span class="tag tag-json">JSON</span></td>'
+                f'<td>{cdp_tag}</td></tr>')
+        lines.append('</table>')
+        lines.append('<p style="margin-top:1em;font-size:13px;color:#888">'
+                     '<a href="/opml.xml">📡 Import OPML</a> &middot; '
+                     '<a href="/healthz?check=1">❤️ Source check</a>'
+                     ' &middot; Add any RSS URL to your reader.</p>')
+        lines.append('</body></html>')
         html = '\n'.join(lines)
         self._send_text(200, 'text/html; charset=utf-8', html,
                         cache=False, write_body=write_body)
@@ -763,7 +780,6 @@ def main():
     print('Available feeds:')
     for path, info in ROUTES.items():
         print(f'  http://localhost:{PORT}{path}  — {info["name"]}')
-    print(f'  http://localhost:{PORT}/xueqiu/user/{{uid}}  — Xueqiu User (雪球)')
     print(f'\nUtilities:')
     print(f'  http://localhost:{PORT}/finance/market  — Finance Market Data (JSON, needs Chrome CDP)')
     print(f'  http://localhost:{PORT}/finance/timeline  — Finance Timeline (JSON, needs Chrome CDP)')
@@ -776,6 +792,9 @@ def main():
     print(f'  http://localhost:{PORT}/stock/f10  — Stock F10 Financial Summary (JSON, no CDP needed)')
     print(f'  http://localhost:{PORT}/stock/basic_info  — Stock Basic Info (JSON, needs Chrome CDP)')
     print(f'  http://localhost:{PORT}/stock/announcement  — Stock Announcement (JSON, no CDP needed)')
+    print(f'  http://localhost:{PORT}/market/margin  — Market Margin (融资融券, JSON, no CDP needed)')
+    print(f'  http://localhost:{PORT}/market/northbound  — Market Northbound (北向资金, JSON, no CDP needed)')
+    print(f'  http://localhost:{PORT}/market/northbound/history  — Market Northbound History (北向资金历史, JSON, no CDP needed)')
     print(f'  http://localhost:{PORT}/opml.xml  — OPML subscription list')
     print(f'  http://localhost:{PORT}/healthz?check=1  — Source health check')
     print(f'Visit http://localhost:{PORT}/ for the web index.\n')

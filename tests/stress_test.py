@@ -27,7 +27,6 @@ ENDPOINTS = {
 
     # JSON-REST endpoints (no CDP)
     'cls_hotplate':      (f'{BASE}/cls/hotplate', 'json'),
-    'xueqiu_user':       (f'{BASE}/xueqiu/user/1247347556', 'rss'),
 
     # CDP heartbeat pages (read-only, no navigation)
     'finance_market':    (f'{BASE}/finance/market', 'json'),

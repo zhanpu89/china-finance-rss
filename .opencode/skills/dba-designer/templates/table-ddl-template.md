@@ -1,0 +1,22 @@
+# 建表 DDL 模板
+
+按 LC-002 跳转。
+
+## MySQL
+
+```sql
+CREATE TABLE IF NOT EXISTS `{表名}` (
+  `id` BIGINT UNSIGNED NOT NULL AUTO_INCREMENT COMMENT '主键',
+  -- ... 业务字段，每字段有 COMMENT
+  `created_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) COMMENT '创建时间',
+  `updated_at` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3) COMMENT '更新时间',
+  `deleted_at` DATETIME(3) DEFAULT NULL COMMENT '删除时间(软删除)',
+  `created_by` VARCHAR(64) NOT NULL DEFAULT '' COMMENT '创建人',
+  `updated_by` VARCHAR(64) NOT NULL DEFAULT '' COMMENT '更新人',
+  PRIMARY KEY (`id`),
+  INDEX `idx_{表名}_{字段}` (`{字段}`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='{表注释}';
+```
+
+- 禁止 ENUM（TINYINT + COMMENT），禁止 FOREIGN KEY（`-- FK` 注释），禁止 DECIMAL/FLOAT/DOUBLE 存金额（BIGINT）
+- 增量用 `ALTER TABLE` + 回滚

@@ -1,0 +1,24 @@
+# 方言差异
+
+按 LC-002 跳转。
+
+## MySQL 8.0
+
+- 引擎 InnoDB，字符集 utf8mb4
+- 幂等：`CREATE TABLE IF NOT EXISTS` / `ALTER TABLE ... MODIFY COLUMN IF EXISTS`
+- 禁用 `FOREIGN_KEY_CHECKS` 需配合 SET 语句
+
+## PostgreSQL 14+
+
+- `BIGSERIAL` 替代 AUTO_INCREMENT
+- `NOW()` 替代 `CURRENT_TIMESTAMP`
+- 注释：`COMMENT ON TABLE/COLUMN`
+- 幂等：`CREATE TABLE IF NOT EXISTS` / 迁移用 `DO $$ BEGIN ... EXCEPTION ... END $$`
+
+## TiDB
+
+- `AUTO_RANDOM` 替代 AUTO_INCREMENT（避免热点）
+- 支持分区表（RANGE/LIST/HASH）
+- 禁止全文索引，外键语法支持但不建议
+
+通用：创建前 `DROP TABLE IF EXISTS` + `CREATE TABLE IF NOT EXISTS`
