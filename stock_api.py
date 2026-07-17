@@ -576,7 +576,7 @@ def _navigate_for_sector(stock_code, deadline):
                     if raw_sector:
                         return data, raw_sector.split('-')[0]
                 page.refresh()
-                time.sleep(0.5)
+                sleep(0.5)
             data = page.get_data()
             ci = data.get('stock_company_info') or {}
             if _company_info_matches(ci, stock_code):
