@@ -33,7 +33,7 @@ All require `?code=` with stock symbols (e.g. `?code=sh600519` or `?code=sh60051
 
 | Endpoint | Description | CDP |
 | --- | --- | --- |
-| `/stock/data` | Stock detail (price, announcements, related sectors, articles) | Yes |
+| `/stock/data` | Stock detail + related sectors (REST + evaluate_fetch) | No |
 | `/stock/fundflow` | Capital flow (主力/超大/大/中/小单净流入) | No |
 | `/stock/timeline` | Intraday price timeline | No |
 | `/stock/f10` | Company fundamentals & financials | Yes |

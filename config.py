@@ -30,11 +30,6 @@ _QUOTATION_EXPECTED_KEYS = frozenset({
     'bj_stock_info', 'index_home', 'basic_info',
 })
 
-_STOCK_EXPECTED_KEYS = frozenset({
-    'articles', 'stock_plate',
-    'stock_announcement', 'stock_detail',
-})
-
 _F10_EXPECTED_KEYS = frozenset({
     'stock_company_info',
 })

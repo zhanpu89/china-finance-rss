@@ -143,21 +143,12 @@ Base URL: `http://localhost:8053`
 
 ---
 
-### `GET /stock/data` ⚡ 需要 Chrome CDP
+### `GET /stock/data`
 
-**个股详情聚合** — 整合 REST API + CDP 导航的多种数据。
+**个股行情详情** — REST 直调。响应格式为 `{"code": {...}}`。
 
-- **CDP**: 是（依赖 Chrome CDP）
-- **响应字段**:
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `stock_detail` | object/null | 个股详情（REST API，`https://x-quote.cls.cn/quote/stock/detail`） |
-| `stock_announcement` | object/null | 个股公告列表（REST API） |
-| `stock_plate` | object/null | 所属板块（CDP evaluate_fetch） |
-| `articles` | array/null | 相关文章（CDP 页面导航） |
-
-**`stock_detail` 字段**:
+- **CDP**: 否
+- **响应字段**（`data` 内）：
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
@@ -176,30 +167,6 @@ Base URL: `http://localhost:8053`
 | `pe` | number | 市盈率 |
 | `pb` | number | 市净率 |
 | 其他字段 | — | 上游 API 返回的额外字段也会透传 |
-
-**`stock_announcement` 字段**:
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `list` | array | 公告列表 |
-| `list[].id` | string | 公告 ID |
-| `list[].title` | string | 公告标题 |
-| `list[].time` | string | 发布时间 |
-| `list[].url` | string | 公告链接 |
-
-**`stock_plate` 字段**:
-
-上游 CLS `stock/assoc_plate` API 返回的关联板块数据。
-
-**`articles` 字段**:
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `id` | string | 文章 ID |
-| `title` | string | 文章标题 |
-| `content` | string | 文章摘要 |
-| `ctime` | number | 发布时间戳 |
-| `link` | string | 文章链接 |
 
 ---
 

@@ -811,66 +811,16 @@ def _announcement_prefetch_loop():
 
 # ── Stock Detail ───────────────────────────────────────────────────────────
 
-def handle_cls_stock(stock_code, timeout=30):
-    """CLS Stock Detail Data — REST first, CDP fallback per component.
-
-    Components:
-      - stock_detail: REST API directly (<100ms)
-      - stock_plate:   evaluate_fetch from browser (<500ms)
-      - stock_announcement: REST API directly (already signed)
-      - articles:      CDP page navigation (only if needed)
-    """
-    result = {}
-
-    # 1) stock_detail — REST direct
+def handle_cls_stock(stock_code):
+    """CLS Stock Detail Data — REST API direct."""
     try:
         url = f'{_STOCK_DETAIL_BASE_URL}?secu_code={stock_code}'
         raw = json.loads(fetch_json(url, _STOCK_DETAIL_HEADERS, ttl=_MAX_CACHE_AGE))
         if raw.get('code') == 200:
-            result['stock_detail'] = raw.get('data')
+            return raw.get('data')
     except Exception:
         pass
-
-    # 2) stock_announcement — REST direct (already signed in fetch_cls_announcement)
-    ann = fetch_cls_announcement(stock_code)
-    if ann:
-        result['stock_announcement'] = ann
-
-    # 3) stock_plate — evaluate_fetch from browser (no navigation, just a fetch)
-    result_plate = _evaluate_fetch_any(
-        f'https://x-quote.cls.cn/stock/assoc_plate?secu_code={stock_code}',
-        timeout=6)
-    if result_plate and isinstance(result_plate, dict):
-        if 'data' in result_plate:
-            result['stock_plate'] = result_plate['data']
-        elif 'code' not in result_plate or result_plate.get('code') in (200, None, ''):
-            result['stock_plate'] = result_plate
-
-    # 4) articles — CDP page navigation (index page, no other source)
-    if config.cdp_engine and config.cdp_engine.ready:
-        arts_deadline = time() + min(timeout, 12)
-        for pname in _STOCK_NAV_PAGES:
-            page = config.cdp_engine.get_page(pname)
-            if not page:
-                continue
-            remaining = arts_deadline - time()
-            if remaining < 3:
-                continue
-            try:
-                if not page._navigate_lock.acquire(timeout=0.5):
-                    continue
-                page._navigate_lock.release()
-            except AttributeError:
-                continue
-            if page.navigate_stock(stock_code, timeout=min(remaining, 8), tabs=()):
-                data = page.get_data()
-                for k in ('articles', 'stock_plate', 'stock_detail', 'stock_announcement'):
-                    if k not in result and data.get(k) is not None:
-                        result[k] = data[k]
-                if 'articles' in result:
-                    break
-
-    return result
+    return None
 
 
 def handle_cls_stock_batch(codes):
