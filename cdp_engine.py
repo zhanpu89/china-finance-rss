@@ -811,12 +811,19 @@ class CDPPage:
             self._maybe_reconnect()
             if not self._ensure_ws():
                 return False
-            with self._ws_lock:
-                self._evaluate(
-                    'window.__cdp_api={};window.__cdp_refetch={}',
-                    timeout=3)
-                self._send_recv({'id': self._next_id(), 'method': 'Page.navigate',
-                                 'params': {'url': url}}, timeout=min(10, remaining))
+            def _send_navigate():
+                with self._ws_lock:
+                    self._evaluate(
+                        'window.__cdp_api={};window.__cdp_refetch={}',
+                        timeout=3)
+                    self._send_recv({'id': self._next_id(), 'method': 'Page.navigate',
+                                     'params': {'url': url}}, timeout=min(10, remaining))
+            try:
+                _send_navigate()
+            except Exception:
+                if not self._ensure_ws():
+                    return False
+                _send_navigate()
             load_deadline = time.time() + min(15, remaining)
             while time.time() < load_deadline:
                 try:
