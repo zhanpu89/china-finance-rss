@@ -51,9 +51,9 @@ ENDPOINTS = {
 
 # Expected sectors (申万一级行业) — approximate, used as sanity check
 EXPECTED_SECTORS = {
-    'sh600519': '食品饮料',
+    'sh600519': '食品饮料行业',
     'sz000001': '银行',
-    'sh601318': '保险',
+    'sh601318': '非银金融',
 }
 
 

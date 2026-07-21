@@ -1,6 +1,7 @@
 """Stock data APIs: fundflow, timeline, F10, basic_info, stock detail.
 
-All CDP-based endpoints use `config.cdp_engine` (set by server.py init).
+CDP-based endpoints (fundflow, timeline, F10) use `config.cdp_engine`
+(set by server.py init); basic_info now sources sector from REST only.
 """
 
 import json
@@ -502,96 +503,15 @@ def _populate_sector_from_f10(data, code):
                     threading.Thread(target=_save_sector_cache, daemon=True).start()
 
 
-def _extract_sector_name(stock_code):
-    """Get sector name for a stock code from shared cache or CDP pages.
 
-    Non-blocking: only reads already-cached data, never triggers navigation.
-    Returns sector string (e.g. '食品饮料') or None.
-    """
-    # 1) Shared Python cache (fastest, cross-page)
-    with _sector_cache_lock:
-        cached = _sector_cache.get(stock_code)
-        if cached and time() - cached['ts'] < 3600:
-            return cached['sector']
-
-    # 2) CDP page cache — check any page that may have company_info
-    sector = None
-    if config.cdp_engine and config.cdp_engine.ready:
-        for name in _STOCK_NAV_PAGES:
-            page = config.cdp_engine.get_page(name)
-            if page:
-                try:
-                    data = page.get_data()
-                    ci = data.get('stock_company_info')
-                    if _company_info_matches(ci, stock_code):
-                        industry = (ci.get('basic_info') or {}).get('IndustryName') or ''
-                        if industry:
-                            sector = industry.split('-')[0]
-                            break
-                except Exception:
-                    pass
-
-    if sector:
-        with _sector_cache_lock:
-            _sector_cache[stock_code] = {'sector': sector, 'ts': time()}
-        threading.Thread(target=_save_sector_cache, daemon=True).start()
-    return sector
-
-
-_STOCK_NAV_PAGES = ('cls_f10', 'cls_stock', 'cls_stock_2', 'cls_stock_3',
-                     'cls_stock_4', 'cls_stock_5', 'cls_stock_6',
-                     'cls_stock_7', 'cls_stock_8', 'cls_stock_9',
-                     'cls_stock_10', 'cls_stock_11', 'cls_stock_12',
-                     'cls_stock_13', 'cls_stock_14')
-
-
-def _navigate_for_sector(stock_code, deadline):
-    """Try navigate_stock on available CDP pages until one succeeds.
-
-    Uses multiple pages with separate _navigate_lock to increase
-    concurrent navigation capacity. Returns (data_dict, sector_str).
-    """
-    for pname in _STOCK_NAV_PAGES:
-        page = config.cdp_engine.get_page(pname)
-        if not page:
-            continue
-        remaining = 15
-        if deadline:
-            remaining = min(remaining, int(deadline - time()))
-        if remaining < 3:
-            continue
-        try:
-            if not page._navigate_lock.acquire(timeout=0.5):
-                continue
-            page._navigate_lock.release()
-        except AttributeError:
-            continue
-        if page.navigate_stock(stock_code, tabs=('f10',), timeout=remaining):
-            poll_deadline = time() + 3
-            while time() < poll_deadline:
-                data = page.get_data()
-                ci = data.get('stock_company_info') or {}
-                if _company_info_matches(ci, stock_code):
-                    raw_sector = (ci.get('basic_info') or {}).get('IndustryName', '')
-                    if raw_sector:
-                        return data, raw_sector.split('-')[0]
-                page.refresh()
-                sleep(0.5)
-            data = page.get_data()
-            ci = data.get('stock_company_info') or {}
-            if _company_info_matches(ci, stock_code):
-                raw_sector = (ci.get('basic_info') or {}).get('IndustryName', '')
-                if raw_sector:
-                    return data, raw_sector.split('-')[0]
-    return None, None
 
 
 def fetch_cls_basic_info(stock_code, deadline=None):
-    """Fetch basic info with sector_name (申万一级行业).
+    """Fetch basic info with sector_name.
 
     Two-phase:
       1) REST basic_info API for pricing data (<100ms)
-      2) CDP navigate_stock for sector (via F10 tab, distributed across pages)
+      2) REST stock detail API for sector (primary_industry.plate_name)
     Returns dict with secu_code, price data, and sector_name.
     """
     result = None
@@ -605,12 +525,17 @@ def fetch_cls_basic_info(stock_code, deadline=None):
     except Exception:
         pass
 
-    # Phase 2: Sector name — cache first, then CDP navigation
-    sector = _extract_sector_name(stock_code)
-    if not sector and config.cdp_engine and config.cdp_engine.ready:
-        nav_data, sector = _navigate_for_sector(stock_code, deadline)
-        if sector:
-            _populate_sector_simple(stock_code, sector)
+    # Phase 2: Sector name from stock detail API (primary_industry.plate_name)
+    sector = None
+    try:
+        detail_url = f'{_STOCK_DETAIL_BASE_URL}?secu_code={stock_code}'
+        detail_raw = json.loads(fetch_json(detail_url, _STOCK_DETAIL_HEADERS, ttl=_MAX_CACHE_AGE))
+        if detail_raw.get('code') == 200:
+            sector = (detail_raw.get('data', {}).get('primary_industry') or {}).get('plate_name', '')
+            if not sector:
+                sector = None
+    except Exception:
+        pass
 
     # Merge sector_name into result
     if sector and result is not None:
@@ -622,32 +547,11 @@ def fetch_cls_basic_info(stock_code, deadline=None):
     if result is not None:
         return result
 
-    # Fallback: full CDP response (only if REST failed but navigation succeeded)
-    if sector:
-        result = nav_data.get('basic_info')
-        if not isinstance(result, dict):
-            result = {'code': 200, 'msg': 'success', 'data': {}}
-            pd = (nav_data.get('basic_info') or {}).get('data')
-            if isinstance(pd, dict):
-                result['data'] = pd
-        elif not isinstance(result.get('data'), dict):
-            result['data'] = {}
-        result['sector_name'] = sector
-        return result
-
     return None
 
 
-def _populate_sector_simple(stock_code, sector):
-    """Set sector into shared cache and persist to disk."""
-    if sector:
-        with _sector_cache_lock:
-            _sector_cache[stock_code] = {'sector': sector, 'ts': time()}
-        threading.Thread(target=_save_sector_cache, daemon=True).start()
-
-
 def handle_cls_basic_infos(codes):
-    """Stock Basic Info — CDP navigation-based, batch supported."""
+    """Stock Basic Info — batch supported."""
     seen = set()
     codes = [c for c in codes if not (c in seen or seen.add(c))]
     if not codes:
