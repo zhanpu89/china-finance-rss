@@ -32,6 +32,9 @@ from config import (
 from cache import fetch_json, _fill_missing
 from utils import cls_sign_params
 
+# CDP stock navigation pages (created by init_cdp in server.py)
+_STOCK_NAV_PAGES = ['cls_stock'] + [f'cls_stock_{i}' for i in range(2, 15)]
+
 
 def _announcement_url(stock_code):
     """Build signed announcement API URL — requires CLS sign."""
