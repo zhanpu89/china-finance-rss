@@ -59,7 +59,7 @@ def _evaluate_fetch_any(url, timeout=8):
     if not config.cdp_engine or not config.cdp_engine.ready:
         return None
     deadline = time() + timeout
-    for name in _STOCK_NAV_PAGES[:3] + ('cls_finance', 'cls_quotation'):
+    for name in _STOCK_NAV_PAGES[:3] + ['cls_finance', 'cls_quotation']:
         if time() >= deadline:
             break
         page = config.cdp_engine.get_page(name)
