@@ -13,7 +13,7 @@ PUBLIC_BASE_URL = os.getenv('PUBLIC_BASE_URL', '').rstrip('/')
 MAX_WORKERS = int(os.getenv('MAX_WORKERS', '20'))
 
 # Stock code validation
-VALID_STOCK_CODE = re.compile(r'^(sh|sz|bj)\d{6}$', re.IGNORECASE)
+VALID_STOCK_CODE = re.compile(r'^(sh|sz|bj)\d{6}$|^\d{6}\.(BJ|SH|SZ)$', re.IGNORECASE)
 
 # Cache & batch limits
 _MAX_CACHE_AGE = 120
