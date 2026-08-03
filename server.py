@@ -31,12 +31,13 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 from urllib.parse import parse_qs, urlencode
 
-from cdp_engine import ensure_chrome, CDPEngine
+from cdp_engine import ensure_chrome, CDPEngine, full_chrome_restart
 from config import (
     PORT, CACHE_TTL, REQUEST_TIMEOUT, PUBLIC_BASE_URL, MAX_WORKERS,
     _MAX_BATCH_SIZE,
     _FINANCE_EXPECTED_KEYS, _QUOTATION_EXPECTED_KEYS,
     _HOTPLATE_BASE_URL, _HOTPLATE_HEADERS,
+    CDP_RESTART_INTERVAL, stock_nav_page_names,
     cdp_engine, _china_trading_ttl,
 )
 from cache import fetch_json, feed_cache, _feed_cache_lock, _feed_fetch_locks, \
@@ -740,11 +741,10 @@ def init_cdp():
             return
         cdp_engine.add_page('cls_finance', 'https://www.cls.cn/finance')
         cdp_engine.add_page('cls_quotation', 'https://www.cls.cn/quotation')
-        cdp_engine.add_page('cls_stock', 'https://www.cls.cn/stock?code=sz300139', heartbeat=False)
-        for i in range(2, 15):
-            cdp_engine.add_page(f'cls_stock_{i}', 'https://www.cls.cn/stock?code=sz300139', heartbeat=False)
-        cdp_engine.add_page('cls_f10', 'https://www.cls.cn/stock?code=sz300139', heartbeat=False)
-        print('  ✓ CDP engine ready — finance, quotation, 14 stock pages & F10')
+        nav_names = stock_nav_page_names()
+        for name in nav_names:
+            cdp_engine.add_page(name, 'https://www.cls.cn/stock?code=sz300139', heartbeat=False)
+        print(f'  ✓ CDP engine ready — finance, quotation, {len(nav_names)} stock pages')
         import config
         config.cdp_engine = cdp_engine
     except Exception as e:
@@ -753,7 +753,27 @@ def init_cdp():
         traceback.print_exc()
 
 
-# ── Main entry point ────────────────────────────────────────────────────────
+# ── CDP memory watchdog ─────────────────────────────────────────────────────
+
+def _cdp_memory_watchdog():
+    """Periodically restart Chrome to reclaim V8/renderer memory.
+
+    `_maybe_reconnect` (in cdp_engine) only restarts Chrome after ~30 stock
+    navigations. Under low traffic (RSS + flickering /stock/data) navigation
+    volume rarely reaches that, so Chrome's renderers grow over days and never
+    release memory. This thread forces a `full_chrome_restart()` on a wall-clock
+    interval regardless of traffic, keeping long-running memory bounded.
+    """
+    import config as env
+    while True:
+        time.sleep(CDP_RESTART_INTERVAL)
+        try:
+            if env.cdp_engine and env.cdp_engine.ready:
+                print('  [CDP] watchdog: restarting Chrome to reclaim renderer memory')
+                full_chrome_restart()
+        except Exception as e:
+            print(f'  [CDP] watchdog error: {e}')
+
 
 def main():
     def _signal_handler(signum, frame):
@@ -770,6 +790,7 @@ def main():
     from utils import warm_jin10_headers
     threading.Thread(target=warm_jin10_headers, daemon=True).start()
     threading.Thread(target=init_cdp, daemon=True).start()
+    threading.Thread(target=_cdp_memory_watchdog, daemon=True).start()
     threading.Thread(target=_fundflow_prefetch_loop, daemon=True).start()
     threading.Thread(target=_timeline_prefetch_loop, daemon=True).start()
     threading.Thread(target=_f10_prefetch_loop, daemon=True).start()

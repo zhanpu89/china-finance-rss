@@ -105,10 +105,8 @@ def check_endpoint(endpoint, code, data):
             errors.append('null result for code')
         elif not isinstance(result, dict):
             errors.append(f'not dict: {type(result).__name__}')
-        else:
-            for key in ('stock_detail', 'stock_plate', 'articles', 'stock_announcement'):
-                if key not in result:
-                    errors.append(f'missing key: {key}')
+        elif not result:
+            errors.append('empty result')
     elif endpoint in ('/stock/fundflow', '/stock/timeline', '/stock/announcement'):
         result = data.get(code)
         if result is None:

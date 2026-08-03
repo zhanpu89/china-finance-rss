@@ -11,6 +11,8 @@ services:
       - REQUEST_TIMEOUT=10
       - MAX_WORKERS=10
       - PUBLIC_BASE_URL=
+      - CDP_STOCK_PAGES=3
+      - CDP_RESTART_INTERVAL=7200
     volumes:
       - ./data:/app/data
     mem_limit: 2g

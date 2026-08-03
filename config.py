@@ -81,6 +81,26 @@ _NORTHBOUND_HISTORY_URL = 'https://data.10jqka.com.cn/hsgt/history/type/north/da
 _NORTHBOUND_HEADERS = {**_TENJQKA_HEADERS, 'Referer': 'https://data.10jqka.com.cn/hsgt/'}
 _NORTHBOUND_CACHE_TTL = 300  # 5 min
 
+# CDP page pool sizing & memory watchdog
+CDP_STOCK_PAGES = int(os.getenv('CDP_STOCK_PAGES', '3'))
+CDP_RESTART_INTERVAL = int(os.getenv('CDP_RESTART_INTERVAL', '7200'))
+
+
+def stock_nav_page_names():
+    """Persistent CDP stock navigation page names (cls_f10 + N stock pages).
+
+    Kept small (default 3) — each page holds a persistent Chrome renderer
+    (~150MB+). /stock/data no longer navigates, so only f10/basic_info need
+    a few nav pages. Concurrency is satisfied via fair _navigate_lock queueing.
+    """
+    names = ['cls_f10', 'cls_stock']
+    i = 2
+    while len(names) < CDP_STOCK_PAGES:
+        names.append(f'cls_stock_{i}')
+        i += 1
+    return tuple(names)
+
+
 # Pool refresh intervals and caps
 _FUNDFLOW_POOL_REFRESH = 25
 _FUNDFLOW_MAX_POOL = 500

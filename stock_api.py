@@ -27,13 +27,13 @@ from config import (
     _F10_POOL_REFRESH, _F10_MAX_POOL,
     _BASIC_INFO_MAX_POOL,
     _ANNOUNCEMENT_POOL_REFRESH, _ANNOUNCEMENT_MAX_POOL,
-    _china_trading_ttl,
+    _china_trading_ttl, stock_nav_page_names,
 )
 from cache import fetch_json, _fill_missing
 from utils import cls_sign_params
 
 # CDP stock navigation pages (created by init_cdp in server.py)
-_STOCK_NAV_PAGES = ['cls_stock'] + [f'cls_stock_{i}' for i in range(2, 15)]
+_STOCK_NAV_PAGES = list(stock_nav_page_names())
 
 
 def _announcement_url(stock_code):
