@@ -13,8 +13,11 @@ services:
       - PUBLIC_BASE_URL=
       - CDP_STOCK_PAGES=3
       - CDP_RESTART_INTERVAL=7200
+      - LOG_DIR=/app/logs
+      - LOG_BACKUP_DAYS=30
     volumes:
       - ./data:/app/data
+      - ./logs:/app/logs
     mem_limit: 2g
     mem_reservation: 256M
     dns:

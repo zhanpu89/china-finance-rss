@@ -269,3 +269,50 @@ def parse_wallstreetcn_items(payload):
             'guid': f'wallstreetcn_{item_id}',
         })
     return items
+
+
+# ── Logging (daily rotation) ────────────────────────────────────────────────
+
+import logging
+import os
+from logging.handlers import TimedRotatingFileHandler
+
+_LOG_DIR = os.getenv('LOG_DIR', 'logs')
+_LOG_BACKUP_DAYS = int(os.getenv('LOG_BACKUP_DAYS', '30'))
+_logging_configured = False
+
+
+def setup_logging():
+    """Configure root logger: daily-rotating file + stdout.
+
+    File handler rotates at midnight (server.log → server.log.YYYY-MM-DD)
+    and keeps LOG_BACKUP_DAYS days of history. StreamHandler keeps
+    stdout/stderr output for `docker logs` visibility. Idempotent.
+    """
+    global _logging_configured
+    if _logging_configured:
+        return
+    _logging_configured = True
+
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+
+    fmt = logging.Formatter(
+        '%(asctime)s [%(levelname)s] %(name)s: %(message)s')
+
+    # Daily-rotating file handler (logs/server.log, kept 30 days)
+    try:
+        os.makedirs(_LOG_DIR, exist_ok=True)
+        fh = TimedRotatingFileHandler(
+            os.path.join(_LOG_DIR, 'server.log'),
+            when='midnight', backupCount=_LOG_BACKUP_DAYS,
+            encoding='utf-8')
+        fh.setFormatter(fmt)
+        logger.addHandler(fh)
+    except Exception as e:
+        print(f'[logging] file handler disabled: {e}')
+
+    # stdout handler — keeps `docker logs` working
+    sh = logging.StreamHandler()
+    sh.setFormatter(fmt)
+    logger.addHandler(sh)

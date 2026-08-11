@@ -21,3 +21,4 @@ build/
 chrome-profile/
 chrome-user-data/
 data/
+logs/

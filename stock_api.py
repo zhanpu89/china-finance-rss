@@ -32,6 +32,10 @@ from config import (
 from cache import fetch_json, _fill_missing
 from utils import cls_sign_params
 
+import logging
+
+log = logging.getLogger('stock')
+
 # CDP stock navigation pages (created by init_cdp in server.py)
 _STOCK_NAV_PAGES = list(stock_nav_page_names())
 
@@ -169,7 +173,7 @@ def _fundflow_prefetch_loop():
                         _fundflow_cache[code] = data
                         _fundflow_cache_ts[code] = time()
         except Exception as e:
-            print(f'[fundflow] prefetch error: {e}')
+            log.error(f'[fundflow] prefetch error: {e}')
 
 
 # ── Timeline ───────────────────────────────────────────────────────────────
@@ -275,7 +279,7 @@ def _timeline_prefetch_loop():
                         _timeline_cache[code] = data
                         _timeline_cache_ts[code] = time()
         except Exception as e:
-            print(f'[timeline] prefetch error: {e}')
+            log.error(f'[timeline] prefetch error: {e}')
 
 
 # ── F10 (Financial Summary) ────────────────────────────────────────────────
@@ -439,7 +443,7 @@ def _f10_prefetch_loop():
                         _f10_cache_ts[code] = time()
                     _populate_sector_from_f10(data, code)
         except Exception as e:
-            print(f'[f10] prefetch error: {e}')
+            log.error(f'[f10] prefetch error: {e}')
 
 
 # ── Basic Info ─────────────────────────────────────────────────────────────
@@ -471,11 +475,11 @@ def _load_sector_cache():
                         _sector_cache[k] = v
                         count += 1
             if count:
-                print(f'[sector] loaded {count} entries from {_SECTOR_CACHE_FILE}')
+                log.info(f'[sector] loaded {count} entries from {_SECTOR_CACHE_FILE}')
     except FileNotFoundError:
         pass
     except Exception as e:
-        print(f'[sector] load error: {e}')
+        log.warning(f'[sector] load error: {e}')
 
 
 def _save_sector_cache():
@@ -487,7 +491,7 @@ def _save_sector_cache():
         with open(_SECTOR_CACHE_FILE, 'w') as f:
             json.dump(data, f, ensure_ascii=False)
     except Exception as e:
-        print(f'[sector] save error: {e}')
+        log.warning(f'[sector] save error: {e}')
 
 
 _load_sector_cache()
@@ -502,7 +506,7 @@ def _sweep_sector_cache(now=None):
     for k in expired:
         del _sector_cache[k]
     if expired:
-        print(f'[sector] expired {len(expired)} entries from sector cache')
+        log.info(f'[sector] expired {len(expired)} entries from sector cache')
 
 
 def _sector_cache_put(code, sector, now=None):
@@ -740,7 +744,7 @@ def _announcement_prefetch_loop():
                         _announcement_cache[code] = data
                         _announcement_cache_ts[code] = time()
         except Exception as e:
-            print(f'[announcement] prefetch error: {e}')
+            log.error(f'[announcement] prefetch error: {e}')
 
 
 # ── Stock Detail ───────────────────────────────────────────────────────────

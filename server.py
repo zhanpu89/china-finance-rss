@@ -24,6 +24,7 @@ import signal
 import sys
 import threading
 import time
+import logging
 from concurrent.futures import ThreadPoolExecutor
 from email.utils import formatdate
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
@@ -60,6 +61,8 @@ from stock_api import (
 from market_api import (
     handle_margin, handle_northbound, handle_northbound_history,
 )
+
+log = logging.getLogger('server')
 
 
 # ── Source handlers ────────────────────────────────────────────────────────
@@ -446,7 +449,7 @@ class RSSHandler(BaseHTTPRequestHandler):
         return strftime('%d/%b/%Y %H:%M:%S', gmtime(time.time() + 28800))
 
     def log_message(self, format, *args):
-        sys.stderr.write(f"[{self.log_date_time_string()}] {format % args}\n")
+        log.info(f"{format % args}")
 
     def do_HEAD(self):
         try:
@@ -725,31 +728,31 @@ def init_cdp():
     """Initialize CDP engine with persistent CLS pages."""
     global cdp_engine
     try:
-        print('[CDP] init_cdp started')
+        log.info('[CDP] init_cdp started')
         if not ensure_chrome():
-            print('  ✗ Chrome not available. CDP endpoints will return errors.')
+            log.error('  ✗ Chrome not available. CDP endpoints will return errors.')
             return
         cdp_engine = CDPEngine()
         # Chrome may still be starting — retry connect up to 15s
         for attempt in range(15):
             if cdp_engine.start():
-                print(f'[CDP] connected on attempt {attempt+1}')
+                log.info(f'[CDP] connected on attempt {attempt+1}')
                 break
             time.sleep(1)
         else:
-            print('  ✗ Failed to connect to Chrome CDP after 15s.')
+            log.error('  ✗ Failed to connect to Chrome CDP after 15s.')
             return
         cdp_engine.add_page('cls_finance', 'https://www.cls.cn/finance')
         cdp_engine.add_page('cls_quotation', 'https://www.cls.cn/quotation')
         nav_names = stock_nav_page_names()
         for name in nav_names:
             cdp_engine.add_page(name, 'https://www.cls.cn/stock?code=sz300139', heartbeat=False)
-        print(f'  ✓ CDP engine ready — finance, quotation, {len(nav_names)} stock pages')
+        log.info(f'  ✓ CDP engine ready — finance, quotation, {len(nav_names)} stock pages')
         import config
         config.cdp_engine = cdp_engine
     except Exception as e:
         import traceback
-        print(f'  ✗ init_cdp error: {e}')
+        log.error(f'  ✗ init_cdp error: {e}')
         traceback.print_exc()
 
 
@@ -769,15 +772,18 @@ def _cdp_memory_watchdog():
         time.sleep(CDP_RESTART_INTERVAL)
         try:
             if env.cdp_engine and env.cdp_engine.ready:
-                print('  [CDP] watchdog: restarting Chrome to reclaim renderer memory')
+                log.info('  [CDP] watchdog: restarting Chrome to reclaim renderer memory')
                 full_chrome_restart()
         except Exception as e:
-            print(f'  [CDP] watchdog error: {e}')
+            log.error(f'  [CDP] watchdog error: {e}')
 
 
 def main():
+    from utils import setup_logging
+    setup_logging()
+
     def _signal_handler(signum, frame):
-        print(f'[exit] received signal {signum} ({signal.Signals(signum).name})')
+        log.info(f'[exit] received signal {signum} ({signal.Signals(signum).name})')
         sys.exit(0)
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
@@ -796,29 +802,29 @@ def main():
     threading.Thread(target=_f10_prefetch_loop, daemon=True).start()
     threading.Thread(target=_announcement_prefetch_loop, daemon=True).start()
 
-    print(f'China Finance RSS Bridge running on http://localhost:{PORT}')
-    print(f'Cache TTL: {CACHE_TTL}s | Timeout: {REQUEST_TIMEOUT}s')
-    print('Available feeds:')
+    log.info(f'China Finance RSS Bridge running on http://localhost:{PORT}')
+    log.info(f'Cache TTL: {CACHE_TTL}s | Timeout: {REQUEST_TIMEOUT}s')
+    log.info('Available feeds:')
     for path, info in ROUTES.items():
-        print(f'  http://localhost:{PORT}{path}  — {info["name"]}')
-    print(f'\nUtilities:')
-    print(f'  http://localhost:{PORT}/finance/market  — Finance Market Data (JSON, needs Chrome CDP)')
-    print(f'  http://localhost:{PORT}/finance/timeline  — Finance Timeline (JSON, needs Chrome CDP)')
-    print(f'  http://localhost:{PORT}/quotation/market  — Quotation Market Data (JSON, needs Chrome CDP)')
-    print(f'  http://localhost:{PORT}/market/timeline  — Market Index Timeline (JSON, needs Chrome CDP)')
-    print(f'  http://localhost:{PORT}/cls/hotplate  — Hotplate Data (JSON, no CDP needed)')
-    print(f'  http://localhost:{PORT}/stock/data  — Stock Detail Data (JSON, needs Chrome CDP)')
-    print(f'  http://localhost:{PORT}/stock/fundflow  — Stock Fund Flow (JSON, no CDP needed)')
-    print(f'  http://localhost:{PORT}/stock/timeline  — Stock Timeline (JSON, no CDP needed)')
-    print(f'  http://localhost:{PORT}/stock/f10  — Stock F10 Financial Summary (JSON, no CDP needed)')
-    print(f'  http://localhost:{PORT}/stock/basic_info  — Stock Basic Info (JSON, needs Chrome CDP)')
-    print(f'  http://localhost:{PORT}/stock/announcement  — Stock Announcement (JSON, no CDP needed)')
-    print(f'  http://localhost:{PORT}/market/margin  — Market Margin (融资融券, JSON, no CDP needed)')
-    print(f'  http://localhost:{PORT}/market/northbound  — Market Northbound (北向资金, JSON, no CDP needed)')
-    print(f'  http://localhost:{PORT}/market/northbound/history  — Market Northbound History (北向资金历史, JSON, no CDP needed)')
-    print(f'  http://localhost:{PORT}/opml.xml  — OPML subscription list')
-    print(f'  http://localhost:{PORT}/healthz?check=1  — Source health check')
-    print(f'Visit http://localhost:{PORT}/ for the web index.\n')
+        log.info(f'  http://localhost:{PORT}{path}  — {info["name"]}')
+    log.info(f'\nUtilities:')
+    log.info(f'  http://localhost:{PORT}/finance/market  — Finance Market Data (JSON, needs Chrome CDP)')
+    log.info(f'  http://localhost:{PORT}/finance/timeline  — Finance Timeline (JSON, needs Chrome CDP)')
+    log.info(f'  http://localhost:{PORT}/quotation/market  — Quotation Market Data (JSON, needs Chrome CDP)')
+    log.info(f'  http://localhost:{PORT}/market/timeline  — Market Index Timeline (JSON, needs Chrome CDP)')
+    log.info(f'  http://localhost:{PORT}/cls/hotplate  — Hotplate Data (JSON, no CDP needed)')
+    log.info(f'  http://localhost:{PORT}/stock/data  — Stock Detail Data (JSON, needs Chrome CDP)')
+    log.info(f'  http://localhost:{PORT}/stock/fundflow  — Stock Fund Flow (JSON, no CDP needed)')
+    log.info(f'  http://localhost:{PORT}/stock/timeline  — Stock Timeline (JSON, no CDP needed)')
+    log.info(f'  http://localhost:{PORT}/stock/f10  — Stock F10 Financial Summary (JSON, no CDP needed)')
+    log.info(f'  http://localhost:{PORT}/stock/basic_info  — Stock Basic Info (JSON, needs Chrome CDP)')
+    log.info(f'  http://localhost:{PORT}/stock/announcement  — Stock Announcement (JSON, no CDP needed)')
+    log.info(f'  http://localhost:{PORT}/market/margin  — Market Margin (融资融券, JSON, no CDP needed)')
+    log.info(f'  http://localhost:{PORT}/market/northbound  — Market Northbound (北向资金, JSON, no CDP needed)')
+    log.info(f'  http://localhost:{PORT}/market/northbound/history  — Market Northbound History (北向资金历史, JSON, no CDP needed)')
+    log.info(f'  http://localhost:{PORT}/opml.xml  — OPML subscription list')
+    log.info(f'  http://localhost:{PORT}/healthz?check=1  — Source health check')
+    log.info(f'Visit http://localhost:{PORT}/ for the web index.\n')
 
     server = BoundedThreadPoolServer(('0.0.0.0', PORT), RSSHandler)
     server.serve_forever()

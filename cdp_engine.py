@@ -15,6 +15,7 @@ this reduces API latency from 3-8s to <1ms and captures WebSocket frames.
 import atexit
 import gc
 import json
+import logging
 import os
 import signal
 import subprocess
@@ -23,6 +24,8 @@ import time
 import urllib.request
 from datetime import datetime, timezone, timedelta
 from urllib.parse import urlparse
+
+log = logging.getLogger('cdp')
 
 
 CDP_URL = os.getenv('CDP_URL', 'http://localhost:9222')
@@ -191,7 +194,7 @@ def ensure_chrome(cdp_url=CDP_URL):
     now = time.time()
     with _chrome_restart_lock:
         if now - _last_chrome_restart < _CHROME_RESTART_THROTTLE:
-            print(f'[CDP] Chrome restart throttled (last restart: {_last_chrome_restart:.0f}, now: {now:.0f})')
+            log.warning(f'[CDP] Chrome restart throttled (last restart: {_last_chrome_restart:.0f}, now: {now:.0f})')
             return False
         # Double-check after lock
         try:
@@ -212,7 +215,7 @@ def ensure_chrome(cdp_url=CDP_URL):
         if not chrome:
             return False
 
-        print(f'[CDP] starting {chrome} --headless --remote-debugging-port={port}')
+        log.info(f'[CDP] starting {chrome} --headless --remote-debugging-port={port}')
         subprocess.Popen([
             chrome, '--headless', f'--remote-debugging-port={port}',
             '--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage',
@@ -244,7 +247,7 @@ def full_chrome_restart(cdp_url=CDP_URL):
     global _last_chrome_restart
     port = urlparse(cdp_url).port or 9222
     host = urlparse(cdp_url).hostname or 'localhost'
-    print(f'[CDP] full_chrome_restart: killing Chrome on port {port}, starting fresh...')
+    log.warning(f'[CDP] full_chrome_restart: killing Chrome on port {port}, starting fresh...')
     with _chrome_restart_lock:
         _kill_chrome_on_port(port)
         _last_chrome_restart = 0  # allow ensure_chrome to proceed
@@ -252,7 +255,7 @@ def full_chrome_restart(cdp_url=CDP_URL):
         ok = ensure_chrome(cdp_url)
         if ok:
             _last_chrome_restart = time.time()
-        print(f'[CDP] full_chrome_restart: {"OK" if ok else "FAILED"}')
+        log.info(f'[CDP] full_chrome_restart: {"OK" if ok else "FAILED"}')
         return ok
 
 
@@ -415,7 +418,7 @@ class CDPPage:
 
         self._target_id = target_id
         self._ws = ws
-        print(f"  \u2713 CDP page '{self.name}' \u2192 {self.target_url}")
+        log.info(f"  \u2713 CDP page '{self.name}' \u2192 {self.target_url}")
 
     def _send_on(self, ws, msg):
         ws.send(json.dumps(msg))
@@ -476,7 +479,7 @@ class CDPPage:
                                    'awaitPromise': False, 'returnByValue': False}})
             return True
         except Exception as e:
-            print(f'[CDP:{self.name}] re_fetch_api failed for {url}: {e}')
+            log.warning(f'[CDP:{self.name}] re_fetch_api failed for {url}: {e}')
             return False
 
     # Backward compat alias
@@ -507,7 +510,7 @@ class CDPPage:
         try:
             return self._evaluate(js, timeout=timeout)
         except Exception as e:
-            print(f'[CDP:{self.name}] evaluate_fetch failed for {url}: {e}')
+            log.warning(f'[CDP:{self.name}] evaluate_fetch failed for {url}: {e}')
             return None
 
     def _heartbeat_interval(self):
@@ -532,7 +535,7 @@ class CDPPage:
             try:
                 alive = self._evaluate('typeof window.__cdp_api !== "undefined"', timeout=5)
                 if not alive:
-                    print(f"[CDP:{self.name}] interceptor lost, reconnecting...")
+                    log.warning(f"[CDP:{self.name}] interceptor lost, reconnecting...")
                     self._reconnect()
                     empty_count = 0
                     continue
@@ -545,7 +548,7 @@ class CDPPage:
                 if not raw:
                     empty_count += 1
                     if empty_count >= 4:
-                        print(f"[CDP:{self.name}] {empty_count}x empty polls, forcing reconnect...")
+                        log.warning(f"[CDP:{self.name}] {empty_count}x empty polls, forcing reconnect...")
                         self._reconnect()
                         empty_count = 0
                     continue
@@ -559,7 +562,7 @@ class CDPPage:
                 if not all_api and not ws_data:
                     empty_count += 1
                     if empty_count >= 6:
-                        print(f"[CDP:{self.name}] {empty_count}x empty polls, forcing reconnect...")
+                        log.warning(f"[CDP:{self.name}] {empty_count}x empty polls, forcing reconnect...")
                         self._reconnect()
                         empty_count = 0
                     continue
@@ -616,7 +619,7 @@ class CDPPage:
                 empty_count = 0
 
             except Exception as e:
-                print(f"[CDP:{self.name}] heartbeat: {e}, reconnecting...")
+                log.error(f"[CDP:{self.name}] heartbeat: {e}, reconnecting...")
                 self._reconnect()
                 empty_count = 0
 
@@ -668,7 +671,7 @@ class CDPPage:
         # All 3 attempts failed — Chrome might have crashed. ensure_chrome()
         # enforces a throttle window; retry until it passes instead of
         # giving up (avoids permanent CDP outage on 2c2g OOM crash loops).
-        print(f"[CDP:{self.name}] 3 reconnect attempts failed, trying to restart Chrome...")
+        log.error(f"[CDP:{self.name}] 3 reconnect attempts failed, trying to restart Chrome...")
         deadline = time.time() + _RECONNECT_RETRY_WINDOW
         while time.time() < deadline:
             if ensure_chrome():
@@ -681,7 +684,7 @@ class CDPPage:
                             time.sleep(2)
             # ensure_chrome() was throttled or Chrome still starting — wait
             time.sleep(2)
-        print(f"[CDP:{self.name}] reconnect failed after Chrome restart")
+        log.error(f"[CDP:{self.name}] reconnect failed after Chrome restart")
 
     def get_data(self):
         """Return merged data — latest from live cache, gaps filled by _last_data.
@@ -797,7 +800,7 @@ class CDPPage:
         CDPPage._nav_restart_counter += 1
         if CDPPage._nav_restart_counter >= self._MAX_PAGE_NAV_BEFORE_RECONNECT:
             CDPPage._nav_restart_counter = 0
-            print(f"[CDP:{self.name}] nav threshold ({self._MAX_PAGE_NAV_BEFORE_RECONNECT}) reached, "
+            log.info(f"[CDP:{self.name}] nav threshold ({self._MAX_PAGE_NAV_BEFORE_RECONNECT}) reached, "
                   f"full Chrome restart...")
             full_chrome_restart(f"http://{self.cdp_host}:{self.cdp_port}")
             # Reconnect this page to the fresh Chrome (clears cache, creates new tab)
@@ -1002,7 +1005,7 @@ class CDPEngine:
             self.pages[name] = page
             return page
         except Exception as e:
-            print(f"  \u2717 Failed to create page '{name}': {e}")
+            log.error(f"  \u2717 Failed to create page '{name}': {e}")
             return None
 
     def get_page(self, name):
