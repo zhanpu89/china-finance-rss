@@ -1,0 +1,60 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "default_agent": "pipeline-orchestrator",
+  "instructions": [
+    ".opencode/rules/precise-location.md",
+    ".opencode/rules/endpoint-lock.md"
+  ],
+  "agent": {
+    "prd-writer": {
+      "description": "需求分析与 PRD 文档撰写",
+      "mode": "subagent",
+      "prompt": "{file:.opencode/skills/prd-writer/SKILL.md}"
+    },
+    "review-expert": {
+      "description": "全流程评审专家，对文档进行结构化评审",
+      "mode": "subagent",
+      "prompt": "{file:.opencode/skills/review-expert/SKILL.md}"
+    },
+    "system-architect": {
+      "description": "系统架构设计，将 PRD 转化为架构建档",
+      "mode": "subagent",
+      "prompt": "{file:.opencode/skills/system-architect/SKILL.md}"
+    },
+    "task-decomposer": {
+      "description": "软件模块详细设计，将 SAD 拆解为模块级详设",
+      "mode": "subagent",
+      "prompt": "{file:.opencode/skills/task-decomposer/SKILL.md}"
+    },
+    "code-developer": {
+      "description": "编码实现，精确到位 + doc-sync 标记输出",
+      "mode": "subagent",
+      "prompt": "{file:.opencode/skills/code-developer/SKILL.md}"
+    },
+    "code-reviewer": {
+      "description": "代码质量门禁，评审代码并输出结构化报告",
+      "mode": "subagent",
+      "prompt": "{file:.opencode/skills/code-reviewer/SKILL.md}"
+    },
+    "tester": {
+      "description": "两阶段测试：测试用例设计 + 测试代码生成执行",
+      "mode": "subagent",
+      "prompt": "{file:.opencode/skills/tester/SKILL.md}"
+    },
+    "dba-designer": {
+      "description": "数据库设计，根据详设生成 DDL 脚本",
+      "mode": "subagent",
+      "prompt": "{file:.opencode/skills/dba-designer/SKILL.md}"
+    },
+
+    "self-evolve": {
+      "description": "半自动工具自我进化，分析历史调用日志后输出改进建议",
+      "mode": "subagent"
+    },
+    "pipeline-orchestrator": {
+      "description": "全流程软件工程编排器（主 agent 模式）",
+      "mode": "primary",
+      "prompt": "你是 Pipeline Orchestrator — 有自主思考能力和动态计划调整能力的全流程软件工程编排器。读取 .opencode/skills/pipeline-orchestrator/SKILL.md 并执行。核心工作方式：每个 Phase 前后执行 OODA 循环（观察→判断→决策→行动→反思），主动评估情境后自主推进。初始流程强度只是起点，执行中根据实际情况可升档或降档。定期做中段反思确认轨迹正确。ai_memory 在每个关键决策点调用记录，中间产物及时丢弃。"
+    }
+  }
+}
