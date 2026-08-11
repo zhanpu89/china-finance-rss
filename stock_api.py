@@ -453,6 +453,10 @@ _basic_info_cache_lock = threading.Lock()
 _SECTOR_CACHE_FILE = 'data/sector_cache.json'
 _sector_cache = {}
 _sector_cache_lock = threading.Lock()
+# Bounded: sector changes are rare but an unbounded dict + disk file grows
+# forever on a long-running 2c2g box. Cap size and expire old entries.
+_SECTOR_CACHE_MAX = 2000
+_SECTOR_CACHE_TTL = 7 * 24 * 3600  # 7 days
 
 
 def _load_sector_cache():
@@ -489,6 +493,30 @@ def _save_sector_cache():
 _load_sector_cache()
 
 
+def _sweep_sector_cache(now=None):
+    """Drop expired entries from _sector_cache. Caller must hold the lock."""
+    if now is None:
+        now = time()
+    expired = [k for k, v in _sector_cache.items()
+               if isinstance(v, dict) and now - v.get('ts', 0) > _SECTOR_CACHE_TTL]
+    for k in expired:
+        del _sector_cache[k]
+    if expired:
+        print(f'[sector] expired {len(expired)} entries from sector cache')
+
+
+def _sector_cache_put(code, sector, now=None):
+    """Insert into the bounded sector cache (sweep + cap eviction)."""
+    if now is None:
+        now = time()
+    with _sector_cache_lock:
+        _sweep_sector_cache(now)
+        if len(_sector_cache) >= _SECTOR_CACHE_MAX:
+            oldest = min(_sector_cache, key=lambda k: _sector_cache[k].get('ts', 0))
+            del _sector_cache[oldest]
+        _sector_cache[code] = {'sector': sector, 'ts': now}
+
+
 def _populate_sector_from_f10(data, code):
     """Extract sector from F10 company_info data and populate shared cache."""
     if isinstance(data, dict):
@@ -501,8 +529,7 @@ def _populate_sector_from_f10(data, code):
                 industry = bi.get('IndustryName') or ''
                 if industry:
                     sector = industry.split('-')[0]
-                    with _sector_cache_lock:
-                        _sector_cache[code] = {'sector': sector, 'ts': time()}
+                    _sector_cache_put(code, sector)
                     threading.Thread(target=_save_sector_cache, daemon=True).start()
 
 

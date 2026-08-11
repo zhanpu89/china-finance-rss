@@ -26,8 +26,11 @@ from urllib.parse import urlparse
 
 
 CDP_URL = os.getenv('CDP_URL', 'http://localhost:9222')
+# Short throttle so a crashed Chrome is restarted quickly (2c2g OOM recovery).
 _chrome_restart_lock = threading.RLock()  # RLock so full_chrome_restart→ensure_chrome doesn't deadlock
 _last_chrome_restart = 0
+_CHROME_RESTART_THROTTLE = int(os.getenv('CDP_RESTART_THROTTLE', '15'))
+_RECONNECT_RETRY_WINDOW = 45  # seconds to wait out throttle + startup before giving up
 
 API_KEY_MAP = {
     'emotion': 'market_sentiment',
@@ -187,7 +190,7 @@ def ensure_chrome(cdp_url=CDP_URL):
     global _last_chrome_restart
     now = time.time()
     with _chrome_restart_lock:
-        if now - _last_chrome_restart < 60:
+        if now - _last_chrome_restart < _CHROME_RESTART_THROTTLE:
             print(f'[CDP] Chrome restart throttled (last restart: {_last_chrome_restart:.0f}, now: {now:.0f})')
             return False
         # Double-check after lock
@@ -662,16 +665,22 @@ class CDPPage:
             except Exception as e:
                 if attempt < 2:
                     time.sleep(2)
-        # All 3 attempts failed — Chrome might have crashed
+        # All 3 attempts failed — Chrome might have crashed. ensure_chrome()
+        # enforces a throttle window; retry until it passes instead of
+        # giving up (avoids permanent CDP outage on 2c2g OOM crash loops).
         print(f"[CDP:{self.name}] 3 reconnect attempts failed, trying to restart Chrome...")
-        if ensure_chrome():
-            for attempt in range(3):
-                try:
-                    self._connect()
-                    return
-                except Exception as e:
-                    if attempt < 2:
-                        time.sleep(2)
+        deadline = time.time() + _RECONNECT_RETRY_WINDOW
+        while time.time() < deadline:
+            if ensure_chrome():
+                for attempt in range(3):
+                    try:
+                        self._connect()
+                        return
+                    except Exception as e:
+                        if attempt < 2:
+                            time.sleep(2)
+            # ensure_chrome() was throttled or Chrome still starting — wait
+            time.sleep(2)
         print(f"[CDP:{self.name}] reconnect failed after Chrome restart")
 
     def get_data(self):
@@ -752,6 +761,8 @@ class CDPPage:
         except Exception:
             pass
         self._ws = None
+        # Try immediate reconnects; if they fail, ensure Chrome is up
+        # (waiting out the restart throttle) before retrying.
         for attempt in range(3):
             try:
                 self._connect()
@@ -760,6 +771,17 @@ class CDPPage:
                 if attempt == 0:
                     ensure_chrome()  # restart Chrome if down
                 time.sleep(2)
+        deadline = time.time() + _RECONNECT_RETRY_WINDOW
+        while time.time() < deadline:
+            if ensure_chrome():
+                for attempt in range(3):
+                    try:
+                        self._connect()
+                        return True
+                    except Exception:
+                        if attempt < 2:
+                            time.sleep(2)
+            time.sleep(2)
         return False
 
     _nav_restart_counter = 0

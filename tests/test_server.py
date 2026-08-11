@@ -275,5 +275,56 @@ class MarketApiTests(unittest.TestCase):
         self.assertIn('/market/northbound/history', paths)
 
 
+class CacheMaintenanceTests(unittest.TestCase):
+    """Tests for expired-cache reclamation fixes (2c2g memory issue)."""
+
+    def test_sweep_expired_removes_stale_entries(self):
+        from cache import _sweep_expired
+        import time
+        cache_dict = {
+            'fresh': {'data': 'x', 'time': time.time(),
+                      'expires_at': time.time() + 100},
+            'stale': {'data': 'y', 'time': time.time() - 1000,
+                      'expires_at': time.time() - 500},
+            'none': None,
+        }
+        removed = _sweep_expired(cache_dict)
+        self.assertEqual(removed, 1)
+        self.assertIn('fresh', cache_dict)
+        self.assertNotIn('stale', cache_dict)
+        self.assertIn('none', cache_dict)  # None entries are kept (handled on read)
+
+    def test_sector_cache_bounded(self):
+        from stock_api import _sector_cache, _sector_cache_lock, \
+            _SECTOR_CACHE_MAX, _sector_cache_put
+        import time
+        with _sector_cache_lock:
+            saved = dict(_sector_cache)
+        try:
+            now = time.time()
+            for i in range(_SECTOR_CACHE_MAX + 50):
+                _sector_cache_put(f'test{i:05d}', '测试', now=now - i)
+            with _sector_cache_lock:
+                self.assertLessEqual(len(_sector_cache), _SECTOR_CACHE_MAX)
+        finally:
+            with _sector_cache_lock:
+                _sector_cache.clear()
+                _sector_cache.update(saved)
+
+    def test_sector_cache_ttl_eviction(self):
+        from stock_api import _sector_cache, _sector_cache_lock, _sweep_sector_cache
+        import time
+        with _sector_cache_lock:
+            saved = dict(_sector_cache)
+            try:
+                old_ts = time.time() - 8 * 24 * 3600  # older than 7-day TTL
+                _sector_cache['ttl_old'] = {'sector': '旧', 'ts': old_ts}
+                _sweep_sector_cache()
+                self.assertNotIn('ttl_old', _sector_cache)
+            finally:
+                _sector_cache.clear()
+                _sector_cache.update(saved)
+
+
 if __name__ == "__main__":
     unittest.main()

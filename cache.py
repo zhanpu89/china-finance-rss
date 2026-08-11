@@ -14,6 +14,9 @@ _cache_lock = threading.Lock()
 _fetch_inflight = {}
 MAX_CACHE_SIZE = 200
 CACHE_JITTER = 0.2
+# Sweep expired entries at most once per interval (avoid O(n) per request).
+_last_cache_sweep = 0.0
+_CACHE_SWEEP_INTERVAL = 60.0
 
 
 def _expires_at(ttl=None):
@@ -21,12 +24,29 @@ def _expires_at(ttl=None):
     return time.time() + base * (1 + random.uniform(-CACHE_JITTER, CACHE_JITTER))
 
 
+def _sweep_expired(d):
+    """Remove expired entries from a cache dict. Caller must hold its lock."""
+    now = time.time()
+    expired = [k for k, entry in d.items()
+               if entry and now >= entry.get('expires_at', 0)]
+    for k in expired:
+        del d[k]
+    return len(expired)
+
+
 def _cache_put(d, key, value, ttl=None):
     with _cache_lock:
+        # Proactively drop expired entries so stale data doesn't pile up
+        # while the dict stays below MAX_CACHE_SIZE.
+        global _last_cache_sweep
+        now = time.time()
+        if now - _last_cache_sweep >= _CACHE_SWEEP_INTERVAL:
+            _sweep_expired(d)
+            _last_cache_sweep = now
         if len(d) >= MAX_CACHE_SIZE:
             oldest = min(d, key=lambda k: d[k]['time'])
             del d[oldest]
-        d[key] = {'data': value, 'time': time.time(), 'expires_at': _expires_at(ttl)}
+        d[key] = {'data': value, 'time': now, 'expires_at': _expires_at(ttl)}
 
 
 def _cache_fresh(entry):
