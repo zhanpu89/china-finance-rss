@@ -364,8 +364,9 @@ class CDPPage:
         return f"http://{self.cdp_host}:{self.cdp_port}"
 
     def _next_id(self):
-        self._msg_id += 1
-        return self._msg_id
+        with self._ws_lock:
+            self._msg_id += 1
+            return self._msg_id
 
     def _create_target(self):
         """Create a new browser tab via CDP Target.createTarget."""
@@ -474,9 +475,10 @@ class CDPPage:
         """
         try:
             escaped = url.replace('\\', '\\\\').replace('"', '\\"')
-            self._send({'id': self._next_id(), 'method': 'Runtime.evaluate',
-                        'params': {'expression': f'fetch("{escaped}",{{cache:"no-store"}}).then(function(r){{return r.json()}}).then(function(d){{window.__cdp_refetch["{escaped}"]=d}}).catch(function(){{}})',
-                                   'awaitPromise': False, 'returnByValue': False}})
+            with self._ws_lock:
+                self._send({'id': self._next_id(), 'method': 'Runtime.evaluate',
+                            'params': {'expression': f'fetch("{escaped}",{{cache:"no-store"}}).then(function(r){{return r.json()}}).then(function(d){{window.__cdp_refetch["{escaped}"]=d}}).catch(function(){{}})',
+                                       'awaitPromise': False, 'returnByValue': False}})
             return True
         except Exception as e:
             log.warning(f'[CDP:{self.name}] re_fetch_api failed for {url}: {e}')
@@ -527,6 +529,61 @@ class CDPPage:
         in_afternoon = (13 <= h <= 14)
         return 10 if (in_morning or in_afternoon) else 60
 
+    def _ingest_payload(self, api_map, ws_data, now, run_refetch=True):
+        """Merge collected API/WS payload into caches with freshness maintenance.
+
+        Caller must hold `self._lock`. Shared by the heartbeat loop and the
+        synchronous refresh() so both stay behaviorally identical.
+        """
+        if api_map:
+            remapped = remap_keys(api_map)
+            self.cache.update(remapped)
+            self._last_data.update(remapped)
+            for k in remapped:
+                self._last_data_ts[k] = now
+            if len(self._last_data) > self._LAST_DATA_MAX_KEYS:
+                # Evict oldest key if too many unrecognized URLs accumulated
+                oldest = min(self._last_data, key=lambda k: self._key_last_seen.get(k, 0))
+                del self._last_data[oldest]
+            for url_key, raw_val in api_map.items():
+                mapped = next((name for p, name in API_KEY_MAP.items()
+                               if p in str(url_key)), None)
+                if mapped:
+                    self._key_last_seen[mapped] = now
+                    self._api_urls[mapped] = url_key
+        if ws_data:
+            self.cache['__ws__'] = ws_data
+            self._last_data['__ws__'] = ws_data
+            self._last_data_ts['__ws__'] = now
+            self._key_last_seen['__ws__'] = now
+        # Expire stale keys from freshness cache
+        for key in list(self.cache.keys()):
+            last_seen = self._key_last_seen.get(key)
+            if last_seen is None:
+                continue
+            ttl = self.KEY_TTL_OVERRIDES.get(key, self.KEY_TTL)
+            if now - last_seen > ttl:
+                del self.cache[key]
+                del self._key_last_seen[key]
+        # Expire _last_data entries that haven't been seen in max_age
+        for key in list(self._last_data.keys()):
+            age = now - self._last_data_ts.get(key, 0)
+            if age > self._last_data_max_age:
+                del self._last_data[key]
+                self._last_data_ts.pop(key, None)
+                self._key_last_seen.pop(key, None)
+                self._api_urls.pop(key, None)
+        if run_refetch:
+            # Proactively re-fetch low-frequency APIs — page handles high-frequency
+            RE_FETCH_AFTER = 25
+            for key in list(self._api_urls.keys()):
+                if key in self._PAGE_REFRESHED_KEYS:
+                    continue
+                last_seen = self._key_last_seen.get(key, 0)
+                if last_seen and now - last_seen > RE_FETCH_AFTER:
+                    self._re_fetch_api(self._api_urls[key])
+        self.last_updated = now
+
     def _heartbeat(self):
         """Background loop: poll collected data, reconnect on failure."""
         empty_count = 0
@@ -568,54 +625,7 @@ class CDPPage:
                     continue
 
                 with self._lock:
-                    now = time.time()
-                    if all_api:
-                        remapped = remap_keys(all_api)
-                        self.cache.update(remapped)
-                        self._last_data.update(remapped)
-                        for k in remapped:
-                            self._last_data_ts[k] = now
-                        if len(self._last_data) > self._LAST_DATA_MAX_KEYS:
-                            # Evict oldest key if too many unrecognized URLs accumulated
-                            oldest = min(self._last_data, key=lambda k: self._key_last_seen.get(k, 0))
-                            del self._last_data[oldest]
-                        for url_key, raw_val in all_api.items():
-                            mapped = next((name for p, name in API_KEY_MAP.items()
-                                           if p in str(url_key)), None)
-                            if mapped:
-                                self._key_last_seen[mapped] = now
-                                self._api_urls[mapped] = url_key
-                    if ws_data:
-                        self.cache['__ws__'] = ws_data
-                        self._last_data['__ws__'] = ws_data
-                        self._last_data_ts['__ws__'] = now
-                        self._key_last_seen['__ws__'] = now
-                    # Expire stale keys from freshness cache
-                    for key in list(self.cache.keys()):
-                        last_seen = self._key_last_seen.get(key)
-                        if last_seen is None:
-                            continue
-                        ttl = self.KEY_TTL_OVERRIDES.get(key, self.KEY_TTL)
-                        if now - last_seen > ttl:
-                            del self.cache[key]
-                            del self._key_last_seen[key]
-                    # Expire _last_data entries that haven't been seen in max_age
-                    for key in list(self._last_data.keys()):
-                        age = now - self._last_data_ts.get(key, 0)
-                        if age > self._last_data_max_age:
-                            del self._last_data[key]
-                            self._last_data_ts.pop(key, None)
-                            self._key_last_seen.pop(key, None)
-                            self._api_urls.pop(key, None)
-                    # Proactively re-fetch low-frequency APIs — page handles the high-frequency ones
-                    RE_FETCH_AFTER = 25
-                    for key in list(self._api_urls.keys()):
-                        if key in self._PAGE_REFRESHED_KEYS:
-                            continue
-                        last_seen = self._key_last_seen.get(key, 0)
-                        if last_seen and now - last_seen > RE_FETCH_AFTER:
-                            self._re_fetch_api(self._api_urls[key])
-                    self.last_updated = now
+                    self._ingest_payload(all_api, ws_data, time.time())
                 empty_count = 0
 
             except Exception as e:
@@ -713,37 +723,7 @@ class CDPPage:
                 ws_data = data.get('ws', []) or {}
                 all_api = {**api_data, **refetch_data}
                 with self._lock:
-                    now = time.time()
-                    if all_api:
-                        remapped = remap_keys(all_api)
-                        self.cache.update(remapped)
-                        self._last_data.update(remapped)
-                        for k in remapped:
-                            self._last_data_ts[k] = now
-                        if len(self._last_data) > self._LAST_DATA_MAX_KEYS:
-                            oldest = min(self._last_data, key=lambda k: self._key_last_seen.get(k, 0))
-                            del self._last_data[oldest]
-                        for url_key, raw_val in all_api.items():
-                            mapped = next((name for p, name in API_KEY_MAP.items()
-                                           if p in str(url_key)), None)
-                            if mapped:
-                                self._key_last_seen[mapped] = now
-                                self._api_urls[mapped] = url_key
-                    if ws_data:
-                        self.cache['__ws__'] = ws_data
-                        self._last_data['__ws__'] = ws_data
-                        self._last_data_ts['__ws__'] = now
-                        self._key_last_seen['__ws__'] = now
-                    # Expire stale keys from freshness cache only
-                    for key in list(self.cache.keys()):
-                        last_seen = self._key_last_seen.get(key)
-                        if last_seen is None:
-                            continue
-                        ttl = self.KEY_TTL_OVERRIDES.get(key, self.KEY_TTL)
-                        if now - last_seen > ttl:
-                            del self.cache[key]
-                            del self._key_last_seen[key]
-                    self.last_updated = now
+                    self._ingest_payload(all_api, ws_data, time.time())
                 return True
         except:
             pass
@@ -797,15 +777,16 @@ class CDPPage:
         Chrome. Other pages' ensure_chrome() calls block on _chrome_restart_lock
         and find the fresh Chrome already running — no duplicate instances.
         """
-        CDPPage._nav_restart_counter += 1
-        if CDPPage._nav_restart_counter >= self._MAX_PAGE_NAV_BEFORE_RECONNECT:
-            CDPPage._nav_restart_counter = 0
-            log.info(f"[CDP:{self.name}] nav threshold ({self._MAX_PAGE_NAV_BEFORE_RECONNECT}) reached, "
-                  f"full Chrome restart...")
-            full_chrome_restart(f"http://{self.cdp_host}:{self.cdp_port}")
-            # Reconnect this page to the fresh Chrome (clears cache, creates new tab)
-            self._reconnect()
-            return True
+        with self._ws_lock:  # serialize counter increments across threads
+            CDPPage._nav_restart_counter += 1
+            if CDPPage._nav_restart_counter >= self._MAX_PAGE_NAV_BEFORE_RECONNECT:
+                CDPPage._nav_restart_counter = 0
+                log.info(f"[CDP:{self.name}] nav threshold ({self._MAX_PAGE_NAV_BEFORE_RECONNECT}) reached, "
+                      f"full Chrome restart...")
+                full_chrome_restart(f"http://{self.cdp_host}:{self.cdp_port}")
+                # Reconnect this page to the fresh Chrome (clears cache, creates new tab)
+                self._reconnect()
+                return True
         return False
 
     def navigate_stock(self, stock_code, timeout=15, tabs=('fund_flow', 'f10')):
@@ -850,13 +831,14 @@ class CDPPage:
                     return False
                 _send_navigate()
             load_deadline = time.time() + min(15, remaining)
-            while time.time() < load_deadline:
-                try:
-                    msg = self._recv(timeout=2)
-                    if msg.get('method') == 'Page.loadEventFired':
+            with self._ws_lock:
+                while time.time() < load_deadline:
+                    try:
+                        msg = self._recv(timeout=2)
+                        if msg.get('method') == 'Page.loadEventFired':
+                            break
+                    except:
                         break
-                except:
-                    break
             deadline = time.time() + max(2, remaining)
             last_seen_code = None
             stable_count = 0

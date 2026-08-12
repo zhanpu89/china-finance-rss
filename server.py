@@ -554,11 +554,7 @@ class RSSHandler(BaseHTTPRequestHandler):
         if len(stock_codes) > _MAX_BATCH_SIZE:
             stock_codes = stock_codes[:_MAX_BATCH_SIZE]
         data = handler(stock_codes)
-        if len(stock_codes) == 1:
-            body = json.dumps({stock_codes[0]: data.get(stock_codes[0])},
-                              ensure_ascii=False, indent=2)
-        else:
-            body = json.dumps(data, ensure_ascii=False, indent=2)
+        body = json.dumps(data, ensure_ascii=False, indent=2)
         self._send_text(200, 'application/json; charset=utf-8',
                         body, cache=True, write_body=write_body)
 
@@ -593,13 +589,11 @@ class RSSHandler(BaseHTTPRequestHandler):
             try:
                 xml = fetch_func()
             except Exception:
-                _feed_fetch_locks.pop(path, None)
                 raise
             with _feed_cache_lock:
                 if len(feed_cache) >= MAX_FEED_CACHE_SIZE:
                     oldest = min(feed_cache, key=lambda k: feed_cache[k]['time'])
                     del feed_cache[oldest]
-                    _feed_fetch_locks.pop(oldest, None)
                 feed_cache[path] = {
                     'xml': xml, 'time': time.time(),
                     'expires_at': time.time() + CACHE_TTL * (1 + random.uniform(-CACHE_JITTER, CACHE_JITTER))

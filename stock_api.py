@@ -5,8 +5,10 @@ CDP-based endpoints (fundflow, timeline, F10) use `config.cdp_engine`
 """
 
 import json
+import logging
 import os
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from time import sleep, time
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -32,12 +34,109 @@ from config import (
 from cache import fetch_json, _fill_missing
 from utils import cls_sign_params
 
-import logging
-
 log = logging.getLogger('stock')
 
-# CDP stock navigation pages (created by init_cdp in server.py)
-_STOCK_NAV_PAGES = list(stock_nav_page_names())
+# CDP stock navigation pages (created by init_cdp in server.py). Snapshot at
+# import would freeze env-tuned sizing; resolve lazily so a fresh env value is
+# picked up without code changes.
+def _stock_nav_pages():
+    return list(stock_nav_page_names())
+
+# Bounded parallelism for batch fetches (per-request fan-out is capped).
+_BATCH_MAX_WORKERS = 8
+
+
+def _run_batch(fetcher, codes, deadline=None, concurrent=True):
+    """Fetch codes either concurrently or serially.
+
+    concurrent=True: parallel (safe for REST / non-mutating CDP evaluate_fetch).
+    concurrent=False: serial (required for CDP `navigate_stock` callers such as
+    F10 which mutate the shared nav page pool — parallelizing makes
+    `_navigate_f10` skip all busy pages -> null results).
+    `fetcher` is a single-arg callable: fetcher(code) -> data | None.
+    Returns {code: data_or_None}.
+    """
+    if not codes:
+        return {}
+    if not concurrent:
+        return {code: _fetch_one(fetcher, code, deadline) for code in codes}
+    results = {}
+    with ThreadPoolExecutor(max_workers=min(_BATCH_MAX_WORKERS, len(codes))) as ex:
+        futures = {ex.submit(_fetch_one, fetcher, code, deadline): code for code in codes}
+        for fut in as_completed(futures):
+            code = futures[fut]
+            try:
+                results[code] = fut.result()
+            except Exception:
+                results[code] = None
+    return {code: results.get(code) for code in codes}
+
+
+def _fetch_one(fetcher, code, deadline):
+    """Run fetch for a single code, honoring the batch deadline."""
+    if deadline is not None and time() > deadline:
+        return None
+    return fetcher(code)
+
+
+def _handle_cached_batch(codes, pool, pool_max, cache, cache_ts, lock,
+                         fetcher, deadline=None, after=None, concurrent=True):
+    """Shared batch handler for code-keyed REST/CDP endpoints.
+
+    Steps: dedupe -> validate -> LRU pool touch -> freshness cache lookup ->
+    fetch of misses (parallel for REST/CDP-evaluate, serial for CDP-navigate) ->
+    cache/result merge. `after(data, code)` runs post-cache (e.g. sector).
+    """
+    seen = set()
+    codes = [c for c in codes if not (c in seen or seen.add(c))]
+    result = {}
+    valid = []
+    for code in codes:
+        if VALID_STOCK_CODE.match(code):
+            valid.append(code)
+        else:
+            result[code] = None
+    if not valid:
+        return result
+
+    now = time()
+    with lock:
+        for code in valid:
+            pool[code] = now
+        if len(pool) > pool_max:
+            excess = sorted(pool, key=pool.get)[:len(pool) - pool_max]
+            for code in excess:
+                del pool[code]
+                cache.pop(code, None)
+                cache_ts.pop(code, None)
+
+    missing = []
+    with lock:
+        for code in valid:
+            cached = cache.get(code)
+            if cached is not None:
+                ts = cache_ts.get(code, 0)
+                if now - ts < _MAX_CACHE_AGE:
+                    result[code] = cached
+                else:
+                    missing.append(code)
+            else:
+                missing.append(code)
+
+    if missing:
+        fetched = _run_batch(fetcher, missing, deadline, concurrent=concurrent)
+        for code, data in fetched.items():
+            if data is not None:
+                with lock:
+                    cache[code] = data
+                    cache_ts[code] = time()
+                if after is not None:
+                    try:
+                        after(data, code)
+                    except Exception:
+                        pass
+            result[code] = data
+    return result
 
 
 def _announcement_url(stock_code):
@@ -59,18 +158,27 @@ _fundflow_cache_lock = threading.Lock()
 
 
 def _evaluate_fetch_any(url, timeout=8):
-    """Try evaluate_fetch on any available page. Returns parsed dict or None."""
+    """Try evaluate_fetch on any available page. Returns parsed dict or None.
+
+    Tries pages in order but stops at the first page that returns a usable
+    dict; per-page budget is capped so a slow/busy page doesn't exhaust the
+    whole window. Returns the hit from the first available page, never blocks
+    across every page.
+    """
     if not config.cdp_engine or not config.cdp_engine.ready:
         return None
     deadline = time() + timeout
-    for name in _STOCK_NAV_PAGES[:3] + ['cls_finance', 'cls_quotation']:
+    for name in _stock_nav_pages()[:3] + ['cls_finance', 'cls_quotation']:
         if time() >= deadline:
             break
         page = config.cdp_engine.get_page(name)
         if not page:
             continue
+        budget = min(deadline - time(), 2)
+        if budget < 0.5:
+            break
         try:
-            result = page.evaluate_fetch(url, timeout=min(deadline - time(), 2))
+            result = page.evaluate_fetch(url, timeout=budget)
             if result and isinstance(result, dict):
                 return result
         except Exception:
@@ -112,47 +220,10 @@ def _fundflow_direct_fetch(stock_code):
 
 def handle_cls_fundflow(codes):
     """Fund Flow Data (资金流向) — REST-based, batch supported."""
-    seen = set()
-    codes = [c for c in codes if not (c in seen or seen.add(c))]
-    if not codes:
-        return {}
-
-    now = time()
-    with _fundflow_cache_lock:
-        for code in codes:
-            _fundflow_pool[code] = now
-        if len(_fundflow_pool) > _FUNDFLOW_MAX_POOL:
-            excess = sorted(_fundflow_pool, key=_fundflow_pool.get)[:len(_fundflow_pool) - _FUNDFLOW_MAX_POOL]
-            for code in excess:
-                del _fundflow_pool[code]
-                _fundflow_cache.pop(code, None)
-                _fundflow_cache_ts.pop(code, None)
-
-    result = {}
-    missing = []
-    with _fundflow_cache_lock:
-        for code in codes:
-            cached = _fundflow_cache.get(code)
-            if cached is not None:
-                ts = _fundflow_cache_ts.get(code, 0)
-                if now - ts < _MAX_CACHE_AGE:
-                    result[code] = cached
-                else:
-                    missing.append(code)
-            else:
-                missing.append(code)
-
-    for code in missing:
-        data = fetch_cls_fundflow(code)
-        if data:
-            with _fundflow_cache_lock:
-                _fundflow_cache[code] = data
-                _fundflow_cache_ts[code] = time()
-            result[code] = data
-        else:
-            result[code] = None
-
-    return result
+    return _handle_cached_batch(
+        codes, _fundflow_pool, _FUNDFLOW_MAX_POOL,
+        _fundflow_cache, _fundflow_cache_ts, _fundflow_cache_lock,
+        fetcher=fetch_cls_fundflow)
 
 
 def _fundflow_prefetch_loop():
@@ -218,47 +289,10 @@ def _timeline_direct_fetch(stock_code):
 
 def handle_cls_timeline(codes):
     """Stock Timeline Data (分时图) — REST-based, batch supported."""
-    seen = set()
-    codes = [c for c in codes if not (c in seen or seen.add(c))]
-    if not codes:
-        return {}
-
-    now = time()
-    with _timeline_cache_lock:
-        for code in codes:
-            _timeline_pool[code] = now
-        if len(_timeline_pool) > _TIMELINE_MAX_POOL:
-            excess = sorted(_timeline_pool, key=_timeline_pool.get)[:len(_timeline_pool) - _TIMELINE_MAX_POOL]
-            for code in excess:
-                del _timeline_pool[code]
-                _timeline_cache.pop(code, None)
-                _timeline_cache_ts.pop(code, None)
-
-    result = {}
-    missing = []
-    with _timeline_cache_lock:
-        for code in codes:
-            cached = _timeline_cache.get(code)
-            if cached is not None:
-                ts = _timeline_cache_ts.get(code, 0)
-                if now - ts < _MAX_CACHE_AGE:
-                    result[code] = cached
-                else:
-                    missing.append(code)
-            else:
-                missing.append(code)
-
-    for code in missing:
-        data = fetch_cls_timeline(code)
-        if data:
-            with _timeline_cache_lock:
-                _timeline_cache[code] = data
-                _timeline_cache_ts[code] = time()
-            result[code] = data
-        else:
-            result[code] = None
-
-    return result
+    return _handle_cached_batch(
+        codes, _timeline_pool, _TIMELINE_MAX_POOL,
+        _timeline_cache, _timeline_cache_ts, _timeline_cache_lock,
+        fetcher=fetch_cls_timeline)
 
 
 def _timeline_prefetch_loop():
@@ -317,7 +351,7 @@ def _iter_nav_pages():
     """Yield CDP stock navigation pages that are available."""
     if not config.cdp_engine or not config.cdp_engine.ready:
         return
-    for name in _STOCK_NAV_PAGES:
+    for name in _stock_nav_pages():
         page = config.cdp_engine.get_page(name)
         if page:
             yield page
@@ -345,83 +379,14 @@ def fetch_cls_f10(stock_code, deadline=None):
     return None
 
 
-def _f10_direct_fetch(stock_code, deadline=None):
-    """Fetch F10 company info — CDP navigation.
-
-    Used by prefetch loop.
-    """
-    if config.cdp_engine and config.cdp_engine.ready:
-        d = deadline or time() + 10
-        for page in _iter_nav_pages():
-            if time() >= d - 1:
-                break
-            if _navigate_f10(page, stock_code, d):
-                data = page.get_data()
-                r = {}
-                _fill_missing(r, data, _F10_EXPECTED_KEYS)
-                if r:
-                    ci = r.get('stock_company_info')
-                    if _company_info_matches(ci, stock_code):
-                        return ci
-    return None
-
-
 def handle_cls_f10(codes):
     """Stock F10 Financial Summary — CDP navigation-based, batch supported."""
-    seen = set()
-    codes = [c for c in codes if not (c in seen or seen.add(c))]
-    if not codes:
-        return {}
-
-    result = {}
-    valid = []
-    for code in codes:
-        if VALID_STOCK_CODE.match(code):
-            valid.append(code)
-        else:
-            result[code] = None
-    codes = valid
-
-    now = time()
-    with _f10_cache_lock:
-        for code in codes:
-            _f10_pool[code] = now
-        if len(_f10_pool) > _F10_MAX_POOL:
-            excess = sorted(_f10_pool, key=_f10_pool.get)[:len(_f10_pool) - _F10_MAX_POOL]
-            for code in excess:
-                del _f10_pool[code]
-                _f10_cache.pop(code, None)
-                _f10_cache_ts.pop(code, None)
-
-    missing = []
-    with _f10_cache_lock:
-        for code in codes:
-            cached = _f10_cache.get(code)
-            if cached is not None:
-                ts = _f10_cache_ts.get(code, 0)
-                if now - ts < _MAX_CACHE_AGE:
-                    result[code] = cached
-                else:
-                    missing.append(code)
-            else:
-                missing.append(code)
-
     batch_deadline = time() + 60
-    for code in missing:
-        if time() > batch_deadline:
-            result[code] = None
-            continue
-        data = fetch_cls_f10(code, deadline=batch_deadline)
-        if data:
-            with _f10_cache_lock:
-                _f10_cache[code] = data
-                _f10_cache_ts[code] = time()
-            _populate_sector_from_f10(data, code)
-            result[code] = data
-        else:
-            result[code] = None
-
-    return result
+    return _handle_cached_batch(
+        codes, _f10_pool, _F10_MAX_POOL,
+        _f10_cache, _f10_cache_ts, _f10_cache_lock,
+        fetcher=fetch_cls_f10, deadline=batch_deadline,
+        after=_populate_sector_from_f10, concurrent=False)
 
 
 def _f10_prefetch_loop():
@@ -436,7 +401,7 @@ def _f10_prefetch_loop():
             if not codes:
                 continue
             for code in codes:
-                data = _f10_direct_fetch(code, deadline=time() + 4)
+                data = fetch_cls_f10(code, deadline=time() + 4)
                 if data:
                     with _f10_cache_lock:
                         _f10_cache[code] = data
@@ -483,18 +448,42 @@ def _load_sector_cache():
 
 
 def _save_sector_cache():
-    """Persist sector cache to disk asynchronously."""
+    """Persist sector cache to disk (called from the single writer thread)."""
     try:
         with _sector_cache_lock:
             data = dict(_sector_cache)
         os.makedirs(os.path.dirname(_SECTOR_CACHE_FILE), exist_ok=True)
-        with open(_SECTOR_CACHE_FILE, 'w') as f:
+        tmp = _SECTOR_CACHE_FILE + '.tmp'
+        with open(tmp, 'w') as f:
             json.dump(data, f, ensure_ascii=False)
+        os.replace(tmp, _SECTOR_CACHE_FILE)
     except Exception as e:
         log.warning(f'[sector] save error: {e}')
 
 
+_sector_dirty = False
+_sector_save_lock = threading.Lock()
+_SECTOR_WRITE_DEBOUNCE = 2  # seconds between disk flushes
+
+
+def _sector_cache_writer():
+    """Single background writer: flush dirty sector cache with debounce.
+
+    Replaces the old thread-per-update spawn, avoiding disk write storms and
+    concurrent writes to /data/sector_cache.json.
+    """
+    global _sector_dirty
+    while True:
+        sleep(_SECTOR_WRITE_DEBOUNCE)
+        with _sector_save_lock:
+            if not _sector_dirty:
+                continue
+            _sector_dirty = False
+            _save_sector_cache()
+
+# Single background writer for sector cache (debounced disk flush)
 _load_sector_cache()
+threading.Thread(target=_sector_cache_writer, daemon=True).start()
 
 
 def _sweep_sector_cache(now=None):
@@ -511,6 +500,7 @@ def _sweep_sector_cache(now=None):
 
 def _sector_cache_put(code, sector, now=None):
     """Insert into the bounded sector cache (sweep + cap eviction)."""
+    global _sector_dirty
     if now is None:
         now = time()
     with _sector_cache_lock:
@@ -519,6 +509,8 @@ def _sector_cache_put(code, sector, now=None):
             oldest = min(_sector_cache, key=lambda k: _sector_cache[k].get('ts', 0))
             del _sector_cache[oldest]
         _sector_cache[code] = {'sector': sector, 'ts': now}
+    with _sector_save_lock:
+        _sector_dirty = True
 
 
 def _populate_sector_from_f10(data, code):
@@ -534,7 +526,6 @@ def _populate_sector_from_f10(data, code):
                 if industry:
                     sector = industry.split('-')[0]
                     _sector_cache_put(code, sector)
-                    threading.Thread(target=_save_sector_cache, daemon=True).start()
 
 
 
@@ -586,59 +577,11 @@ def fetch_cls_basic_info(stock_code, deadline=None):
 
 def handle_cls_basic_infos(codes):
     """Stock Basic Info — batch supported."""
-    seen = set()
-    codes = [c for c in codes if not (c in seen or seen.add(c))]
-    if not codes:
-        return {}
-
-    result = {}
-    valid = []
-    for code in codes:
-        if VALID_STOCK_CODE.match(code):
-            valid.append(code)
-        else:
-            result[code] = None
-    codes = valid
-
-    now = time()
-    with _basic_info_cache_lock:
-        for code in codes:
-            _basic_info_pool[code] = now
-        if len(_basic_info_pool) > _BASIC_INFO_MAX_POOL:
-            excess = sorted(_basic_info_pool, key=_basic_info_pool.get)[:len(_basic_info_pool) - _BASIC_INFO_MAX_POOL]
-            for code in excess:
-                del _basic_info_pool[code]
-                _basic_info_cache.pop(code, None)
-                _basic_info_cache_ts.pop(code, None)
-
-    missing = []
-    with _basic_info_cache_lock:
-        for code in codes:
-            cached = _basic_info_cache.get(code)
-            if cached is not None:
-                ts = _basic_info_cache_ts.get(code, 0)
-                if now - ts < _MAX_CACHE_AGE:
-                    result[code] = cached
-                else:
-                    missing.append(code)
-            else:
-                missing.append(code)
-
     batch_deadline = time() + 60
-    for code in missing:
-        if time() > batch_deadline:
-            result[code] = None
-            continue
-        data = fetch_cls_basic_info(code, deadline=batch_deadline)
-        if data:
-            with _basic_info_cache_lock:
-                _basic_info_cache[code] = data
-                _basic_info_cache_ts[code] = time()
-            result[code] = data
-        else:
-            result[code] = None
-
-    return result
+    return _handle_cached_batch(
+        codes, _basic_info_pool, _BASIC_INFO_MAX_POOL,
+        _basic_info_cache, _basic_info_cache_ts, _basic_info_cache_lock,
+        fetcher=fetch_cls_basic_info, deadline=batch_deadline)
 
 
 # ── Announcement (公告) ─────────────────────────────────────────────────────
@@ -683,47 +626,10 @@ def _announcement_direct_fetch(stock_code):
 
 def handle_cls_announcement(codes):
     """Stock Announcement Data (公告) — REST-based, batch supported."""
-    seen = set()
-    codes = [c for c in codes if not (c in seen or seen.add(c))]
-    if not codes:
-        return {}
-
-    now = time()
-    with _announcement_cache_lock:
-        for code in codes:
-            _announcement_pool[code] = now
-        if len(_announcement_pool) > _ANNOUNCEMENT_MAX_POOL:
-            excess = sorted(_announcement_pool, key=_announcement_pool.get)[:len(_announcement_pool) - _ANNOUNCEMENT_MAX_POOL]
-            for code in excess:
-                del _announcement_pool[code]
-                _announcement_cache.pop(code, None)
-                _announcement_cache_ts.pop(code, None)
-
-    result = {}
-    missing = []
-    with _announcement_cache_lock:
-        for code in codes:
-            cached = _announcement_cache.get(code)
-            if cached is not None:
-                ts = _announcement_cache_ts.get(code, 0)
-                if now - ts < _MAX_CACHE_AGE:
-                    result[code] = cached
-                else:
-                    missing.append(code)
-            else:
-                missing.append(code)
-
-    for code in missing:
-        data = fetch_cls_announcement(code)
-        if data:
-            with _announcement_cache_lock:
-                _announcement_cache[code] = data
-                _announcement_cache_ts[code] = time()
-            result[code] = data
-        else:
-            result[code] = None
-
-    return result
+    return _handle_cached_batch(
+        codes, _announcement_pool, _ANNOUNCEMENT_MAX_POOL,
+        _announcement_cache, _announcement_cache_ts, _announcement_cache_lock,
+        fetcher=fetch_cls_announcement)
 
 
 def _announcement_prefetch_loop():
@@ -763,10 +669,16 @@ def handle_cls_stock(stock_code):
 
 def handle_cls_stock_batch(codes):
     """Batch version of handle_cls_stock — returns {code: data, ...}."""
+    seen = set()
+    codes = [c for c in codes if not (c in seen or seen.add(c))]
     result = {}
+    valid = []
     for code in codes:
-        if not VALID_STOCK_CODE.match(code):
-            result[code] = None
+        if VALID_STOCK_CODE.match(code):
+            valid.append(code)
         else:
-            result[code] = handle_cls_stock(code)
+            result[code] = None
+    if valid:
+        fetched = _run_batch(handle_cls_stock, valid)  # REST, parallel is safe
+        result.update(fetched)
     return result
