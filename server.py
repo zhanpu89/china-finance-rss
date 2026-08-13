@@ -699,7 +699,12 @@ class RSSHandler(BaseHTTPRequestHandler):
 
 
 class BoundedThreadPoolServer(ThreadingHTTPServer):
-    """HTTPServer with a fixed-size thread pool instead of per-request threads."""
+    """HTTPServer with a fixed-size thread pool instead of per-request threads.
+
+    Implements load shedding: when every worker is busy, new connections are
+    answered with HTTP 503 instead of queuing unboundedly (which would let
+    memory grow under sustained overload).
+    """
 
     allow_reuse_address = True
     daemon_threads = True
@@ -707,9 +712,49 @@ class BoundedThreadPoolServer(ThreadingHTTPServer):
     def __init__(self, *args, max_workers=MAX_WORKERS, **kwargs):
         super().__init__(*args, **kwargs)
         self.executor = ThreadPoolExecutor(max_workers=max_workers)
+        self._inflight = 0
+        self._inflight_lock = threading.Lock()
+        self._max_inflight = max_workers * 2  # queued + running
+
+    def _reject_503(self, request):
+        try:
+            body = b'{"error":"server busy"}'
+            request.sendall(
+                b'HTTP/1.1 503 Service Unavailable\r\n'
+                b'Content-Type: application/json\r\n'
+                b'Content-Length: ' + str(len(body)).encode() + b'\r\n'
+                b'Connection: close\r\n\r\n' + body)
+        except Exception:
+            pass
+        finally:
+            try:
+                request.close()
+            except Exception:
+                pass
 
     def process_request(self, request, client_address):
-        self.executor.submit(self.process_request_thread, request, client_address)
+        with self._inflight_lock:
+            if self._inflight >= self._max_inflight:
+                overloaded = True
+            else:
+                self._inflight += 1
+                overloaded = False
+        if overloaded:
+            self._reject_503(request)
+            return
+        try:
+            fut = self.executor.submit(self.process_request_thread, request, client_address)
+        except Exception:
+            with self._inflight_lock:
+                self._inflight -= 1
+            self._reject_503(request)
+            return
+        fut.add_done_callback(self._release_inflight)
+
+    def _release_inflight(self, fut):
+        with self._inflight_lock:
+            if self._inflight > 0:
+                self._inflight -= 1
 
     def server_close(self):
         self.executor.shutdown(wait=False)

@@ -59,44 +59,53 @@ def fetch_json(url, headers=None, ttl=None):
     Uses a per-URL Event for leader election:
       - First thread becomes leader and fetches upstream
       - Followers wait on the Event, then read from cache
-      - If leader fails, follower after cleanup becomes new leader
+      - If the leader fails, the Event is set and the inflight slot freed;
+        a waiting follower re-enters the election and becomes the new
+        leader, so a failure never triggers an upstream stampede
     """
     with _cache_lock:
         entry = cache.get(url)
         if _cache_fresh(entry):
             return entry['data']
 
-    with _cache_lock:
-        if url in _fetch_inflight:
-            event = _fetch_inflight[url]
-            is_leader = False
-        else:
-            _fetch_inflight[url] = threading.Event()
-            event = _fetch_inflight[url]
-            is_leader = True
-
-    if is_leader:
-        try:
-            req = Request(url, headers=headers or {})
-            with urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
-                data = resp.read().decode('utf-8')
-            _cache_put(cache, url, data, ttl=ttl)
-            return data
-        finally:
-            event.set()
-            with _cache_lock:
-                _fetch_inflight.pop(url, None)
-    else:
-        event.wait(timeout=REQUEST_TIMEOUT)
+    deadline = time.time() + REQUEST_TIMEOUT
+    while True:
         with _cache_lock:
             entry = cache.get(url)
             if _cache_fresh(entry):
                 return entry['data']
-        req = Request(url, headers=headers or {})
-        with urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
-            data = resp.read().decode('utf-8')
-        _cache_put(cache, url, data, ttl=ttl)
-        return data
+            if url in _fetch_inflight:
+                event = _fetch_inflight[url]
+                is_leader = False
+            else:
+                _fetch_inflight[url] = threading.Event()
+                event = _fetch_inflight[url]
+                is_leader = True
+
+        if is_leader:
+            try:
+                req = Request(url, headers=headers or {})
+                with urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
+                    data = resp.read().decode('utf-8')
+                _cache_put(cache, url, data, ttl=ttl)
+                return data
+            finally:
+                event.set()
+                with _cache_lock:
+                    _fetch_inflight.pop(url, None)
+
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            break
+        event.wait(timeout=min(REQUEST_TIMEOUT, remaining))
+
+    # Give up on the single-flight election; fall through to a direct fetch
+    # so the caller still gets data (worst case: concurrent direct fetches).
+    req = Request(url, headers=headers or {})
+    with urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
+        data = resp.read().decode('utf-8')
+    _cache_put(cache, url, data, ttl=ttl)
+    return data
 
 
 # Feed cache

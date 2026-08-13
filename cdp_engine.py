@@ -808,7 +808,8 @@ class CDPPage:
         """
         url = f'https://www.cls.cn/stock?code={stock_code}'
         # Fast path: skip navigation if cache already has fresh data for this code
-        cached = ((self._last_data.get('basic_info') or {}).get('data') or {}).get('secu_code')
+        with self._lock:
+            cached = ((self._last_data.get('basic_info') or {}).get('data') or {}).get('secu_code')
         if cached == stock_code:
             return True
         # Block until lock acquired — fair queuing across concurrent requests

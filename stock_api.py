@@ -45,6 +45,32 @@ def _stock_nav_pages():
 # Bounded parallelism for batch fetches (per-request fan-out is capped).
 _BATCH_MAX_WORKERS = 8
 
+# Round-robin cursor for prefetch loops so a large pool is refreshed
+# fairly instead of always starting at index 0 (which would re-fetch the
+# head every pass and leave the tail permanently stale).
+_prefetch_cursor = {}
+_prefetch_cursor_lock = threading.Lock()
+# Cap prefetch work per pass so a huge pool doesn't monopolize the CDP
+# navigation pages or burn a whole interval in one loop iteration.
+_PREFETCH_PASS_BUDGET = 60.0
+
+
+def _prefetch_rotate(pool, lock, key):
+    """Return pool codes rotated to start at the last pass's stop point."""
+    with lock:
+        keys = list(pool.keys())
+    if not keys:
+        return []
+    with _prefetch_cursor_lock:
+        start = _prefetch_cursor.get(key, 0) % len(keys)
+    return keys[start:] + keys[:start]
+
+
+def _prefetch_advance(key, processed, total):
+    """Advance the round-robin cursor by the codes actually processed."""
+    with _prefetch_cursor_lock:
+        _prefetch_cursor[key] = (_prefetch_cursor.get(key, 0) + processed) % max(total, 1)
+
 
 def _run_batch(fetcher, codes, deadline=None, concurrent=True):
     """Fetch codes either concurrently or serially.
@@ -235,22 +261,31 @@ def handle_cls_fundflow(codes):
 
 
 def _fundflow_prefetch_loop():
-    """Background thread: refresh fund flow for all auto-registered stocks."""
+    """Background thread: refresh fund flow for all auto-registered stocks.
+
+    Round-robin across the pool with a per-pass time budget so a large pool
+    is refreshed fairly and the loop never stalls a whole interval.
+    """
     while True:
         try:
             ttl, _ = _china_trading_ttl()
             interval = max(_FUNDFLOW_POOL_REFRESH, ttl)
             sleep(interval)
-            with _fundflow_cache_lock:
-                codes = list(_fundflow_pool.keys())
+            codes = _prefetch_rotate(_fundflow_pool, _fundflow_cache_lock, 'fundflow')
             if not codes:
                 continue
+            pass_deadline = time() + _PREFETCH_PASS_BUDGET
+            processed = 0
             for code in codes:
+                if time() >= pass_deadline:
+                    break
                 data = _fundflow_direct_fetch(code)
                 if data:
                     with _fundflow_cache_lock:
                         _fundflow_cache[code] = data
                         _fundflow_cache_ts[code] = time()
+                processed += 1
+            _prefetch_advance('fundflow', processed, len(codes))
         except Exception as e:
             log.error(f'[fundflow] prefetch error: {e}')
 
@@ -304,22 +339,31 @@ def handle_cls_timeline(codes):
 
 
 def _timeline_prefetch_loop():
-    """Background thread: refresh timeline for all auto-registered stocks."""
+    """Background thread: refresh timeline for all auto-registered stocks.
+
+    Round-robin across the pool with a per-pass time budget (see
+    _fundflow_prefetch_loop for rationale).
+    """
     while True:
         try:
             ttl, _ = _china_trading_ttl()
             interval = max(_TIMELINE_POOL_REFRESH, ttl)
             sleep(interval)
-            with _timeline_cache_lock:
-                codes = list(_timeline_pool.keys())
+            codes = _prefetch_rotate(_timeline_pool, _timeline_cache_lock, 'timeline')
             if not codes:
                 continue
+            pass_deadline = time() + _PREFETCH_PASS_BUDGET
+            processed = 0
             for code in codes:
+                if time() >= pass_deadline:
+                    break
                 data = _timeline_direct_fetch(code)
                 if data:
                     with _timeline_cache_lock:
                         _timeline_cache[code] = data
                         _timeline_cache_ts[code] = time()
+                processed += 1
+            _prefetch_advance('timeline', processed, len(codes))
         except Exception as e:
             log.error(f'[timeline] prefetch error: {e}')
 
@@ -409,23 +453,33 @@ def handle_cls_f10(codes):
 
 
 def _f10_prefetch_loop():
-    """Background thread: refresh F10 for all auto-registered stocks."""
+    """Background thread: refresh F10 for all auto-registered stocks.
+
+    Round-robin across the pool with a per-pass time budget so a large pool
+    is refreshed fairly and CDP nav pages are not monopolized (see
+    _fundflow_prefetch_loop for rationale).
+    """
     while True:
         try:
             ttl, _ = _china_trading_ttl()
             interval = max(_F10_POOL_REFRESH, ttl)
             sleep(interval)
-            with _f10_cache_lock:
-                codes = list(_f10_pool.keys())
+            codes = _prefetch_rotate(_f10_pool, _f10_cache_lock, 'f10')
             if not codes:
                 continue
+            pass_deadline = time() + _PREFETCH_PASS_BUDGET
+            processed = 0
             for code in codes:
+                if time() >= pass_deadline:
+                    break
                 data = fetch_cls_f10(code, deadline=time() + 4)
                 if data:
                     with _f10_cache_lock:
                         _f10_cache[code] = data
                         _f10_cache_ts[code] = time()
                     _populate_sector_from_f10(data, code)
+                processed += 1
+            _prefetch_advance('f10', processed, len(codes))
         except Exception as e:
             log.error(f'[f10] prefetch error: {e}')
 
@@ -652,22 +706,31 @@ def handle_cls_announcement(codes):
 
 
 def _announcement_prefetch_loop():
-    """Background thread: refresh announcements for all auto-registered stocks."""
+    """Background thread: refresh announcements for all auto-registered stocks.
+
+    Round-robin across the pool with a per-pass time budget (see
+    _fundflow_prefetch_loop for rationale).
+    """
     while True:
         try:
             ttl, _ = _china_trading_ttl()
             interval = max(_ANNOUNCEMENT_POOL_REFRESH, ttl)
             sleep(interval)
-            with _announcement_cache_lock:
-                codes = list(_announcement_pool.keys())
+            codes = _prefetch_rotate(_announcement_pool, _announcement_cache_lock, 'announcement')
             if not codes:
                 continue
+            pass_deadline = time() + _PREFETCH_PASS_BUDGET
+            processed = 0
             for code in codes:
+                if time() >= pass_deadline:
+                    break
                 data = _announcement_direct_fetch(code)
                 if data:
                     with _announcement_cache_lock:
                         _announcement_cache[code] = data
                         _announcement_cache_ts[code] = time()
+                processed += 1
+            _prefetch_advance('announcement', processed, len(codes))
         except Exception as e:
             log.error(f'[announcement] prefetch error: {e}')
 

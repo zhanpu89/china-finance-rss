@@ -325,6 +325,104 @@ class CacheMaintenanceTests(unittest.TestCase):
                 _sector_cache.clear()
                 _sector_cache.update(saved)
 
+    def test_fetch_json_leader_failure_does_not_stampede(self):
+        """When the elected leader's upstream fetch fails, waiting followers
+        must re-enter single-flight election instead of all hitting upstream
+        simultaneously (upstream stampede on failure)."""
+        import cache as cache_mod
+        from unittest import mock
+
+        original_cache = cache_mod.cache
+        original_inflight = cache_mod._fetch_inflight
+        original_lock = cache_mod._cache_lock
+
+        state = {'active': 0, 'max_active': 0, 'calls': 0}
+
+        def flaky_urlopen(req, timeout):
+            state['active'] += 1
+            state['max_active'] = max(state['max_active'], state['active'])
+            state['calls'] += 1
+            try:
+                # First attempt fails (transient upstream error); later
+                # attempts succeed.
+                if state['calls'] == 1:
+                    import urllib.error
+                    raise urllib.error.URLError('boom')
+                import time
+                time.sleep(0.01)
+                return _FakeResponse(b'{"ok": true}')
+            finally:
+                state['active'] -= 1
+
+        class _FakeResponse:
+            def __init__(self, body):
+                self._body = body
+                self.status = 200
+            def read(self):
+                return self._body
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                return False
+
+        import threading
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        try:
+            cache_mod.cache = {}
+            cache_mod._fetch_inflight = {}
+            cache_mod._cache_lock = threading.Lock()
+            with mock.patch.object(cache_mod, 'urlopen', side_effect=flaky_urlopen):
+                outcomes = {'ok': 0, 'err': 0}
+                with ThreadPoolExecutor(max_workers=8) as pool:
+                    futures = [pool.submit(
+                        lambda: cache_mod.fetch_json('http://example.test/x', ttl=60))
+                        for _ in range(8)]
+                    for f in as_completed(futures):
+                        try:
+                            if f.result() == '{"ok": true}':
+                                outcomes['ok'] += 1
+                        except Exception:
+                            outcomes['err'] += 1
+            # Exactly one caller was the failed leader and saw the upstream
+            # error; every other caller must succeed via single-flight
+            # re-election (no stampede).
+            self.assertEqual(outcomes['err'], 1)
+            self.assertEqual(outcomes['ok'], 7)
+            # Single-flight guarantee: never more than 1 upstream request
+            # in flight at a time, even after a leader failure.
+            self.assertEqual(state['max_active'], 1)
+        finally:
+            cache_mod.cache = original_cache
+            cache_mod._fetch_inflight = original_inflight
+            cache_mod._cache_lock = original_lock
+
+    def test_prefetch_round_robin_advances_cursor(self):
+        """The prefetch round-robin cursor must advance across the pool so a
+        large pool is refreshed fairly rather than always starting at index 0."""
+        from stock_api import _prefetch_rotate, _prefetch_advance, \
+            _prefetch_cursor, _prefetch_cursor_lock
+        import threading
+        with _prefetch_cursor_lock:
+            _prefetch_cursor.clear()
+        pool = {'a': 1, 'b': 2, 'c': 3}
+        lock = threading.Lock()
+        try:
+            # First pass starts at the head, processes 2 of 3 codes.
+            first = _prefetch_rotate(pool, lock, 'testpool')
+            self.assertEqual(first[0], 'a')
+            _prefetch_advance('testpool', 2, 3)
+            # Next pass continues from the third code (round-robin), so the
+            # pool tail is not starved.
+            second = _prefetch_rotate(pool, lock, 'testpool')
+            self.assertEqual(second[0], 'c')
+            _prefetch_advance('testpool', 1, 3)
+            # After a full cycle the cursor wraps back to the head.
+            third = _prefetch_rotate(pool, lock, 'testpool')
+            self.assertEqual(third[0], 'a')
+        finally:
+            with _prefetch_cursor_lock:
+                _prefetch_cursor.clear()
+
 
 if __name__ == "__main__":
     unittest.main()
