@@ -355,7 +355,12 @@ class CDPPage:
         self._api_urls = {}       # remapped_key -> original URL for re-fetch
         self._last_data_max_age = 600  # max age (seconds) for _last_data entries
         self._last_data_ts = {}   # key -> timestamp when last added to _last_data
-        self._navigate_lock = threading.Lock()
+        # RLock so a caller can hold the navigation lock across
+        # navigate_stock() AND get_data() without deadlocking on the
+        # re-entrant acquire inside navigate_stock(). This closes the race
+        # where a concurrent request navigates the shared page to a different
+        # code between the navigation and the data read.
+        self._navigate_lock = threading.RLock()
         self._connect()
         if heartbeat:
             threading.Thread(target=self._heartbeat, daemon=True).start()
@@ -824,6 +829,7 @@ class CDPPage:
                         timeout=3)
                     self._send_recv({'id': self._next_id(), 'method': 'Page.navigate',
                                      'params': {'url': url}}, timeout=min(10, remaining))
+            nav_started = time.time()
             try:
                 _send_navigate()
             except Exception:
@@ -863,7 +869,12 @@ class CDPPage:
                             time.sleep(1)
                             self.refresh()
                     return True
-                # Fail fast: page settled on a wrong stock code
+                # Fail fast: page settled on a wrong stock code — but only if
+                # the wrong code has persisted well past the navigation
+                # transition window. Under concurrent navigation of the shared
+                # page pool, the page legitimately shows the *previous* code
+                # for a few seconds while the new code's page loads, so a
+                # naive stable_count abort yields spurious nulls.
                 secu_code = bi.get('secu_code')
                 if secu_code:
                     if secu_code == last_seen_code:
@@ -871,7 +882,7 @@ class CDPPage:
                     else:
                         last_seen_code = secu_code
                         stable_count = 0
-                    if stable_count >= 3:
+                    if stable_count >= 3 and (time.time() - nav_started) > 6:
                         break
                 time.sleep(0.5)
             self.refresh()

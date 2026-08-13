@@ -73,10 +73,18 @@ def _run_batch(fetcher, codes, deadline=None, concurrent=True):
 
 
 def _fetch_one(fetcher, code, deadline):
-    """Run fetch for a single code, honoring the batch deadline."""
+    """Run fetch for a single code, honoring the batch deadline.
+
+    The batch deadline is forwarded to fetchers that accept it (CDP
+    navigation fetchers like fetch_cls_f10/basic_info use it as their real
+    time budget). REST fetchers ignore the extra kwarg.
+    """
     if deadline is not None and time() > deadline:
         return None
-    return fetcher(code)
+    try:
+        return fetcher(code, deadline=deadline)
+    except TypeError:
+        return fetcher(code)
 
 
 def _handle_cached_batch(codes, pool, pool_max, cache, cache_ts, lock,
@@ -325,17 +333,21 @@ _f10_cache_lock = threading.Lock()
 
 
 def _navigate_f10(page, stock_code, deadline):
-    """Navigate stock — skip pages that are busy beyond a short wait."""
+    """Navigate stock — block on a busy page, do not skip.
+
+    Previously the 0.5s probe-skip caused null results under concurrent
+    load (3 pages shared across 12+ concurrent f10 requests).
+    Blocking with fair queuing gives 100% success but at higher latency
+    under heavy contention — which is acceptable for the low-frequency
+    RSS reader workload.
+    """
     remaining = deadline - time()
     if remaining < 2:
         return False
     try:
-        if not page._navigate_lock.acquire(timeout=0.5):
-            return False
-        page._navigate_lock.release()
-    except AttributeError:
+        return page.navigate_stock(stock_code, tabs=('f10',), timeout=remaining)
+    except Exception:
         return False
-    return page.navigate_stock(stock_code, tabs=('f10',), timeout=remaining)
 
 
 def _company_info_matches(ci, stock_code):
@@ -362,20 +374,27 @@ def fetch_cls_f10(stock_code, deadline=None):
 
     Returns company_info data dict: {basic_info, ipo_info, ...}
     matching the original CDP capture format.
+
+    Holds the page navigation lock across navigate_stock() AND get_data()
+    so a concurrent request cannot navigate the shared page to a different
+    code between the navigation and the read (that race returned nulls
+    under concurrent load). _navigate_lock is an RLock, so the re-entrant
+    acquire inside navigate_stock() is safe.
     """
     if config.cdp_engine and config.cdp_engine.ready:
         d = deadline or time() + 10
         for page in _iter_nav_pages():
             if time() >= d - 1:
                 break
-            if _navigate_f10(page, stock_code, d):
-                data = page.get_data()
-                r = {}
-                _fill_missing(r, data, _F10_EXPECTED_KEYS)
-                if r:
-                    ci = r.get('stock_company_info')
-                    if _company_info_matches(ci, stock_code):
-                        return ci
+            with page._navigate_lock:
+                if _navigate_f10(page, stock_code, d):
+                    data = page.get_data()
+                    r = {}
+                    _fill_missing(r, data, _F10_EXPECTED_KEYS)
+                    if r:
+                        ci = r.get('stock_company_info')
+                        if _company_info_matches(ci, stock_code):
+                            return ci
     return None
 
 
