@@ -6,7 +6,6 @@ CDP-based endpoints (fundflow, timeline, F10) use `config.cdp_engine`
 
 import json
 import logging
-import os
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from time import sleep, time
@@ -491,72 +490,13 @@ _basic_info_cache_ts = {}
 _basic_info_pool = {}
 _basic_info_cache_lock = threading.Lock()
 
-# Shared sector name cache (industry rarely changes, long TTL + file persistence)
-_SECTOR_CACHE_FILE = 'data/sector_cache.json'
+# Shared sector name cache (industry rarely changes, long TTL)
 _sector_cache = {}
 _sector_cache_lock = threading.Lock()
-# Bounded: sector changes are rare but an unbounded dict + disk file grows
-# forever on a long-running 2c2g box. Cap size and expire old entries.
+# Bounded in-memory cache: sector changes are rare but an unbounded dict
+# grows forever on a long-running 2c2g box. Cap size and expire old entries.
 _SECTOR_CACHE_MAX = 2000
 _SECTOR_CACHE_TTL = 7 * 24 * 3600  # 7 days
-
-
-def _load_sector_cache():
-    """Load persisted sector cache from disk."""
-    try:
-        with open(_SECTOR_CACHE_FILE) as f:
-            data = json.load(f)
-            count = 0
-            with _sector_cache_lock:
-                for k, v in data.items():
-                    if isinstance(v, dict) and 'sector' in v:
-                        _sector_cache[k] = v
-                        count += 1
-            if count:
-                log.info(f'[sector] loaded {count} entries from {_SECTOR_CACHE_FILE}')
-    except FileNotFoundError:
-        pass
-    except Exception as e:
-        log.warning(f'[sector] load error: {e}')
-
-
-def _save_sector_cache():
-    """Persist sector cache to disk (called from the single writer thread)."""
-    try:
-        with _sector_cache_lock:
-            data = dict(_sector_cache)
-        os.makedirs(os.path.dirname(_SECTOR_CACHE_FILE), exist_ok=True)
-        tmp = _SECTOR_CACHE_FILE + '.tmp'
-        with open(tmp, 'w') as f:
-            json.dump(data, f, ensure_ascii=False)
-        os.replace(tmp, _SECTOR_CACHE_FILE)
-    except Exception as e:
-        log.warning(f'[sector] save error: {e}')
-
-
-_sector_dirty = False
-_sector_save_lock = threading.Lock()
-_SECTOR_WRITE_DEBOUNCE = 2  # seconds between disk flushes
-
-
-def _sector_cache_writer():
-    """Single background writer: flush dirty sector cache with debounce.
-
-    Replaces the old thread-per-update spawn, avoiding disk write storms and
-    concurrent writes to /data/sector_cache.json.
-    """
-    global _sector_dirty
-    while True:
-        sleep(_SECTOR_WRITE_DEBOUNCE)
-        with _sector_save_lock:
-            if not _sector_dirty:
-                continue
-            _sector_dirty = False
-            _save_sector_cache()
-
-# Single background writer for sector cache (debounced disk flush)
-_load_sector_cache()
-threading.Thread(target=_sector_cache_writer, daemon=True).start()
 
 
 def _sweep_sector_cache(now=None):
@@ -573,7 +513,6 @@ def _sweep_sector_cache(now=None):
 
 def _sector_cache_put(code, sector, now=None):
     """Insert into the bounded sector cache (sweep + cap eviction)."""
-    global _sector_dirty
     if now is None:
         now = time()
     with _sector_cache_lock:
@@ -582,8 +521,6 @@ def _sector_cache_put(code, sector, now=None):
             oldest = min(_sector_cache, key=lambda k: _sector_cache[k].get('ts', 0))
             del _sector_cache[oldest]
         _sector_cache[code] = {'sector': sector, 'ts': now}
-    with _sector_save_lock:
-        _sector_dirty = True
 
 
 def _populate_sector_from_f10(data, code):

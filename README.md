@@ -127,6 +127,26 @@ docker run -d -p 8053:8053 \
   --name china-finance-rss china-finance-rss
 ```
 
+## Scheduled Restart (workaround for stale cache)
+
+On low-spec hosts (e.g. 2C2G) the in-memory cache may stop being reclaimed
+after running for days, so consumers keep receiving old data until the stack
+is restarted. A daily recycle of the stack clears it without changing the app.
+
+`scripts/restart-stack.sh` performs a clean `docker compose down && docker compose up -d`
+and logs to `logs/restart.log`. Install it on the **host** crontab to run daily at 02:00:
+
+```bash
+# From the project root on the host server:
+( crontab -l 2>/dev/null; echo "0 2 * * * $(pwd)/scripts/restart-stack.sh" ) | crontab -
+crontab -l   # verify
+```
+
+The schedule follows the host's local timezone — set the host timezone to
+`Asia/Shanghai` if you want 02:00 to mean Beijing time. The container itself is
+already configured to `Asia/Shanghai` (see `TZ` in the `Dockerfile`), which fixes
+the 8-hour offset seen in container timestamps/logs.
+
 ## Notes
 
 - All RSS sources use public web endpoints; no login required.
