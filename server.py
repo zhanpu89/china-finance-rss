@@ -38,6 +38,8 @@ from config import (
     _MAX_BATCH_SIZE,
     _FINANCE_EXPECTED_KEYS, _QUOTATION_EXPECTED_KEYS,
     _HOTPLATE_BASE_URL, _HOTPLATE_HEADERS,
+    _PLATE_INFO_URL, _PLATE_STOCKS_URL, _PLATE_INDUSTRY_URL,
+    _PLATE_HEADERS, _PLATE_CACHE_TTL,
     CDP_RESTART_INTERVAL, stock_nav_page_names,
     cdp_engine, _china_trading_ttl,
 )
@@ -317,6 +319,66 @@ def handle_cls_hotplate(feed_url=None):
     return result
 
 
+def handle_cls_plate(code):
+    """CLS Plate Data (财联社板块详情) — info + stocks + industry.
+
+    Args:
+        code: CLS plate code, e.g. 'cls80484'
+
+    Returns dict with plate info, constituent stocks, and industry breakdown.
+    """
+    result = {'code': code}
+    _BASE_TTL, _STAGGER = _china_trading_ttl()
+
+    def _signed_url(base_url, extra=None):
+        params = {
+            'app': 'CailianpressWeb', 'os': 'web', 'sv': '8.7.9',
+            'secu_code': code,
+        }
+        if extra:
+            params.update(extra)
+        params['sign'] = cls_sign_params(params)
+        return f'{base_url}?{urlencode(params)}'
+
+    # 1) Plate info (summary, change, up/down counts)
+    try:
+        raw = json.loads(fetch_json(
+            _signed_url(_PLATE_INFO_URL), _PLATE_HEADERS,
+            ttl=_BASE_TTL))
+        if raw.get('code') == 200:
+            result['info'] = raw.get('data', {})
+        else:
+            result['info'] = {'error': raw.get('msg', 'unknown')}
+    except Exception as e:
+        result['info'] = {'error': str(e)}
+
+    # 2) Constituent stocks
+    try:
+        raw = json.loads(fetch_json(
+            _signed_url(_PLATE_STOCKS_URL), _PLATE_HEADERS,
+            ttl=_BASE_TTL + _STAGGER))
+        if raw.get('code') == 200:
+            result['stocks'] = raw.get('data', {}).get('stocks', [])
+        else:
+            result['stocks'] = []
+    except Exception as e:
+        result['stocks'] = []
+
+    # 3) Industry breakdown
+    try:
+        raw = json.loads(fetch_json(
+            _signed_url(_PLATE_INDUSTRY_URL), _PLATE_HEADERS,
+            ttl=_BASE_TTL + _STAGGER * 2))
+        if raw.get('code') == 200:
+            result['industry'] = raw.get('data', [])
+        else:
+            result['industry'] = []
+    except Exception as e:
+        result['industry'] = []
+
+    return result
+
+
 # ── Route table ─────────────────────────────────────────────────────────────
 
 ROUTES = {
@@ -402,6 +464,10 @@ def build_health_payload(base_url, check_sources=False):
     feeds.append({'name': 'CLS Hotplate (财联社板块)',
                   'path': '/cls/hotplate',
                   'url': base_url + '/cls/hotplate',
+                  'status': 'configured'})
+    feeds.append({'name': 'CLS Plate Detail (财联社板块详情)',
+                  'path': '/cls/plate?code=cls80484',
+                  'url': base_url + '/cls/plate?code=cls80484',
                   'status': 'configured'})
     feeds.append({'name': 'CLS Stock Timeline (个股分时图)',
                   'path': '/stock/timeline',
@@ -516,6 +582,14 @@ class RSSHandler(BaseHTTPRequestHandler):
             return
         if path == '/cls/hotplate':
             self._send_json(handle_cls_hotplate(), write_body=write_body)
+            return
+        if path == '/cls/plate':
+            params = parse_qs(parsed.query)
+            code = params.get('code', [''])[0]
+            if not code:
+                self._send_error('Missing ?code= parameter. Usage: /cls/plate?code=cls80484')
+                return
+            self._send_json(handle_cls_plate(code), write_body=write_body)
             return
         if path == '/ths/longhu':
             body = json.dumps(handle_ths_longhu(), ensure_ascii=False, indent=2)
@@ -667,6 +741,7 @@ class RSSHandler(BaseHTTPRequestHandler):
             ('/quotation/market', 'Quotation Market Data (行情)', '/quotation/market', True),
             ('/market/timeline', 'Market Index Timeline (指数分时图)', '/market/timeline', True),
             ('/cls/hotplate', 'Hotplate (板块)', '/cls/hotplate', False),
+            ('/cls/plate', 'Plate Detail (板块详情)', '/cls/plate?code=cls80484', False),
             ('/ths/longhu', 'THS Longhu (龙虎榜)', '/ths/longhu', False),
             ('/stock/data', 'Stock Detail (个股详情)', '/stock/data?code=sz300139', True),
             ('/stock/fundflow', 'Stock Fund Flow (资金流向)', '/stock/fundflow?code=sh600519', False),
@@ -852,6 +927,7 @@ def main():
     log.info(f'  http://localhost:{PORT}/quotation/market  — Quotation Market Data (JSON, needs Chrome CDP)')
     log.info(f'  http://localhost:{PORT}/market/timeline  — Market Index Timeline (JSON, needs Chrome CDP)')
     log.info(f'  http://localhost:{PORT}/cls/hotplate  — Hotplate Data (JSON, no CDP needed)')
+    log.info(f'  http://localhost:{PORT}/cls/plate?code=cls80484  — Plate Detail (JSON, no CDP needed)')
     log.info(f'  http://localhost:{PORT}/stock/data  — Stock Detail Data (JSON, needs Chrome CDP)')
     log.info(f'  http://localhost:{PORT}/stock/fundflow  — Stock Fund Flow (JSON, no CDP needed)')
     log.info(f'  http://localhost:{PORT}/stock/timeline  — Stock Timeline (JSON, no CDP needed)')

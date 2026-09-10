@@ -38,6 +38,12 @@ _F10_EXPECTED_KEYS = frozenset({
 _HOTPLATE_BASE_URL = 'https://x-quote.cls.cn/web_quote/plate/plate_list'
 _HOTPLATE_HEADERS = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.cls.cn/hotplate'}
 
+_PLATE_INFO_URL = 'https://x-quote.cls.cn/web_quote/plate/info'
+_PLATE_STOCKS_URL = 'https://x-quote.cls.cn/web_quote/plate/stocks'
+_PLATE_INDUSTRY_URL = 'https://x-quote.cls.cn/web_quote/plate/industry'
+_PLATE_HEADERS = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.cls.cn/plate'}
+_PLATE_CACHE_TTL = 120  # 2 min (intraday data, short TTL)
+
 _FUNDFLOW_BASE_URL = 'https://x-quote.cls.cn/quote/stock/fundflow'
 _FUNDFLOW_HEADERS = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.cls.cn/stock'}
 

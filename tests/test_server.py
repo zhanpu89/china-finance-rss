@@ -13,7 +13,7 @@ from utils import (
     parse_jin10_items,
     parse_wallstreetcn_items,
 )
-from server import ROUTES, handle_cls_hotplate, build_health_payload
+from server import ROUTES, handle_cls_hotplate, handle_cls_plate, build_health_payload
 from market_api import (
     _transform_margin, _transform_northbound,
     handle_margin, handle_northbound, handle_northbound_history,
@@ -153,6 +153,16 @@ class SourceParserTests(unittest.TestCase):
         self.assertIn('hot_plates', result)
         self.assertIsInstance(result['hot_plates'], list)
         self.assertEqual(len(result['hot_plates']), 6)
+
+    def test_handle_cls_plate_returns_info_stocks_industry(self):
+        result = handle_cls_plate('cls80484')
+        self.assertEqual(result['code'], 'cls80484')
+        self.assertIn('info', result)
+        self.assertIsInstance(result['info'], dict)
+        self.assertIn('stocks', result)
+        self.assertIsInstance(result['stocks'], list)
+        self.assertIn('industry', result)
+        self.assertIsInstance(result['industry'], list)
 
     def test_healthz_payload_includes_hotplate_endpoint(self):
         payload = build_health_payload("https://feeds.example.com")
