@@ -39,7 +39,7 @@ from config import (
     _FINANCE_EXPECTED_KEYS, _QUOTATION_EXPECTED_KEYS,
     _HOTPLATE_BASE_URL, _HOTPLATE_HEADERS,
     _PLATE_INFO_URL, _PLATE_STOCKS_URL, _PLATE_INDUSTRY_URL,
-    _PLATE_HEADERS, _PLATE_CACHE_TTL,
+    _PLATE_HEADERS,
     CDP_RESTART_INTERVAL, stock_nav_page_names,
     cdp_engine, _china_trading_ttl,
 )
