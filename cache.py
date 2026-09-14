@@ -17,6 +17,9 @@ CACHE_JITTER = 0.2
 # Sweep expired entries at most once per interval (avoid O(n) per request).
 _last_cache_sweep = 0.0
 _CACHE_SWEEP_INTERVAL = 60.0
+# P1-7: bound concurrent fall-through direct fetches so a leader failure
+# doesn't cause an unbounded stampede to upstream.
+_fallthrough_sem = threading.Semaphore(2)
 
 
 def _expires_at(ttl=None):
@@ -99,13 +102,40 @@ def fetch_json(url, headers=None, ttl=None):
             break
         event.wait(timeout=min(REQUEST_TIMEOUT, remaining))
 
-    # Give up on the single-flight election; fall through to a direct fetch
-    # so the caller still gets data (worst case: concurrent direct fetches).
-    req = Request(url, headers=headers or {})
-    with urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
-        data = resp.read().decode('utf-8')
-    _cache_put(cache, url, data, ttl=ttl)
-    return data
+    # P1-7: fall-through after election deadline — stagger retries with a
+    # random backoff and cap concurrency so a leader failure doesn't trigger
+    # an unbounded upstream stampede.
+    time.sleep(random.uniform(0, 0.5))
+    # Re-check cache: a concurrent direct fetch may have populated it.
+    with _cache_lock:
+        entry = cache.get(url)
+        if _cache_fresh(entry):
+            return entry['data']
+    # P1-11: bounded wait on fall-through semaphore. Two slow urlopen calls
+    # can hold both slots; an unbounded acquire would block the thread
+    # indefinitely, compounding toward the RSSHandler timeout and risking
+    # 503 cascades.  P1-14: raise instead of return None — fetch_json's
+    # contract is "return str on success, raise on failure".  Callers
+    # (server.py _serve_feed, stock_api fetch_*, utils warm_jin10) already
+    # have try/except that either degrade to error-RSS or swallow.
+    if not _fallthrough_sem.acquire(timeout=3):
+        raise RuntimeError(
+            "[fetch_json] fallthrough timeout: semaphore busy, "
+            "upstream likely slow/unreachable"
+        )
+    try:
+        # Re-check once more after acquiring the semaphore.
+        with _cache_lock:
+            entry = cache.get(url)
+            if _cache_fresh(entry):
+                return entry['data']
+        req = Request(url, headers=headers or {})
+        with urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
+            data = resp.read().decode('utf-8')
+        _cache_put(cache, url, data, ttl=ttl)
+        return data
+    finally:
+        _fallthrough_sem.release()
 
 
 # Feed cache

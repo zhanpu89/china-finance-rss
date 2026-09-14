@@ -122,12 +122,16 @@ def handle_ths_kuaixun(feed_url=None):
     data = json.loads(fetch_json(url, headers, ttl=_trading_tiers()['L3']))
     items = []
     for item in data.get('data', {}).get('list', []):
+        try:
+            ctime = int(item.get('ctime', 0))
+        except (ValueError, TypeError):
+            ctime = int(time.time())
         digest = item.get('digest') or item.get('remark', '')
         items.append({
             'title': item.get('title', ''),
             'link': item.get('url', '') or f"https://news.10jqka.com.cn/{item.get('seq', '')}",
             'description': digest or item.get('title', ''),
-            'pubDate': timestamp_to_rfc822(int(item.get('ctime', 0))),
+            'pubDate': timestamp_to_rfc822(ctime),
             'guid': f"ths_{item.get('seq', '')}"
         })
     return generate_rss('同花顺快讯', 'https://news.10jqka.com.cn/',
@@ -630,6 +634,9 @@ class RSSHandler(BaseHTTPRequestHandler):
             self._send_error('No valid stock codes provided.')
             return
         if len(stock_codes) > _MAX_BATCH_SIZE:
+            dropped = stock_codes[_MAX_BATCH_SIZE:]
+            log.warning(f'Batch truncated: {len(dropped)} codes dropped, '
+                        f'samples={dropped[:3]}')
             stock_codes = stock_codes[:_MAX_BATCH_SIZE]
         data = handler(stock_codes)
         body = json.dumps(data, ensure_ascii=False, indent=2)

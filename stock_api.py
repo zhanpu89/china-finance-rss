@@ -52,6 +52,10 @@ _prefetch_cursor_lock = threading.Lock()
 # Cap prefetch work per pass so a huge pool doesn't monopolize the CDP
 # navigation pages or burn a whole interval in one loop iteration.
 _PREFETCH_PASS_BUDGET = 60.0
+# P2-13: per-page locks for _evaluate_fetch_any to prevent concurrent
+# evaluate_fetch on the same CDP page (which can corrupt page state).
+_page_fetch_locks = {}
+_page_fetch_locks_lock = threading.Lock()
 
 
 def _prefetch_rotate(pool, lock, key):
@@ -112,13 +116,17 @@ def _fetch_one(fetcher, code, deadline):
         return fetcher(code)
 
 
-def _handle_cached_batch(codes, pool, pool_max, cache, cache_ts, lock,
-                         fetcher, deadline=None, after=None, concurrent=True):
-    """Shared batch handler for code-keyed REST/CDP endpoints.
+def _process_chunk(codes, pool, pool_max, cache, cache_ts, lock,
+                   fetcher, deadline=None, after=None, concurrent=True,
+                   fetch_origin='request'):
+    """Process a single chunk (≤ _MAX_BATCH_SIZE codes) through the full
+    pipeline: dedupe -> validate -> LRU pool touch -> cache lookup ->
+    fetch misses -> cache/result merge.
 
-    Steps: dedupe -> validate -> LRU pool touch -> freshness cache lookup ->
-    fetch of misses (parallel for REST/CDP-evaluate, serial for CDP-navigate) ->
-    cache/result merge. `after(data, code)` runs post-cache (e.g. sector).
+    Caller must pass a list already ≤ _MAX_BATCH_SIZE.
+    `fetch_origin` gates the write-back: 'request' (default) always writes
+    (latest wins); 'prefetch' only fills stale/missing entries.  See the
+    write-back comment below for the asymmetry rationale.
     """
     seen = set()
     codes = [c for c in codes if not (c in seen or seen.add(c))]
@@ -160,15 +168,54 @@ def _handle_cached_batch(codes, pool, pool_max, cache, cache_ts, lock,
         fetched = _run_batch(fetcher, missing, deadline, concurrent=concurrent)
         for code, data in fetched.items():
             if data is not None:
+                # P1-3/P1-15: write-back policy differs by fetch origin.
+                # - fetch_origin='request' (user/stream realtime path):
+                #   always write — the freshest data wins (last-writer-wins).
+                #   A background prefetch write must never block a request
+                #   thread from updating the cache with fresher data.
+                # - fetch_origin='prefetch': only fill — write when the
+                #   entry is missing or expired AT WRITE TIME (age >=
+                #   _MAX_CACHE_AGE), so a prefetch pass cannot displace a
+                #   fresh request-thread entry with cycle-old data.
                 with lock:
-                    cache[code] = data
-                    cache_ts[code] = time()
+                    now_write = time()
+                    existing_ts = cache_ts.get(code, 0)
+                    if fetch_origin == 'request' or now_write - existing_ts >= _MAX_CACHE_AGE:
+                        cache[code] = data
+                        cache_ts[code] = now_write
                 if after is not None:
                     try:
                         after(data, code)
                     except Exception:
-                        pass
+                        log.warning('[after] callback failed for %s', code)
             result[code] = data
+    return result
+
+
+def _handle_cached_batch(codes, pool, pool_max, cache, cache_ts, lock,
+                         fetcher, deadline=None, after=None, concurrent=True,
+                         fetch_origin='request'):
+    """Shared batch handler for code-keyed REST/CDP endpoints.
+
+    Splits codes into chunks of ≤ _MAX_BATCH_SIZE (50) so every code is
+    processed — none are silently dropped. Each chunk goes through the full
+    pipeline (dedupe -> validate -> LRU pool touch -> cache lookup ->
+    fetch -> cache/result merge). Results from all chunks are merged.
+    Server.py already truncates for the HTTP layer; this chunking ensures
+    stream.py (up to 2000 codes) and other internal callers lose no data.
+    `fetch_origin` distinguishes request-thread writes (always allowed) from
+    prefetch writes (fill-only); see _process_chunk.
+    """
+    if not codes:
+        return {}
+    result = {}
+    for i in range(0, len(codes), _MAX_BATCH_SIZE):
+        chunk = codes[i:i + _MAX_BATCH_SIZE]
+        chunk_result = _process_chunk(
+            chunk, pool, pool_max, cache, cache_ts, lock,
+            fetcher, deadline=deadline, after=after, concurrent=concurrent,
+            fetch_origin=fetch_origin)
+        result.update(chunk_result)
     return result
 
 
@@ -188,6 +235,14 @@ _fundflow_cache = {}
 _fundflow_cache_ts = {}
 _fundflow_pool = {}
 _fundflow_cache_lock = threading.Lock()
+
+
+def _get_page_fetch_lock(name):
+    """Return (or create) a threading.Lock for the given CDP page name."""
+    with _page_fetch_locks_lock:
+        if name not in _page_fetch_locks:
+            _page_fetch_locks[name] = threading.Lock()
+        return _page_fetch_locks[name]
 
 
 def _evaluate_fetch_any(url, timeout=8):
@@ -210,12 +265,16 @@ def _evaluate_fetch_any(url, timeout=8):
         budget = min(deadline - time(), 2)
         if budget < 0.5:
             break
-        try:
-            result = page.evaluate_fetch(url, timeout=budget)
-            if result and isinstance(result, dict):
-                return result
-        except Exception:
-            pass
+        # P2-13: serialize evaluate_fetch per page to prevent concurrent
+        # JS evaluation on the same shared CDP page.
+        lock = _get_page_fetch_lock(name)
+        with lock:
+            try:
+                result = page.evaluate_fetch(url, timeout=budget)
+                if result and isinstance(result, dict):
+                    return result
+            except Exception:
+                pass
     return None
 
 
@@ -265,6 +324,7 @@ def _fundflow_prefetch_loop():
     Round-robin across the pool with a per-pass time budget so a large pool
     is refreshed fairly and the loop never stalls a whole interval.
     """
+    fail_blacklist = {}  # P1-4: code -> consecutive fail count
     while True:
         try:
             tiers = _trading_tiers()
@@ -278,12 +338,25 @@ def _fundflow_prefetch_loop():
             for code in codes:
                 if time() >= pass_deadline:
                     break
+                # P1-4: skip recently failed codes so a broken source doesn't
+                # block the cursor; reset after 3 consecutive passes.
+                if fail_blacklist.get(code, 0) >= 3:
+                    del fail_blacklist[code]
+                    continue
+                now_ts = time()
                 data = _fundflow_direct_fetch(code)
                 if data:
                     with _fundflow_cache_lock:
-                        _fundflow_cache[code] = data
-                        _fundflow_cache_ts[code] = time()
-                processed += 1
+                        # P1-3 guard, newer-wins: skip overwrite when the cache
+                        # entry is fresher than this fetch's start.
+                        existing_ts = _fundflow_cache_ts.get(code, 0)
+                        if existing_ts <= now_ts:
+                            _fundflow_cache[code] = data
+                            _fundflow_cache_ts[code] = time()
+                    fail_blacklist.pop(code, None)
+                    processed += 1
+                else:
+                    fail_blacklist[code] = fail_blacklist.get(code, 0) + 1
             _prefetch_advance('fundflow', processed, len(codes))
         except Exception as e:
             log.error(f'[fundflow] prefetch error: {e}')
@@ -343,6 +416,7 @@ def _timeline_prefetch_loop():
     Round-robin across the pool with a per-pass time budget (see
     _fundflow_prefetch_loop for rationale).
     """
+    fail_blacklist = {}  # P1-4: code -> consecutive fail count
     while True:
         try:
             tiers = _trading_tiers()
@@ -356,12 +430,24 @@ def _timeline_prefetch_loop():
             for code in codes:
                 if time() >= pass_deadline:
                     break
+                # P1-4: skip recently failed codes (see fundflow loop).
+                if fail_blacklist.get(code, 0) >= 3:
+                    del fail_blacklist[code]
+                    continue
+                now_ts = time()
                 data = _timeline_direct_fetch(code)
                 if data:
                     with _timeline_cache_lock:
-                        _timeline_cache[code] = data
-                        _timeline_cache_ts[code] = time()
-                processed += 1
+                        # P1-3 guard, newer-wins: skip overwrite when the cache
+                        # entry is fresher than this fetch's start.
+                        existing_ts = _timeline_cache_ts.get(code, 0)
+                        if existing_ts <= now_ts:
+                            _timeline_cache[code] = data
+                            _timeline_cache_ts[code] = time()
+                    fail_blacklist.pop(code, None)
+                    processed += 1
+                else:
+                    fail_blacklist[code] = fail_blacklist.get(code, 0) + 1
             _prefetch_advance('timeline', processed, len(codes))
         except Exception as e:
             log.error(f'[timeline] prefetch error: {e}')
@@ -458,6 +544,7 @@ def _f10_prefetch_loop():
     is refreshed fairly and CDP nav pages are not monopolized (see
     _fundflow_prefetch_loop for rationale).
     """
+    fail_blacklist = {}  # P1-4: code -> consecutive fail count
     while True:
         try:
             tiers = _trading_tiers()
@@ -471,13 +558,25 @@ def _f10_prefetch_loop():
             for code in codes:
                 if time() >= pass_deadline:
                     break
+                # P1-4: skip recently failed codes (see fundflow loop).
+                if fail_blacklist.get(code, 0) >= 3:
+                    del fail_blacklist[code]
+                    continue
+                now_ts = time()
                 data = fetch_cls_f10(code, deadline=time() + 4)
                 if data:
                     with _f10_cache_lock:
-                        _f10_cache[code] = data
-                        _f10_cache_ts[code] = time()
+                        # P1-3 guard, newer-wins: skip overwrite when the cache
+                        # entry is fresher than this fetch's start.
+                        existing_ts = _f10_cache_ts.get(code, 0)
+                        if existing_ts <= now_ts:
+                            _f10_cache[code] = data
+                            _f10_cache_ts[code] = time()
                     _populate_sector_from_f10(data, code)
-                processed += 1
+                    fail_blacklist.pop(code, None)
+                    processed += 1
+                else:
+                    fail_blacklist[code] = fail_blacklist.get(code, 0) + 1
             _prefetch_advance('f10', processed, len(codes))
         except Exception as e:
             log.error(f'[f10] prefetch error: {e}')
@@ -648,6 +747,7 @@ def _announcement_prefetch_loop():
     Round-robin across the pool with a per-pass time budget (see
     _fundflow_prefetch_loop for rationale).
     """
+    fail_blacklist = {}  # P1-4: code -> consecutive fail count
     while True:
         try:
             tiers = _trading_tiers()
@@ -661,12 +761,24 @@ def _announcement_prefetch_loop():
             for code in codes:
                 if time() >= pass_deadline:
                     break
+                # P1-4: skip recently failed codes (see fundflow loop).
+                if fail_blacklist.get(code, 0) >= 3:
+                    del fail_blacklist[code]
+                    continue
+                now_ts = time()
                 data = _announcement_direct_fetch(code)
                 if data:
                     with _announcement_cache_lock:
-                        _announcement_cache[code] = data
-                        _announcement_cache_ts[code] = time()
-                processed += 1
+                        # P1-3 guard, newer-wins: skip overwrite when the cache
+                        # entry is fresher than this fetch's start.
+                        existing_ts = _announcement_cache_ts.get(code, 0)
+                        if existing_ts <= now_ts:
+                            _announcement_cache[code] = data
+                            _announcement_cache_ts[code] = time()
+                    fail_blacklist.pop(code, None)
+                    processed += 1
+                else:
+                    fail_blacklist[code] = fail_blacklist.get(code, 0) + 1
             _prefetch_advance('announcement', processed, len(codes))
         except Exception as e:
             log.error(f'[announcement] prefetch error: {e}')

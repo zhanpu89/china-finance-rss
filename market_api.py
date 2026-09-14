@@ -68,7 +68,7 @@ def _transform_margin(data):
             'zb': item.get('zb', 0),                  # 占比(小数)
         }
 
-    n = len(items)
+    n = min(len(dates), len(items))
     return {
         'latest': fmt(n - 1) if n > 0 else None,
         'recent': [fmt(i) for i in range(max(0, n - 30), n)],

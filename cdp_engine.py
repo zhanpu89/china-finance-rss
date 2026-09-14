@@ -335,7 +335,15 @@ class CDPPage:
 
     # Safety cap for _last_data — prevents unbounded growth if an
     # unrecognised URL with dynamic parameters enters remap_keys.
+    # Also reused as the cap for self.cache (same growth risk).
     _LAST_DATA_MAX_KEYS = 50
+
+    # Cap on orphaned-target bookkeeping (_created_targets) — prevents an
+    # unbounded set if close failures persist across many reconnect storms.
+    _MAX_TRACKED_TARGETS = 32
+    _CLOSE_BUDGET = 3       # max targets to close per _close_target call
+    _CLOSE_THROTTLE = 60    # seconds before retrying a failed close
+    _CLOSE_MAX_FAILURES = 3 # consecutive failures before abandoning a target
 
     def __init__(self, name, target_url, cdp_host='localhost', cdp_port=9222, heartbeat=True):
         self.name = name
@@ -350,6 +358,11 @@ class CDPPage:
         self._running = True
         self._ws = None
         self._target_id = None
+        # All target ids this page ever created via _create_target — used by
+        # _close_target's sweep to reclaim tabs orphaned when a later
+        # _connect() overwrote _target_id (see _close_target docstring).
+        self._created_targets = list()  # insertion-ordered; oldest first
+        self._close_failures = {}   # {target_id: (last_attempt_ts, fail_count)} — throttle+count failed closes
         self._msg_id = 0
         self._key_last_seen = {}  # key -> timestamp of last refresh
         self._api_urls = {}       # remapped_key -> original URL for re-fetch
@@ -361,6 +374,7 @@ class CDPPage:
         # where a concurrent request navigates the shared page to a different
         # code between the navigation and the data read.
         self._navigate_lock = threading.RLock()
+        self._reconnect_lock = threading.Lock()  # serializes _reconnect / _ensure_ws
         self._connect()
         if heartbeat:
             threading.Thread(target=self._heartbeat, daemon=True).start()
@@ -377,13 +391,16 @@ class CDPPage:
         """Create a new browser tab via CDP Target.createTarget."""
         import websocket
         tabs = json.loads(
-            urllib.request.urlopen(f"{self._http_url()}/json", timeout=10).read()
+            urllib.request.urlopen(f"{self._http_url()}/json", timeout=5).read()
         )
         if not tabs:
             return None, None
         browser_ws = tabs[0]['webSocketDebuggerUrl']
         browser_ws = browser_ws.replace('127.0.0.1', self.cdp_host).replace('localhost', self.cdp_host)
-        ws = websocket.create_connection(browser_ws, timeout=30)
+        # 5s cap on every CDP window here: bounds the _reconnect_lock hold when
+        # Chrome is half-dead (healthy responses arrive well under 5s).
+        ws = websocket.create_connection(browser_ws, timeout=5)
+        ws.settimeout(5)  # covers the bare recv() below (default would be 30s)
         ws.send(json.dumps({
             'id': 1, 'method': 'Target.createTarget',
             'params': {'url': 'about:blank'}
@@ -403,7 +420,26 @@ class CDPPage:
         if not target_id:
             raise RuntimeError(f"Failed to create CDP target for {self.name}")
 
-        ws = websocket.create_connection(ws_url, timeout=30)
+        # Set _target_id early so _close_target() can clean up on any failure.
+        with self._ws_lock:
+            self._target_id = target_id
+            evicted = None
+            if len(self._created_targets) >= self._MAX_TRACKED_TARGETS:
+                # Evict oldest entry; never evict the current active target
+                for i, old_id in enumerate(self._created_targets):
+                    if old_id != target_id:
+                        evicted = self._created_targets.pop(i)
+                        break
+            self._created_targets.append(target_id)
+        if evicted and not self._close_one_target(evicted):
+            # Best-effort close so an evicted-but-open tab doesn't leak forever.
+            log.warning(f'[CDP:{self.name}] evicted target {evicted} close failed; '
+                        f'dropped from tracking (tab may remain in Chrome)')
+        try:
+            ws = websocket.create_connection(ws_url, timeout=5)
+        except Exception:
+            self._close_target()  # close orphaned tab
+            raise
         try:
             self._send_on(ws, {'id': self._next_id(), 'method': 'Page.enable'})
             self._send_recv_on(ws, {'id': self._next_id(), 'method': 'Page.addScriptToEvaluateOnNewDocument',
@@ -420,20 +456,20 @@ class CDPPage:
                     break
         except Exception:
             ws.close()
+            self._close_target()  # close tab created for this failed connection
             raise
 
-        self._target_id = target_id
         self._ws = ws
         log.info(f"  \u2713 CDP page '{self.name}' \u2192 {self.target_url}")
 
     def _send_on(self, ws, msg):
         ws.send(json.dumps(msg))
 
-    def _recv_on(self, ws, timeout=30):
+    def _recv_on(self, ws, timeout=5):
         ws.settimeout(timeout)
         return json.loads(ws.recv())
 
-    def _send_recv_on(self, ws, msg, timeout=30):
+    def _send_recv_on(self, ws, msg, timeout=5):
         """Send on a given WS and wait for the matching response."""
         self._send_on(ws, msg)
         msg_id = msg['id']
@@ -453,11 +489,11 @@ class CDPPage:
     def _send(self, msg):
         self._ws.send(json.dumps(msg))
 
-    def _recv(self, timeout=30):
+    def _recv(self, timeout=5):
         self._ws.settimeout(timeout)
         return json.loads(self._ws.recv())
 
-    def _send_recv(self, msg, timeout=30):
+    def _send_recv(self, msg, timeout=5):
         """Send a command and wait for the matching response (skipping events)."""
         return self._send_recv_on(self._ws, msg, timeout=timeout)
 
@@ -556,6 +592,18 @@ class CDPPage:
                 if mapped:
                     self._key_last_seen[mapped] = now
                     self._api_urls[mapped] = url_key
+                else:
+                    # Unmapped URL (captured but not remappable, e.g. a
+                    # '/index/ann' vs 'quote/index/ann' mismatch): track it so
+                    # the TTL sweep below expires it from self.cache instead of
+                    # letting it live there forever.
+                    self._key_last_seen[url_key] = now
+            if len(self.cache) > self._LAST_DATA_MAX_KEYS:
+                # Shared cap with _last_data: evict the stalest key so
+                # self.cache can't grow unbounded either.
+                oldest = min(self.cache, key=lambda k: self._key_last_seen.get(k, 0))
+                del self.cache[oldest]
+                self._key_last_seen.pop(oldest, None)
         if ws_data:
             self.cache['__ws__'] = ws_data
             self._last_data['__ws__'] = ws_data
@@ -639,67 +687,161 @@ class CDPPage:
                 empty_count = 0
 
     def _close_target(self):
-        """Close the old browser tab via CDP Target.closeTarget."""
-        tid = self._target_id
-        self._target_id = None
-        if not tid:
-            return
+        """Close the tabs this page owns (idempotent).
+
+        `_target_id` is only cleared after a CONFIRMED close: if closing fails
+        (Chrome half-dead during OOM storms), the id is kept so later reconnect
+        paths (_ensure_ws / _reconnect) retry the cleanup instead of silently
+        leaking the tab. Every target id this page ever created is also swept,
+        so tabs orphaned when a later _connect() overwrote _target_id still get
+        reclaimed.
+
+        Budget-capped: at most _CLOSE_BUDGET candidates per call (bounds the
+        _reconnect_lock hold); failed closes are throttled _CLOSE_THROTTLEs to
+        avoid re-hitting the same failing batch on every storm pass.
+        """
+        now = time.time()
+        with self._ws_lock:
+            tid = self._target_id
+            leftovers = [t for t in self._created_targets if t != tid]
+        candidates = ([tid] if tid else []) + leftovers
+        # Skip targets that failed close within the throttle window
+        candidates = [t for t in candidates
+                      if now - self._close_failures.get(t, (0, 0))[0] >= self._CLOSE_THROTTLE]
+        candidates = candidates[:self._CLOSE_BUDGET]
+        ok = True
+        for t in candidates:
+            if self._close_one_target(t):
+                with self._ws_lock:
+                    try:
+                        self._created_targets.remove(t)
+                    except ValueError:
+                        pass
+                self._close_failures.pop(t, None)
+            else:
+                ok = False
+                _, fail_count = self._close_failures.get(t, (0, 0))
+                fail_count += 1
+                if fail_count >= self._CLOSE_MAX_FAILURES:
+                    # Give up on a persistently-failing target: drop it from
+                    # ledger and budget; warn the tab may remain in Chrome.
+                    log.warning(f'[CDP:{self.name}] target {t} close failed {fail_count}x, '
+                                f'dropped from tracking (tab may remain in Chrome)')
+                    self._close_failures.pop(t, None)
+                    with self._ws_lock:
+                        try:
+                            self._created_targets.remove(t)
+                        except ValueError:
+                            pass
+                else:
+                    self._close_failures[t] = (now, fail_count)  # throttle + count retries
+        if ok and tid and tid in candidates:
+            with self._ws_lock:
+                if self._target_id == tid:
+                    self._target_id = None
+        return ok
+
+    def _close_one_target(self, tid):
+        """Close a single CDP target; True if confirmed gone (or already gone).
+
+        Primary path: browser WS Target.closeTarget. If that fails (Chrome
+        half-dead during OOM storms), fall back to the HTTP /json/close
+        endpoint — a different transport that works even when the browser WS
+        channel is jammed. "Target not found" counts as success: the tab is
+        already gone, which is all we care about.
+        """
         try:
             info = json.loads(
-                urllib.request.urlopen(f"{self._http_url()}/json/version", timeout=5).read()
+                urllib.request.urlopen(f"{self._http_url()}/json/version", timeout=2).read()
             )
             browser_ws_url = info.get('webSocketDebuggerUrl', '')
-            if browser_ws_url:
-                browser_ws_url = browser_ws_url.replace('127.0.0.1', self.cdp_host).replace('localhost', self.cdp_host)
-                import websocket
-                ws = websocket.create_connection(browser_ws_url, timeout=10)
+            if not browser_ws_url:
+                raise RuntimeError('no webSocketDebuggerUrl in /json/version')
+            browser_ws_url = browser_ws_url.replace('127.0.0.1', self.cdp_host)\
+                                           .replace('localhost', self.cdp_host)
+            import websocket
+            ws = websocket.create_connection(browser_ws_url, timeout=2)
+            try:
                 ws.send(json.dumps({
                     'id': 1, 'method': 'Target.closeTarget',
                     'params': {'targetId': tid}
                 }))
-                ws.close()
-        except:
-            pass
+                deadline = time.time() + 2
+                while time.time() < deadline:
+                    ws.settimeout(deadline - time.time())
+                    resp = json.loads(ws.recv())
+                    if resp.get('id') == 1:
+                        err = resp.get('error')
+                        if not err or 'No target with given id' in str(err):
+                            return True  # confirmed closed / already gone
+                        break  # hard CDP error — fall through to HTTP fallback
+            finally:
+                try:
+                    ws.close()
+                except Exception:
+                    pass
+        except Exception as e:
+            log.warning(f'[CDP:{self.name}] closeTarget {tid} via browser WS failed: {e}')
+        # Fallback: HTTP /json/close — different transport, works when WS jammed.
+        try:
+            urllib.request.urlopen(f"{self._http_url()}/json/close/{tid}", timeout=2).read()
+            return True
+        except Exception as e:
+            body = ''
+            if hasattr(e, 'read'):
+                try:
+                    body = e.read().decode(errors='replace').lower()
+                except Exception:
+                    pass
+            if 'no such target' in body:
+                return True  # already gone
+            log.warning(f'[CDP:{self.name}] closeTarget {tid} via /json/close failed: {e}')
+            return False
 
     def _reconnect(self):
-        """Close old WS + tab, try reconnecting. If Chrome died, restart it."""
-        try:
-            if self._ws:
-                self._ws.close()
-        except:
-            pass
-        self._close_target()
-        with self._lock:
-            self.cache.clear()
-            self._key_last_seen.clear()
-            self._api_urls.clear()
-            # Stale WebSocket data from old session — discard on reconnect
-            self._last_data.pop('__ws__', None)
-            self._last_data_ts.pop('__ws__', None)
-        for attempt in range(3):
+        """Close old WS + tab, try reconnecting. If Chrome died, restart it.
+
+        Serialized by _reconnect_lock so heartbeat + navigation threads
+        never race on self._ws / self._target_id.
+        """
+        with self._reconnect_lock:
             try:
-                self._connect()
-                return
-            except Exception as e:
-                if attempt < 2:
-                    time.sleep(2)
-        # All 3 attempts failed — Chrome might have crashed. ensure_chrome()
-        # enforces a throttle window; retry until it passes instead of
-        # giving up (avoids permanent CDP outage on 2c2g OOM crash loops).
-        log.error(f"[CDP:{self.name}] 3 reconnect attempts failed, trying to restart Chrome...")
-        deadline = time.time() + _RECONNECT_RETRY_WINDOW
-        while time.time() < deadline:
-            if ensure_chrome():
-                for attempt in range(3):
-                    try:
-                        self._connect()
-                        return
-                    except Exception as e:
-                        if attempt < 2:
-                            time.sleep(2)
-            # ensure_chrome() was throttled or Chrome still starting — wait
-            time.sleep(2)
-        log.error(f"[CDP:{self.name}] reconnect failed after Chrome restart")
+                if self._ws:
+                    self._ws.close()
+            except:
+                pass
+            self._close_target()
+            with self._lock:
+                self.cache.clear()
+                self._key_last_seen.clear()
+                self._api_urls.clear()
+                # Stale WebSocket data from old session — discard on reconnect
+                self._last_data.pop('__ws__', None)
+                self._last_data_ts.pop('__ws__', None)
+            for attempt in range(3):
+                try:
+                    self._connect()
+                    return
+                except Exception as e:
+                    if attempt < 2:
+                        time.sleep(2)
+            # All 3 attempts failed — Chrome might have crashed. ensure_chrome()
+            # enforces a throttle window; retry until it passes instead of
+            # giving up (avoids permanent CDP outage on 2c2g OOM crash loops).
+            log.error(f"[CDP:{self.name}] 3 reconnect attempts failed, trying to restart Chrome...")
+            deadline = time.time() + _RECONNECT_RETRY_WINDOW
+            while self._running and time.time() < deadline:
+                if ensure_chrome():
+                    for attempt in range(3):
+                        try:
+                            self._connect()
+                            return
+                        except Exception as e:
+                            if attempt < 2:
+                                time.sleep(2)
+                # ensure_chrome() was throttled or Chrome still starting — wait
+                time.sleep(2)
+            log.error(f"[CDP:{self.name}] reconnect failed after Chrome restart")
 
     def get_data(self):
         """Return merged data — latest from live cache, gaps filled by _last_data.
@@ -720,7 +862,10 @@ class CDPPage:
     def refresh(self):
         """Force an immediate data pull. Returns True on success."""
         try:
-            raw = self._evaluate('JSON.stringify({api:window.__cdp_api,refetch:window.__cdp_refetch,ws:window.__cdp_ws})', timeout=10)
+            raw = self._evaluate(
+                'var d=JSON.stringify({api:window.__cdp_api,refetch:window.__cdp_refetch,ws:window.__cdp_ws});'
+                'window.__cdp_api={};window.__cdp_refetch={};window.__cdp_ws=[];d',
+                timeout=10)
             if raw:
                 data = json.loads(raw)
                 api_data = data.get('api', {}) or {}
@@ -735,45 +880,51 @@ class CDPPage:
         return False
 
     def _ensure_ws(self):
-        """Reconnect WebSocket if disconnected (stock page, no heartbeat)."""
-        if self._ws:
-            try:
-                if self._evaluate('1', timeout=3):
-                    return True
-            except Exception:
-                pass
-        if self._target_id:
-            self._close_target()
-        try:
-            self._ws.close()
-        except Exception:
-            pass
-        self._ws = None
-        # Try immediate reconnects; if they fail, ensure Chrome is up
-        # (waiting out the restart throttle) before retrying.
-        for attempt in range(3):
-            try:
-                self._connect()
-                return True
-            except Exception:
-                if attempt == 0:
-                    ensure_chrome()  # restart Chrome if down
-                time.sleep(2)
-        deadline = time.time() + _RECONNECT_RETRY_WINDOW
-        while time.time() < deadline:
-            if ensure_chrome():
-                for attempt in range(3):
-                    try:
-                        self._connect()
+        """Reconnect WebSocket if disconnected (stock page, no heartbeat).
+
+        Serialized by _reconnect_lock so it doesn't race with _reconnect().
+        """
+        with self._reconnect_lock:
+            if self._ws:
+                try:
+                    if self._evaluate('1', timeout=3):
                         return True
-                    except Exception:
-                        if attempt < 2:
-                            time.sleep(2)
-            time.sleep(2)
-        return False
+                except Exception:
+                    pass
+            if self._target_id:
+                self._close_target()
+            if self._ws:
+                try:
+                    self._ws.close()
+                except Exception:
+                    pass
+            self._ws = None
+            # Try immediate reconnects; if they fail, ensure Chrome is up
+            # (waiting out the restart throttle) before retrying.
+            for attempt in range(3):
+                try:
+                    self._connect()
+                    return True
+                except Exception:
+                    if attempt == 0:
+                        ensure_chrome()  # restart Chrome if down
+                    time.sleep(2)
+            deadline = time.time() + _RECONNECT_RETRY_WINDOW
+            while self._running and time.time() < deadline:
+                if ensure_chrome():
+                    for attempt in range(3):
+                        try:
+                            self._connect()
+                            return True
+                        except Exception:
+                            if attempt < 2:
+                                time.sleep(2)
+                time.sleep(2)
+            return False
 
     _nav_restart_counter = 0
     _MAX_PAGE_NAV_BEFORE_RECONNECT = 30
+    _restart_counter_lock = threading.Lock()  # class-level: protects shared counter across instances
 
     def _maybe_reconnect(self):
         """Restart Chrome entirely after threshold navigations to free memory.
@@ -781,8 +932,11 @@ class CDPPage:
         Uses centralized full_chrome_restart() so only ONE thread kills/starts
         Chrome. Other pages' ensure_chrome() calls block on _chrome_restart_lock
         and find the fresh Chrome already running — no duplicate instances.
+
+        Uses class-level _restart_counter_lock to protect the shared counter
+        (not an instance lock, since _nav_restart_counter is a class variable).
         """
-        with self._ws_lock:  # serialize counter increments across threads
+        with CDPPage._restart_counter_lock:
             CDPPage._nav_restart_counter += 1
             if CDPPage._nav_restart_counter >= self._MAX_PAGE_NAV_BEFORE_RECONNECT:
                 CDPPage._nav_restart_counter = 0

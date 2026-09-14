@@ -206,6 +206,58 @@ class HttpIntegrationTests(unittest.TestCase):
         conn.close()
 
 
+class BatchShardingTests(unittest.TestCase):
+    """P1-6 regression: _handle_cached_batch must shard, not truncate.
+
+    stream._refresh_pool hands the whole deduped pool (up to
+    MAX_DEDUP_CODES) to the quote handler. If that handler silently
+    dropped codes beyond _MAX_BATCH_SIZE, frames would lose stocks.
+    This test drives the REAL handler (handle_cls_basic_infos — the
+    exact one bound to _FIELD_HANDLERS['quote']) with 60 codes and
+    asserts every code comes back.
+    """
+
+    def test_60_codes_all_fetched_and_returned_beyond_max_batch(self):
+        import stock_api as stock_api_mod
+
+        codes = [f'sh{990000 + i}' for i in range(60)]
+        self.assertGreater(len(codes), config._MAX_BATCH_SIZE)
+
+        fake_data = {c: {'name': f'股{c}'} for c in codes}
+        with stock_api_mod._basic_info_cache_lock:
+            saved = (dict(stock_api_mod._basic_info_cache),
+                     dict(stock_api_mod._basic_info_cache_ts),
+                     dict(stock_api_mod._basic_info_pool))
+        try:
+            seen = set()
+
+            def _fake_fetch(code):
+                seen.add(code)
+                return fake_data.get(code)
+
+            with patch.object(stock_api_mod, 'fetch_cls_basic_info',
+                              side_effect=_fake_fetch):
+                result = stock_api_mod.handle_cls_basic_infos(codes)
+
+            # (a) full coverage: every code key present — sharded, not truncated
+            self.assertEqual(set(result), set(codes))
+            self.assertEqual(len(result), len(codes))
+            # sharding proof: the fetcher was actually asked for all 60 codes
+            # across both chunks, not just the merge surviving
+            self.assertEqual(seen, set(codes))
+            # (b) every code got (fake) data back
+            for c in codes:
+                self.assertEqual(result[c], fake_data[c])
+        finally:
+            with stock_api_mod._basic_info_cache_lock:
+                stock_api_mod._basic_info_cache.clear()
+                stock_api_mod._basic_info_cache_ts.clear()
+                stock_api_mod._basic_info_pool.clear()
+                stock_api_mod._basic_info_cache.update(saved[0])
+                stock_api_mod._basic_info_cache_ts.update(saved[1])
+                stock_api_mod._basic_info_pool.update(saved[2])
+
+
 def _json(resp):
     import json
     return json.loads(resp.read().decode('utf-8'))
