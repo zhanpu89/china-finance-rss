@@ -933,6 +933,9 @@ def main():
     threading.Thread(target=_timeline_prefetch_loop, daemon=True).start()
     threading.Thread(target=_f10_prefetch_loop, daemon=True).start()
     threading.Thread(target=_announcement_prefetch_loop, daemon=True).start()
+    from stream import push_loop, run_stream_server
+    threading.Thread(target=push_loop, daemon=True).start()
+    threading.Thread(target=run_stream_server, daemon=True).start()
 
     log.info(f'China Finance RSS Bridge running on http://localhost:{PORT}')
     log.info(f'Cache TTL: {CACHE_TTL}s | Timeout: {REQUEST_TIMEOUT}s')
@@ -955,6 +958,11 @@ def main():
     log.info(f'  http://localhost:{PORT}/market/margin  — Market Margin (融资融券, JSON, no CDP needed)')
     log.info(f'  http://localhost:{PORT}/market/northbound  — Market Northbound (北向资金, JSON, no CDP needed)')
     log.info(f'  http://localhost:{PORT}/market/northbound/history  — Market Northbound History (北向资金历史, JSON, no CDP needed)')
+    from config import STREAM_PORT
+    log.info(f'\nStream push (SSE, port {STREAM_PORT}):')
+    log.info(f'  POST   http://localhost:{STREAM_PORT}/stream/subscriptions  — create subscription group')
+    log.info(f'  PATCH  http://localhost:{STREAM_PORT}/stream/subscriptions/<sid> — add/remove codes')
+    log.info(f'  GET    http://localhost:{STREAM_PORT}/stream/quote/<sid>    — SSE stream (event: quote)')
     log.info(f'  http://localhost:{PORT}/opml.xml  — OPML subscription list')
     log.info(f'  http://localhost:{PORT}/healthz?check=1  — Source health check')
     log.info(f'Visit http://localhost:{PORT}/ for the web index.\n')

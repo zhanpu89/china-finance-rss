@@ -6,11 +6,18 @@ from datetime import datetime, timezone, timedelta
 
 # Env-based configuration
 PORT = int(os.getenv('PORT', '8053'))
+STREAM_PORT = int(os.getenv('STREAM_PORT', '8054'))
 CDP_URL = os.getenv('CDP_URL', 'http://localhost:9222')
 CACHE_TTL = int(os.getenv('CACHE_TTL', '300'))
 REQUEST_TIMEOUT = int(os.getenv('REQUEST_TIMEOUT', '10'))
 PUBLIC_BASE_URL = os.getenv('PUBLIC_BASE_URL', '').rstrip('/')
 MAX_WORKERS = int(os.getenv('MAX_WORKERS', '20'))
+
+# Stream push (SSE) limits — 2C2G budget: 100 conns, 2000 dedup codes
+MAX_STREAM_CONNS = int(os.getenv('MAX_STREAM_CONNS', '100'))
+MAX_CODES_PER_SUB = int(os.getenv('MAX_CODES_PER_SUB', '200'))
+MAX_DEDUP_CODES = int(os.getenv('MAX_DEDUP_CODES', '2000'))
+STREAM_PING_INTERVAL = 20
 
 # Stock code validation
 VALID_STOCK_CODE = re.compile(r'^(sh|sz|bj)\d{6}$|^\d{6}\.(BJ|SH|SZ)$', re.IGNORECASE)
