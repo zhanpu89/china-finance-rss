@@ -28,7 +28,7 @@ from config import (
     _F10_POOL_REFRESH, _F10_MAX_POOL,
     _BASIC_INFO_MAX_POOL,
     _ANNOUNCEMENT_POOL_REFRESH, _ANNOUNCEMENT_MAX_POOL,
-    _china_trading_ttl, stock_nav_page_names,
+    _trading_tiers, stock_nav_page_names,
 )
 from cache import fetch_json, _fill_missing
 from utils import cls_sign_params
@@ -223,7 +223,7 @@ def fetch_cls_fundflow(stock_code):
     """Fetch fund flow — REST first, CDP evaluate_fetch fallback."""
     url = f'{_FUNDFLOW_BASE_URL}?secu_code={stock_code}'
     try:
-        raw = json.loads(fetch_json(url, _FUNDFLOW_HEADERS, ttl=15))
+        raw = json.loads(fetch_json(url, _FUNDFLOW_HEADERS, ttl=_trading_tiers()['L1']))
         if raw.get('code') == 200:
             return raw.get('data')
     except Exception:
@@ -267,8 +267,8 @@ def _fundflow_prefetch_loop():
     """
     while True:
         try:
-            ttl, _ = _china_trading_ttl()
-            interval = max(_FUNDFLOW_POOL_REFRESH, ttl)
+            tiers = _trading_tiers()
+            interval = max(_FUNDFLOW_POOL_REFRESH, tiers['L1'])
             sleep(interval)
             codes = _prefetch_rotate(_fundflow_pool, _fundflow_cache_lock, 'fundflow')
             if not codes:
@@ -301,7 +301,7 @@ def fetch_cls_timeline(stock_code):
     """Fetch stock timeline — REST first, CDP evaluate_fetch fallback."""
     url = f'{_TIMELINE_BASE_URL}?secu_code={stock_code}'
     try:
-        raw = json.loads(fetch_json(url, _TIMELINE_HEADERS, ttl=15))
+        raw = json.loads(fetch_json(url, _TIMELINE_HEADERS, ttl=_trading_tiers()['L1']))
         if raw.get('code') == 200:
             return raw.get('data')
     except Exception:
@@ -345,8 +345,8 @@ def _timeline_prefetch_loop():
     """
     while True:
         try:
-            ttl, _ = _china_trading_ttl()
-            interval = max(_TIMELINE_POOL_REFRESH, ttl)
+            tiers = _trading_tiers()
+            interval = max(_TIMELINE_POOL_REFRESH, tiers['L1'])
             sleep(interval)
             codes = _prefetch_rotate(_timeline_pool, _timeline_cache_lock, 'timeline')
             if not codes:
@@ -460,8 +460,8 @@ def _f10_prefetch_loop():
     """
     while True:
         try:
-            ttl, _ = _china_trading_ttl()
-            interval = max(_F10_POOL_REFRESH, ttl)
+            tiers = _trading_tiers()
+            interval = max(_F10_POOL_REFRESH, tiers['L4'])
             sleep(interval)
             codes = _prefetch_rotate(_f10_pool, _f10_cache_lock, 'f10')
             if not codes:
@@ -650,8 +650,8 @@ def _announcement_prefetch_loop():
     """
     while True:
         try:
-            ttl, _ = _china_trading_ttl()
-            interval = max(_ANNOUNCEMENT_POOL_REFRESH, ttl)
+            tiers = _trading_tiers()
+            interval = max(_ANNOUNCEMENT_POOL_REFRESH, tiers['L4'])
             sleep(interval)
             codes = _prefetch_rotate(_announcement_pool, _announcement_cache_lock, 'announcement')
             if not codes:

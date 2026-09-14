@@ -126,19 +126,34 @@ cdp_engine = None
 jin10_public_headers = None
 
 
-def _china_trading_ttl():
-    """Return (base_ttl, stagger_step) for China A-share trading status.
-
-    Trading hours (Mon-Fri, UTC+8): 09:30-11:30, 13:00-15:00.
-    During trading → short TTL (30s). Outside → normal TTL (300s).
-    """
-    now_utc = datetime.now(timezone.utc)
-    now_cst = now_utc + timedelta(hours=8)
+def _is_trading_hours():
+    """Return True if current CST time is within China A-share trading hours."""
+    now_cst = datetime.now(timezone.utc) + timedelta(hours=8)
     if now_cst.weekday() >= 5:
-        return (300, 90)
+        return False
     h, m = now_cst.hour, now_cst.minute
     in_morning = (h == 9 and m >= 30) or (10 <= h <= 10) or (h == 11 and m <= 30)
     in_afternoon = (13 <= h <= 14)
-    if in_morning or in_afternoon:
-        return (30, 15)
-    return (300, 90)
+    return in_morning or in_afternoon
+
+
+def _trading_tiers():
+    """Return dict of TTL values keyed by tier for current trading status.
+
+    Tiers (short-line trading priority):
+      L1  极实时  个股行情 (fundflow, timeline, basic_info)
+      L2  实时    板块轮动 (hotplate, plate)
+      L3  准实时  新闻快讯 (telegraph, kuaixun, flash)
+      L4  参考    静态日更 (f10, margin, northbound) — unchanged
+    """
+    if _is_trading_hours():
+        return {'L1': 8, 'L2': 12, 'L3': 30, 'L4': 300}
+    return {'L1': 120, 'L2': 120, 'L3': 180, 'L4': 300}
+
+
+def _china_trading_ttl():
+    """Backward-compat: return (base_ttl, stagger_step) using L2 tier."""
+    t = _trading_tiers()
+    base = t['L2']
+    stagger = max(3, base // 4)
+    return (base, stagger)

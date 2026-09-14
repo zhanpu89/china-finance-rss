@@ -41,7 +41,7 @@ from config import (
     _PLATE_INFO_URL, _PLATE_STOCKS_URL, _PLATE_INDUSTRY_URL,
     _PLATE_HEADERS,
     CDP_RESTART_INTERVAL, stock_nav_page_names,
-    cdp_engine, _china_trading_ttl,
+    cdp_engine, _trading_tiers,
 )
 from cache import fetch_json, feed_cache, _feed_cache_lock, _feed_fetch_locks, \
     _feed_fetch_locks_lock, MAX_FEED_CACHE_SIZE, CACHE_JITTER, _fill_missing
@@ -78,7 +78,7 @@ def handle_cls_telegraph(feed_url=None):
     }
     params['sign'] = cls_sign_params(params)
     headers = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.cls.cn/telegraph'}
-    data = json.loads(fetch_json(f'{url}?{urlencode(params)}', headers))
+    data = json.loads(fetch_json(f'{url}?{urlencode(params)}', headers, ttl=_trading_tiers()['L3']))
     return generate_rss('财联社电报', 'https://www.cls.cn/telegraph',
                         '财联社实时快讯', parse_cls_items(data), feed_url=feed_url)
 
@@ -87,7 +87,7 @@ def handle_eastmoney_kuaixun(feed_url=None):
     """Eastmoney 7x24 News (东方财富快讯)."""
     url = 'https://newsapi.eastmoney.com/kuaixun/v1/getlist_102_ajaxResult_50_1_.html'
     headers = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://kuaixun.eastmoney.com/'}
-    data = fetch_json(url, headers)
+    data = fetch_json(url, headers, ttl=_trading_tiers()['L3'])
     match = re.search(r'var ajaxResult=(\{.*\})', data, re.DOTALL)
     if not match:
         return generate_rss('东方财富快讯', 'https://kuaixun.eastmoney.com/',
@@ -119,7 +119,7 @@ def handle_ths_kuaixun(feed_url=None):
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         'Referer': 'https://news.10jqka.com.cn/'
     }
-    data = json.loads(fetch_json(url, headers))
+    data = json.loads(fetch_json(url, headers, ttl=_trading_tiers()['L3']))
     items = []
     for item in data.get('data', {}).get('list', []):
         digest = item.get('digest') or item.get('remark', '')
@@ -210,7 +210,7 @@ def handle_ths_longhu():
 def handle_jin10_flash(feed_url=None):
     """Jin10 7x24 flash news (金十快讯)."""
     url = 'https://flash-api.jin10.com/get_flash_list?channel=-8200&limit=50'
-    data = json.loads(fetch_json(url, get_jin10_public_headers()))
+    data = json.loads(fetch_json(url, get_jin10_public_headers(), ttl=_trading_tiers()['L3']))
     return generate_rss('金十快讯', 'https://www.jin10.com/',
                         '金十数据7x24快讯', parse_jin10_items(data), feed_url=feed_url)
 
@@ -223,7 +223,7 @@ def handle_wallstreetcn_live(feed_url=None):
         'Accept': 'application/json,text/plain,*/*',
         'Referer': 'https://wallstreetcn.com/live',
     }
-    data = json.loads(fetch_json(url, headers))
+    data = json.loads(fetch_json(url, headers, ttl=_trading_tiers()['L3']))
     return generate_rss('华尔街见闻快讯', 'https://wallstreetcn.com/live',
                         '华尔街见闻7x24快讯', parse_wallstreetcn_items(data), feed_url=feed_url)
 
@@ -292,7 +292,9 @@ def handle_cls_hotplate(feed_url=None):
     """CLS Hotplate Data (财联社板块) — uses same sign mechanism as telegraph."""
     result = {}
     hot_plates = None
-    _BASE_TTL, _STAGGER = _china_trading_ttl()
+    tiers = _trading_tiers()
+    _BASE_TTL = tiers['L2']
+    _STAGGER = max(3, _BASE_TTL // 4)
     _TTL_OFFSETS = {'industry': 0, 'concept': _STAGGER, 'area': _STAGGER * 2}
     for ptype in ('industry', 'concept', 'area'):
         params = {
@@ -328,7 +330,9 @@ def handle_cls_plate(code):
     Returns dict with plate info, constituent stocks, and industry breakdown.
     """
     result = {'code': code}
-    _BASE_TTL, _STAGGER = _china_trading_ttl()
+    tiers = _trading_tiers()
+    _BASE_TTL = tiers['L2']
+    _STAGGER = max(3, _BASE_TTL // 4)
 
     def _signed_url(base_url, extra=None):
         params = {
@@ -693,13 +697,27 @@ class RSSHandler(BaseHTTPRequestHandler):
         host = self.headers.get('X-Forwarded-Host') or self.headers.get('Host')
         return f'{proto}://{host or f"localhost:{PORT}"}'.rstrip('/')
 
+    def _cache_age(self):
+        """Return Cache-Control max-age by endpoint tier (matches server TTL)."""
+        tiers = _trading_tiers()
+        path = self.path.split('?')[0]
+        if path.startswith(('/stock/fundflow', '/stock/timeline',
+                            '/stock/basic_info', '/stock/data')):
+            return tiers['L1']
+        if path.startswith(('/cls/hotplate', '/cls/plate')):
+            return tiers['L2']
+        if path.startswith(('/cls/telegraph', '/eastmoney', '/ths',
+                            '/jin10', '/wallstreetcn')):
+            return tiers['L3']
+        return tiers['L4']
+
     def _send_text(self, status_code, content_type, body, cache=True, write_body=True):
         body_bytes = body.encode('utf-8')
         self.send_response(status_code)
         self.send_header('Content-Type', content_type)
         self.send_header('Content-Length', str(len(body_bytes)))
         if cache:
-            self.send_header('Cache-Control', f'public, max-age={CACHE_TTL}')
+            self.send_header('Cache-Control', f'public, max-age={self._cache_age()}')
         self.end_headers()
         if write_body:
             self.wfile.write(body_bytes)
