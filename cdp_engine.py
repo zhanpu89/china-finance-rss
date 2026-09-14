@@ -344,6 +344,10 @@ class CDPPage:
     _CLOSE_BUDGET = 3       # max targets to close per _close_target call
     _CLOSE_THROTTLE = 60    # seconds before retrying a failed close
     _CLOSE_MAX_FAILURES = 3 # consecutive failures before abandoning a target
+    # Absolute ledger bound: even if every eviction candidate sits inside its
+    # throttle window, the ledger must still stop growing — hard cap outranks
+    # failure retry (prevents +1-per-storm-pass OOM feedback loop).
+    _HARD_CAP = _MAX_TRACKED_TARGETS + 8   # ≈40 tracked targets
 
     def __init__(self, name, target_url, cdp_host='localhost', cdp_port=9222, heartbeat=True):
         self.name = name
@@ -375,6 +379,7 @@ class CDPPage:
         # code between the navigation and the data read.
         self._navigate_lock = threading.RLock()
         self._reconnect_lock = threading.Lock()  # serializes _reconnect / _ensure_ws
+        self._last_sweep = time.time()  # heartbeat orphan-sweep gate (every ~300s)
         self._connect()
         if heartbeat:
             threading.Thread(target=self._heartbeat, daemon=True).start()
@@ -413,32 +418,75 @@ class CDPPage:
         ws_url = f"ws://{self.cdp_host}:{self.cdp_port}/devtools/page/{target_id}"
         return target_id, ws_url
 
-    def _connect(self):
-        """Create target, connect persistent WS, inject interceptor, navigate."""
+    def _connect(self, budget=None):
+        """Create target, connect persistent WS, inject interceptor, navigate.
+
+        budget: absolute deadline shared across retry attempts (set by
+        _reconnect) — when exhausted, fail fast so _reconnect_lock is never
+        held for minutes by a half-dead Chrome.
+        """
         import websocket
+        if budget and time.time() >= budget:
+            raise RuntimeError(f"[CDP:{self.name}] connect budget exhausted")
         target_id, ws_url = self._create_target()
         if not target_id:
             raise RuntimeError(f"Failed to create CDP target for {self.name}")
 
         # Set _target_id early so _close_target() can clean up on any failure.
         with self._ws_lock:
-            self._target_id = target_id
+            active = self._target_id  # pre-connect active target — never evict it
             evicted = None
             if len(self._created_targets) >= self._MAX_TRACKED_TARGETS:
-                # Evict oldest entry; never evict the current active target
+                # Evict oldest entry; never evict the current active target.
+                # Skip ids inside their close-throttle window (same rule as
+                # _close_target) so a stubborn failed target isn't re-picked
+                # every eviction while closable orphans starve at the tail.
+                evict_now = time.time()
                 for i, old_id in enumerate(self._created_targets):
-                    if old_id != target_id:
+                    if old_id != active and evict_now - self._close_failures.get(old_id, (0, 0))[0] >= self._CLOSE_THROTTLE:
                         evicted = self._created_targets.pop(i)
                         break
+                if evicted is None and len(self._created_targets) >= self._HARD_CAP:
+                    # all candidates sit in their throttle window — hard cap
+                    # outranks throttle: force-evict the oldest non-active.
+                    for i, old_id in enumerate(self._created_targets):
+                        if old_id != active:
+                            evicted = self._created_targets.pop(i)
+                            break
             self._created_targets.append(target_id)
+            self._target_id = target_id
         if evicted and not self._close_one_target(evicted):
-            # Best-effort close so an evicted-but-open tab doesn't leak forever.
-            log.warning(f'[CDP:{self.name}] evicted target {evicted} close failed; '
-                        f'dropped from tracking (tab may remain in Chrome)')
+            now = time.time()
+            if len(self._created_targets) >= self._HARD_CAP:
+                # Hard cap outranks failure retry: stop re-registering, or the
+                # ledger grows +1 per failed eviction (OOM feedback loop).
+                self._close_failures.pop(evicted, None)
+                log.warning(f'[CDP:{self.name}] evicted target {evicted} close failed; '
+                            f'ledger at hard cap, tracking dropped (tab may remain in Chrome)')
+            else:
+                # keep the id in the sweep pool so the throttled retry +
+                # ≥3-failure drop path reclaims it; silent drop would leak a
+                # renderer per _connect (OOM loop).
+                self._close_failures[evicted] = (now, 1)
+                with self._ws_lock:
+                    # index 0 = oldest: re-insert at head so further evictions
+                    # reclaim the oldest orphans first.
+                    self._created_targets.insert(0, evicted)
+                log.warning(f'[CDP:{self.name}] evicted target {evicted} close failed; '
+                            f'reregistered for throttled retry (tab may remain in Chrome)')
+        elif evicted:
+            # Close succeeded — drop the dead failure entry (hard-evicted ids
+            # provably sit in their throttle window; same rule as sweep).
+            self._close_failures.pop(evicted, None)
+        if budget and time.time() >= budget:
+            # Clock-bounded reclaim: an unbounded full sweep here piles 18-24s
+            # of cleanup onto the very storm path that just exhausted budget.
+            self._close_target(close_budget=time.time() + 5)
+            raise RuntimeError(f"[CDP:{self.name}] connect budget exhausted")
         try:
             ws = websocket.create_connection(ws_url, timeout=5)
         except Exception:
-            self._close_target()  # close orphaned tab
+            self._close_target(close_budget=time.time() + 5)  # close orphaned tab, bounded
             raise
         try:
             self._send_on(ws, {'id': self._next_id(), 'method': 'Page.enable'})
@@ -446,8 +494,10 @@ class CDPPage:
                                       'params': {'source': INTERCEPTOR_JS}})
             self._send_on(ws, {'id': self._next_id(), 'method': 'Page.navigate',
                                 'params': {'url': self.target_url}})
-            deadline = time.time() + 15
-            while time.time() < deadline:
+            # 5s cap (was 15s): loadEventFired arrives in <1s on healthy pages;
+            # the old 15s window let a half-dead page hold _reconnect_lock long.
+            load_deadline = min(time.time() + 5, budget) if budget else time.time() + 5
+            while time.time() < load_deadline:
                 try:
                     msg = self._recv_on(ws, timeout=5)
                     if msg.get('method') == 'Page.loadEventFired':
@@ -456,13 +506,18 @@ class CDPPage:
                     break
         except Exception:
             ws.close()
-            self._close_target()  # close tab created for this failed connection
+            self._close_target(close_budget=time.time() + 5)  # bounded reclaim
             raise
 
         self._ws = ws
         log.info(f"  \u2713 CDP page '{self.name}' \u2192 {self.target_url}")
 
     def _send_on(self, ws, msg):
+        # websocket settimeout is persistent on the socket: a prior recv loop
+        # may have left it at ~0, which makes the next sendall fail instantly
+        # (spurious reconnect + cache.clear()). Re-assert a sane window so
+        # send itself gets at least one full window.
+        ws.settimeout(5)  # send only blocks when the socket buffer is full
         ws.send(json.dumps(msg))
 
     def _recv_on(self, ws, timeout=5):
@@ -478,6 +533,10 @@ class CDPPage:
             remaining = deadline - time.time()
             if remaining <= 0:
                 break
+            # remaining≈0 makes settimeout fail in <1ms — a spurious timeout
+            # callers treat as a dead connection (spurious reconnect +
+            # cache.clear()). Give one last full window instead.
+            remaining = max(remaining, 0.5)
             try:
                 resp = self._recv_on(ws, timeout=remaining)
                 if resp.get('id') == msg_id:
@@ -680,13 +739,35 @@ class CDPPage:
                 with self._lock:
                     self._ingest_payload(all_api, ws_data, time.time())
                 empty_count = 0
+                # _close_target only runs on failure paths, so healthy streaks
+                # never reclaim tabs orphaned by an earlier failed close. Sweep
+                # at low frequency; skip when nothing beyond the active target
+                # is tracked (len==1) so a healthy page is never torn down.
+                if time.time() - self._last_sweep >= 300:
+                    with self._ws_lock:
+                        has_orphans = len(self._created_targets) > 1
+                    if has_orphans:
+                        # Sweep only orphans — never tear down the healthy
+                        # active tab. Bounded lock wait (best-effort sweep):
+                        # skip the round if the lock is busy so the sweep
+                        # can't starve _ensure_ws/_reconnect, and clock-budget
+                        # the sweep itself so a half-dead Chrome can't hold
+                        # the lock for minutes.
+                        if not self._reconnect_lock.acquire(timeout=2):
+                            log.debug(f"[CDP:{self.name}] orphan sweep skipped: _reconnect_lock busy")
+                        else:
+                            try:
+                                self._close_target(include_active=False, close_budget=time.time() + 5)
+                            finally:
+                                self._reconnect_lock.release()
+                    self._last_sweep = time.time()
 
             except Exception as e:
                 log.error(f"[CDP:{self.name}] heartbeat: {e}, reconnecting...")
                 self._reconnect()
                 empty_count = 0
 
-    def _close_target(self):
+    def _close_target(self, include_active=True, close_budget=None):
         """Close the tabs this page owns (idempotent).
 
         `_target_id` is only cleared after a CONFIRMED close: if closing fails
@@ -699,18 +780,30 @@ class CDPPage:
         Budget-capped: at most _CLOSE_BUDGET candidates per call (bounds the
         _reconnect_lock hold); failed closes are throttled _CLOSE_THROTTLEs to
         avoid re-hitting the same failing batch on every storm pass.
+        close_budget: optional absolute deadline — the sweep stops when it
+        expires (leftover candidates stay in the ledger for the next round),
+        bounding the lock hold even when each candidate burns its full close
+        path on a half-dead Chrome.
         """
         now = time.time()
         with self._ws_lock:
             tid = self._target_id
             leftovers = [t for t in self._created_targets if t != tid]
-        candidates = ([tid] if tid else []) + leftovers
+        # include_active=False (heartbeat sweep): never tear down the healthy
+        # active tab, only reclaim orphans. tid never enters candidates, so the
+        # _target_id-clear below is naturally skipped.
+        candidates = ([tid] if tid and include_active else []) + leftovers
         # Skip targets that failed close within the throttle window
         candidates = [t for t in candidates
                       if now - self._close_failures.get(t, (0, 0))[0] >= self._CLOSE_THROTTLE]
         candidates = candidates[:self._CLOSE_BUDGET]
         ok = True
+        tid_ok = True  # stays True once the CURRENT target is confirmed closed
         for t in candidates:
+            if close_budget is not None and time.time() >= close_budget:
+                if t == tid:
+                    tid_ok = False  # tid not processed — keep it tracked
+                break  # clock budget exhausted — leftovers stay for the next round
             if self._close_one_target(t):
                 with self._ws_lock:
                     try:
@@ -720,6 +813,8 @@ class CDPPage:
                 self._close_failures.pop(t, None)
             else:
                 ok = False
+                if t == tid:
+                    tid_ok = False
                 _, fail_count = self._close_failures.get(t, (0, 0))
                 fail_count += 1
                 if fail_count >= self._CLOSE_MAX_FAILURES:
@@ -727,15 +822,34 @@ class CDPPage:
                     # ledger and budget; warn the tab may remain in Chrome.
                     log.warning(f'[CDP:{self.name}] target {t} close failed {fail_count}x, '
                                 f'dropped from tracking (tab may remain in Chrome)')
+                    # Drop the throttle entry too: the id is removed from the
+                    # ledger below so it can never re-enter candidates — the
+                    # (ts,count) record would stay a permanent dead entry.
                     self._close_failures.pop(t, None)
                     with self._ws_lock:
+                        if t == tid:
+                            # Abandoned ACTIVE target: clear _target_id and
+                            # idempotently close+detach its WS (exception-safe)
+                            # so the ghost stops being tracked and no evaluation
+                            # targets the dead tab.
+                            if self._target_id == tid:
+                                self._target_id = None
+                            try:
+                                self._ws.close()
+                            except Exception:
+                                pass
+                            self._ws = None
                         try:
                             self._created_targets.remove(t)
                         except ValueError:
                             pass
                 else:
                     self._close_failures[t] = (now, fail_count)  # throttle + count retries
-        if ok and tid and tid in candidates:
+        if tid and tid in candidates and tid_ok:
+            # Clear _target_id as soon as the current tab is confirmed closed,
+            # even if a leftover close failed — otherwise _target_id keeps
+            # pointing at a ghost tab and later sweeps waste a budget slot
+            # re-closing it. Only genuinely-failed closes enter the ledger.
             with self._ws_lock:
                 if self._target_id == tid:
                     self._target_id = None
@@ -804,13 +918,16 @@ class CDPPage:
         Serialized by _reconnect_lock so heartbeat + navigation threads
         never race on self._ws / self._target_id.
         """
+        # Lock hold is bounded: connects carry a 35s budget and each
+        # _close_target sweep a per-call clock budget — late waiters behind
+        # this lock don't stall unboundedly (sweep uses timeout acquire).
         with self._reconnect_lock:
             try:
                 if self._ws:
                     self._ws.close()
             except:
                 pass
-            self._close_target()
+            self._close_target(close_budget=time.time() + 5)
             with self._lock:
                 self.cache.clear()
                 self._key_last_seen.clear()
@@ -818,9 +935,12 @@ class CDPPage:
                 # Stale WebSocket data from old session — discard on reconnect
                 self._last_data.pop('__ws__', None)
                 self._last_data_ts.pop('__ws__', None)
+            # Three attempts share ONE budget so a half-dead Chrome can't hold
+            # _reconnect_lock for minutes (healthy connects take <2s each).
+            budget = time.time() + 35
             for attempt in range(3):
                 try:
-                    self._connect()
+                    self._connect(budget)
                     return
                 except Exception as e:
                     if attempt < 2:
@@ -834,7 +954,11 @@ class CDPPage:
                 if ensure_chrome():
                     for attempt in range(3):
                         try:
-                            self._connect()
+                            # Same budget semantics as phase 1: bound each
+                            # connect by the retry-window deadline so a
+                            # half-dead Chrome can't hold _reconnect_lock
+                            # past its remaining window.
+                            self._connect(deadline)
                             return
                         except Exception as e:
                             if attempt < 2:
@@ -892,7 +1016,7 @@ class CDPPage:
                 except Exception:
                     pass
             if self._target_id:
-                self._close_target()
+                self._close_target(close_budget=time.time() + 5)
             if self._ws:
                 try:
                     self._ws.close()
@@ -901,9 +1025,10 @@ class CDPPage:
             self._ws = None
             # Try immediate reconnects; if they fail, ensure Chrome is up
             # (waiting out the restart throttle) before retrying.
+            budget = time.time() + 35  # same semantics as _reconnect phase 1
             for attempt in range(3):
                 try:
-                    self._connect()
+                    self._connect(budget)
                     return True
                 except Exception:
                     if attempt == 0:
@@ -914,7 +1039,7 @@ class CDPPage:
                 if ensure_chrome():
                     for attempt in range(3):
                         try:
-                            self._connect()
+                            self._connect(deadline)
                             return True
                         except Exception:
                             if attempt < 2:
@@ -1118,7 +1243,9 @@ class CDPPage:
                 self._ws.close()
         except:
             pass
-        self._close_target()
+        # Bounded shutdown: half-dead Chrome burns ~24s/page budget-less
+        # (3 candidates × 8s); 5 pages would stall exit ~2min.
+        self._close_target(close_budget=time.time() + 5)
 
 
 class CDPEngine:

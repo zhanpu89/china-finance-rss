@@ -93,9 +93,9 @@ def fetch_json(url, headers=None, ttl=None):
                 _cache_put(cache, url, data, ttl=ttl)
                 return data
             finally:
-                event.set()
                 with _cache_lock:
                     _fetch_inflight.pop(url, None)
+                event.set()
 
         remaining = deadline - time.time()
         if remaining <= 0:
