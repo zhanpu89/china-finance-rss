@@ -1,3 +1,5 @@
+> 🔖 归属: prd-writer — 本模板仅由 prd-writer SKILL 加载。勿在 system-architect 上下文使用同名文件。
+
 # PRD 通用章节骨架
 
 ## 内容规则（强制）

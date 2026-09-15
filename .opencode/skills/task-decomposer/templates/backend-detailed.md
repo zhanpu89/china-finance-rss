@@ -61,7 +61,20 @@ def {func}({params}):
 - {算法名}：参数，输出格式
 
 ## 7. DDL
-标准 CREATE TABLE（含 id/created_at/updated_at/version/deleted，状态化实体含 status+version，适当索引）
+
+**数据库命名规范（所有 DDL 必须遵守）：**
+| 字段类别 | 命名 | 类型 | 说明 |
+|---------|------|------|------|
+| 主键 | `id` | BIGINT AUTO_INCREMENT | 单表主键 |
+| 创建时间 | `created_at` | DATETIME(6) | 首次写入时间 |
+| 更新时间 | `updated_at` | DATETIME(6) | 最近修改时间 |
+| 创建人 | `created_by` | VARCHAR(64) | 写入用户标识 |
+| 更新人 | `updated_by` | VARCHAR(64) | 最后修改用户标识 |
+| 乐观锁 | `version` | INT DEFAULT 0 | 乐观锁版本号 |
+| 逻辑删除 | `deleted` | TINYINT(1) DEFAULT 0 | 0=未删 1=已删 |
+| 状态（有状态实体） | `status` | VARCHAR(32) | 状态机当前状态 |
+
+标准 CREATE TABLE（按上表命名，含适当索引和 COMMENT，多表关联字段加 FOREIGN KEY 注释）。
 
 ## 8. 外部接口（本模块调用外部）
 | 接口 | 协议 | 格式 | 说明 |
@@ -84,6 +97,7 @@ def {func}({params}):
 - [ ] 接口有完整 OpenAPI 定义，含错误响应
 - [ ] 伪代码含约束标记（事务/补偿/锁/重试/清理/语言特有）
 - [ ] 状态机含转换表、guard 条件、副作用、乐观锁
+- [ ] DDL 遵守数据库命名规范表（id/created_at/updated_at/created_by/updated_by/version/deleted）
 - [ ] DDL 含所有字段/注释/索引，状态实体含 status+version
 - [ ] 缓存失效触发条件已填写
 - [ ] 性能指标有具体数值（P95/P99 RT + TPS）

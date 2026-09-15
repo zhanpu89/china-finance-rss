@@ -1,3 +1,5 @@
+> 🔖 归属: system-architect — 本模板仅由 system-architect SKILL 加载。勿在 prd-writer 上下文使用同名文件。
+
 # SAD 通用骨架
 
 ## 文档头部
