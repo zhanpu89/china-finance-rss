@@ -169,7 +169,19 @@ def _broadcast(snapshot):
             try:
                 conn.q.put_nowait(frame)
             except queue.Full:
-                pass
+                # Slow client's bounded queue is full: drop the OLDEST
+                # buffered frame so the recovered client reads the NEWEST
+                # quote ("L1 tick drops frames — next tick overwrites").
+                # get_nowait may raise Empty if the handler thread just
+                # drained — keep the new frame in either case.
+                try:
+                    conn.q.get_nowait()
+                except queue.Empty:
+                    pass
+                try:
+                    conn.q.put_nowait(frame)
+                except queue.Full:
+                    pass  # racing destroy sentinel refilled it; skip this tick
         g.last_push_ts = now
 
 
@@ -257,6 +269,8 @@ def destroy_group(sid):
             try:
                 conn.q.put_nowait(None)  # wake handler to exit
             except queue.Full:
+                # accepted: full queue drops the sentinel, handler still exits
+                # via get timeout + closed flag (worst case <= ~60s, bounded)
                 pass
         g.conns.clear()
     log.info(f'[stream] group {sid} destroyed')

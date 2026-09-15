@@ -1,12 +1,14 @@
 import http.client
 import threading
+import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
+import cdp_engine
 import config
 from server import BoundedThreadPoolServer
 from stream import (
-    StreamHandler, _groups,
+    StreamHandler, _SSEConn, _groups,
     create_group, get_group, patch_group, destroy_group,
     _valid_fields, _build_frame, _refresh_pool, _broadcast, tick_interval,
 )
@@ -256,6 +258,79 @@ class BatchShardingTests(unittest.TestCase):
                 stock_api_mod._basic_info_cache.update(saved[0])
                 stock_api_mod._basic_info_cache_ts.update(saved[1])
                 stock_api_mod._basic_info_pool.update(saved[2])
+
+
+class SSEQueueDropTests(unittest.TestCase):
+    """P2-1 regression: on a full bounded queue _broadcast drops the OLDEST
+    frame and keeps the NEWEST ("L1 tick drops frames — next tick
+    overwrites"): a lagging client recovers onto the latest quote."""
+
+    def tearDown(self):
+        _groups.clear()
+
+    def test_broadcast_on_full_queue_drops_oldest_keeps_newest(self):
+        import json
+        sid, _ = create_group(['sh600519'], ['quote'])
+        g = get_group(sid)
+        conn = _SSEConn()
+        with g.conns_lock:
+            g.conns.add(conn)
+        for i in range(8):  # maxsize=8 => now full, oldest = frame-0
+            conn.q.put_nowait(f'frame-{i}')
+
+        _broadcast({'sh600519': {'quote': {'name': '最新价'}}})
+
+        items = list(conn.q.queue)
+        self.assertEqual(len(items), 8)            # still bounded at maxsize
+        self.assertNotIn('frame-0', items)         # OLDEST dropped
+        self.assertIn('frame-7', items)            # second-newest preserved
+        newest = [i for i in items if not i.startswith('frame-')]
+        self.assertEqual(len(newest), 1)           # exactly the new frame
+        self.assertEqual(
+            json.loads(newest[0])['items']['sh600519']['quote']['name'],
+            '最新价')
+
+
+class ReadJsonBodyGuardTests(unittest.TestCase):
+    """P2-5: _read_json_body rejects bad Content-Length before reading body."""
+
+    def test_bad_content_length_returns_none_without_reading_body(self):
+        handler = StreamHandler.__new__(StreamHandler)
+        for bad_cl in ('abc', '1.5', '-5', '70000'):  # non-num / negative / >65536
+            handler.headers = {'Content-Length': bad_cl}
+            body = Mock()
+            handler.rfile = body
+            self.assertIsNone(handler._read_json_body(), f'CL={bad_cl!r}')
+            body.read.assert_not_called()
+
+
+class MaybeReconnectThrottleTests(unittest.TestCase):
+    """P2-5: _maybe_reconnect skips full Chrome restart inside the throttle
+    window (_CHROME_RESTART_THROTTLE * 2 = 30s) — only reconnect, never a
+    real full_chrome_restart. Everything heavy is patched."""
+
+    def test_second_trigger_within_throttle_skips_restart(self):
+        page = cdp_engine.CDPPage.__new__(cdp_engine.CDPPage)
+        page.name = 'test-page'
+        page.cdp_host = '127.0.0.1'
+        page.cdp_port = 9222
+        saved_counter = cdp_engine.CDPPage._nav_restart_counter
+        try:
+            # one nav short of the threshold => this trigger crosses it
+            cdp_engine.CDPPage._nav_restart_counter = (
+                cdp_engine.CDPPage._MAX_PAGE_NAV_BEFORE_RECONNECT - 1)
+            with patch.object(cdp_engine, '_last_chrome_restart', time.time()), \
+                 patch.object(cdp_engine, '_CHROME_RESTART_THROTTLE', 15), \
+                 patch.object(cdp_engine, 'full_chrome_restart',
+                              return_value=True) as restart, \
+                 patch.object(page, '_reconnect', return_value=True):
+                result = page._maybe_reconnect()
+            self.assertFalse(result)
+            restart.assert_not_called()
+            # threshold was crossed: counter reset even though restart skipped
+            self.assertEqual(cdp_engine.CDPPage._nav_restart_counter, 0)
+        finally:
+            cdp_engine.CDPPage._nav_restart_counter = saved_counter
 
 
 def _json(resp):
