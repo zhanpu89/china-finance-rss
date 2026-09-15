@@ -72,6 +72,7 @@ http://localhost:8053/healthz?check=1
 | `MAX_WORKERS` | `20` | Max concurrent request threads |
 | `STREAM_HOST` | `127.0.0.1` | SSE listen addr; set `0.0.0.0` for cross-host/container access (no-auth mgmt surface) |
 | `CDP_RESTART_THROTTLE` | `15` | Full Chrome restart throttle (s); guards the `full_chrome_restart` lock (×2 = no re-restart within 30s) |
+| `STREAM_GROUP_IDLE_TTL` | `300` | Idle zombie subscription-group reaper (s); a group with no live connection is destroyed after this — clients must re-POST `/stream/subscriptions` after a long disconnect |
 
 Do not commit `.env` files, cookies, tokens, private keys, Chrome profiles, or HAR captures.
 

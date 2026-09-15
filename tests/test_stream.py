@@ -11,6 +11,7 @@ from stream import (
     StreamHandler, _SSEConn, _groups,
     create_group, get_group, patch_group, destroy_group,
     _valid_fields, _build_frame, _refresh_pool, _broadcast, tick_interval,
+    _deduped_codes, _active_codes, _sweep_idle_groups,
 )
 
 
@@ -336,6 +337,72 @@ class MaybeReconnectThrottleTests(unittest.TestCase):
 def _json(resp):
     import json
     return json.loads(resp.read().decode('utf-8'))
+
+
+class ZombieGroupTests(unittest.TestCase):
+    """压测发现：POST 风暴僵尸组全量广播烧 CPU — 修复回归测试。"""
+
+    def tearDown(self):
+        _groups.clear()
+
+    def test_active_codes_excludes_connectionless_groups(self):
+        sid, _ = create_group(['sh600519', 'sz000001'], None)
+        # 组已创建但无连接 → 不应贡献活动刷新池（僵尸组烧 CPU 回归）
+        self.assertEqual(_active_codes(), set())
+        # 池上限账本仍含全部组（内存防无界）
+        self.assertEqual(_deduped_codes(), {'sh600519', 'sz000001'})
+        # 挂上连接后贡献活动池
+        g = get_group(sid)
+        conn = _SSEConn()
+        with g.conns_lock:
+            g.conns.add(conn)
+        self.assertEqual(_active_codes(), {'sh600519', 'sz000001'})
+
+    def test_broadcast_skips_zombie_group_frame_build(self):
+        sid, _ = create_group(['sh600519'], None)  # 无连接组
+        snapshot = {'sh600519': {'quote': {'price': 1.0}}}
+        with patch('stream._build_frame', wraps=__import__('stream')._build_frame) as m:
+            _broadcast(snapshot)
+            # 僵尸组不应 build frame
+            m.assert_not_called()
+
+    def test_broadcast_serves_live_group_only(self):
+        sid, _ = create_group(['sh600519'], None)
+        g = get_group(sid)
+        conn = _SSEConn()
+        with g.conns_lock:
+            g.conns.add(conn)
+        snapshot = {'sh600519': {'quote': {'price': 1.0}}}
+        with patch('stream._build_frame') as m:
+            m.return_value = b'data: {"x":1}\n\n'
+            _broadcast(snapshot)
+            m.assert_called_once()
+        _groups.clear()
+
+    def test_sweep_idle_groups_reaps_zombie(self):
+        sid, _ = create_group(['sh600519'], None)
+        g = get_group(sid)
+        # 伪造：最后推送很久以前（无连接）
+        g.last_push_ts = time.time() - 10000
+        g.created_ts = time.time() - 10000
+        self.assertEqual(len(_groups), 1)
+        _sweep_idle_groups()
+        self.assertEqual(len(_groups), 0, '僵尸组应被清扫')
+
+    def test_sweep_keeps_live_or_recent_group(self):
+        sid, _ = create_group(['sh600519'], None)
+        # 有连接 → 不扫
+        conn = _SSEConn()
+        g = get_group(sid)
+        with g.conns_lock:
+            g.conns.add(conn)
+        _sweep_idle_groups()
+        self.assertEqual(len(_groups), 1, '活动组不应被扫')
+
+    def test_sweep_skips_recent_connectionless(self):
+        sid, _ = create_group(['sh600519'], None)  # 刚创建、无连接但 last_push_ts 近
+        _sweep_idle_groups()
+        self.assertEqual(len(_groups), 1, '新组未到 TTL 不应清扫')
 
 
 if __name__ == '__main__':

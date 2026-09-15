@@ -19,6 +19,7 @@ MAX_STREAM_CONNS = int(os.getenv('MAX_STREAM_CONNS', '100'))
 MAX_CODES_PER_SUB = int(os.getenv('MAX_CODES_PER_SUB', '200'))
 MAX_DEDUP_CODES = int(os.getenv('MAX_DEDUP_CODES', '2000'))
 STREAM_PING_INTERVAL = 20
+STREAM_GROUP_IDLE_TTL = float(os.getenv('STREAM_GROUP_IDLE_TTL', '300'))  # idle zombie group reaper (s)
 
 # Stock code validation
 VALID_STOCK_CODE = re.compile(r'^(sh|sz|bj)\d{6}$|^\d{6}\.(BJ|SH|SZ)$', re.IGNORECASE)

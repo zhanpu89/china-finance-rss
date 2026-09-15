@@ -1,4 +1,7 @@
-"""SSE push server + subscription groups for short-line trading clients.
+"""
+
+Subscription groups are reaped automatically after STREAM_GROUP_IDLE_TTL seconds without any live connection (client must re-POST to re-subscribe after that).
+SSE push server + subscription groups for short-line trading clients.
 
 Layered with the REST scan path: clients scan the market via existing
 REST endpoints (hotplate/plate/stock), then subscribe to a fixed watchlist
@@ -17,6 +20,7 @@ Endpoints (port STREAM_PORT):
   GET    /stream/quote/<sid>           SSE stream (event: quote, every L1 tick)
 """
 
+import os
 import json
 import logging
 import queue
@@ -89,11 +93,31 @@ def _valid_fields(fields):
 
 
 def _deduped_codes_unlocked():
-    """Union of codes across all groups. Caller must hold _groups_lock."""
+    """Union of codes across ALL groups (CRUD pool-limit ledger).
+    Caller must hold _groups_lock."""
     codes = set()
     for g in _groups.values():
         codes |= g.codes
     return codes
+
+
+def _active_deduped_codes_unlocked():
+    """Union of codes of groups WITH live connections only.
+
+    The refresh pool must follow live demand — a zombie group would
+    otherwise keep the CDP fetch loop burning CPU for codes nobody
+    consumes. Caller must hold _groups_lock."""
+    codes = set()
+    for g in _groups.values():
+        if g.conns:
+            codes |= g.codes
+    return codes
+
+
+def _active_codes():
+    """Union of codes of live groups (bounds the per-tick refresh set)."""
+    with _groups_lock:
+        return _active_deduped_codes_unlocked()
 
 
 def _deduped_codes():
@@ -158,11 +182,15 @@ def _broadcast(snapshot):
     with _groups_lock:
         groups = list(_groups.values())
     for g in groups:
+        with g.conns_lock:
+            conns = list(g.conns)
+        if not conns:
+            # Zombie group: no live connections — skip frame build entirely.
+            # last_push_ts not refreshed, so the idle sweeper reaps it.
+            continue
         frame = _build_frame(snapshot, g)
         if frame is None:
             continue
-        with g.conns_lock:
-            conns = list(g.conns)
         for conn in conns:
             if conn.closed:
                 continue
@@ -185,13 +213,48 @@ def _broadcast(snapshot):
         g.last_push_ts = now
 
 
+_GROUP_IDLE_TTL = config.STREAM_GROUP_IDLE_TTL  # idle zombie group reaper
+_last_group_sweep = 0.0
+
+
+def _sweep_idle_groups(now=None):
+    """Reclaim zombie groups (no connections, idle > TTL). Cheap O(len) pass."""
+    now = time.time() if now is None else now
+    with _groups_lock:
+        idle = [sid for sid, g in _groups.items()
+                if not g.conns
+                and now - max(g.last_push_ts, g.created_ts) > _GROUP_IDLE_TTL]
+    for sid in idle:
+        try:
+            # Re-check emptiness INSIDE the lock, before destroying: a client
+            # may have reconnected between collection and destruction
+            # (TOCTOU). conns is read under _groups_lock (RLock) then closed
+            # under conns_lock — lock order groups→conns, no cycle.
+            with _groups_lock:
+                g = _groups.get(sid)
+                if g is None:
+                    continue
+                with g.conns_lock:
+                    if g.conns:
+                        continue  # client reconnected — keep the group
+                _groups.pop(sid, None)
+            log.info(f'[stream] group {sid} swept (idle > {_GROUP_IDLE_TTL:.0f}s, no conns)')
+        except Exception as e:
+            log.warning(f'[stream] sweep {sid} failed: {e}')
+
+
 def push_loop():
     """Background thread: refresh deduped pool every L1 tick, then fan out."""
+    global _last_group_sweep
     while True:
         try:
             tick = tick_interval()
             nxt = time.time() + tick
-            codes = _deduped_codes()
+            now = time.time()
+            if now - _last_group_sweep >= 60:
+                _sweep_idle_groups(now)
+                _last_group_sweep = now
+            codes = _active_codes()
             if codes:
                 snapshot = _refresh_pool(codes)
                 _broadcast(snapshot)
