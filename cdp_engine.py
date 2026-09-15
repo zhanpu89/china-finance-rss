@@ -249,6 +249,10 @@ def full_chrome_restart(cdp_url=CDP_URL):
     host = urlparse(cdp_url).hostname or 'localhost'
     log.warning(f'[CDP] full_chrome_restart: killing Chrome on port {port}, starting fresh...')
     with _chrome_restart_lock:
+        now = time.time()
+        if now - _last_chrome_restart < _CHROME_RESTART_THROTTLE * 2:
+            log.warning(f'[CDP] full_chrome_restart: Chrome restarted recently ({now - _last_chrome_restart:.0f}s ago) — skipping back-to-back restart')
+            return False
         _kill_chrome_on_port(port)
         _last_chrome_restart = 0  # allow ensure_chrome to proceed
         gc.collect()

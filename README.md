@@ -70,6 +70,8 @@ http://localhost:8053/healthz?check=1
 | `PUBLIC_BASE_URL` | auto | Public URL for RSS self-links & OPML |
 | `CDP_URL` | `http://localhost:9222` | Chrome DevTools URL |
 | `MAX_WORKERS` | `20` | Max concurrent request threads |
+| `STREAM_HOST` | `127.0.0.1` | SSE listen addr; set `0.0.0.0` for cross-host/container access (no-auth mgmt surface) |
+| `CDP_RESTART_THROTTLE` | `15` | Full Chrome restart throttle (s); guards the `full_chrome_restart` lock (×2 = no re-restart within 30s) |
 
 Do not commit `.env` files, cookies, tokens, private keys, Chrome profiles, or HAR captures.
 
@@ -104,7 +106,8 @@ REST-based endpoints (`fundflow`, `timeline`, `announcement`) use direct HTTP fi
 
 ```bash
 docker build -t china-finance-rss .
-docker run -d -p 8053:8053 --name china-finance-rss china-finance-rss
+docker run -d -p 8053:8053 -p 8054:8054 \
+  -e STREAM_HOST=0.0.0.0 --name china-finance-rss china-finance-rss
 ```
 
 Memory recommendations:
@@ -112,18 +115,19 @@ Memory recommendations:
 ```bash
 # 2GB — heavy stock query load
 docker run -d --memory=2g --memory-swap=2g --memory-reservation=1g \
-  -p 8053:8053 --name china-finance-rss china-finance-rss
+  -p 8053:8053 -p 8054:8054 --name china-finance-rss china-finance-rss
 
 # 1GB — RSS feeds + market overview only
 docker run -d --memory=1g --memory-swap=1g --memory-reservation=768m \
-  -p 8053:8053 --name china-finance-rss china-finance-rss
+  -p 8053:8053 -p 8054:8054 --name china-finance-rss china-finance-rss
 ```
 
 Behind a reverse proxy:
 
 ```bash
-docker run -d -p 8053:8053 \
+docker run -d -p 8053:8053 -p 8054:8054 \
   -e PUBLIC_BASE_URL=https://rss.example.com \
+  -e STREAM_HOST=0.0.0.0 \
   --name china-finance-rss china-finance-rss
 ```
 
