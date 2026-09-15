@@ -9,8 +9,8 @@ from html import unescape
 from urllib.parse import urlencode
 from xml.etree import ElementTree as ET
 
-from config import CACHE_TTL, PUBLIC_BASE_URL, jin10_public_headers
-from cache import fetch_json, _cache_lock, _cache_put
+from .config import CACHE_TTL, PUBLIC_BASE_URL, jin10_public_headers
+from .cache import fetch_json, _cache_lock, _cache_put
 
 
 def escape_xml(text):

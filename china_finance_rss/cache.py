@@ -6,7 +6,7 @@ import threading
 import time
 from urllib.request import Request, urlopen
 
-from config import CACHE_TTL, REQUEST_TIMEOUT
+from .config import CACHE_TTL, REQUEST_TIMEOUT
 
 # Generic URL fetch cache
 cache = {}

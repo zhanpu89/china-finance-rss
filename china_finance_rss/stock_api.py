@@ -12,8 +12,8 @@ from time import sleep, time
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-import config
-from config import (
+from . import config
+from .config import (
     REQUEST_TIMEOUT, VALID_STOCK_CODE,
     _MAX_CACHE_AGE, _MAX_BATCH_SIZE,
     _F10_EXPECTED_KEYS,
@@ -30,8 +30,8 @@ from config import (
     _ANNOUNCEMENT_POOL_REFRESH, _ANNOUNCEMENT_MAX_POOL,
     _trading_tiers, stock_nav_page_names,
 )
-from cache import fetch_json, _fill_missing
-from utils import cls_sign_params
+from .cache import fetch_json, _fill_missing
+from .utils import cls_sign_params
 
 log = logging.getLogger('stock')
 

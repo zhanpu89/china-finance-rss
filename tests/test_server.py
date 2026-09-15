@@ -2,7 +2,7 @@ import unittest
 from email.utils import parsedate_to_datetime
 from xml.etree import ElementTree as ET
 
-from utils import (
+from china_finance_rss.utils import (
     generate_rss,
     generate_error_rss,
     generate_opml,
@@ -13,10 +13,10 @@ from utils import (
     parse_jin10_items,
     parse_wallstreetcn_items,
 )
-from server import ROUTES, handle_cls_hotplate, handle_cls_plate, build_health_payload
-from market_api import (
-    _transform_margin, _transform_northbound,
-    handle_margin, handle_northbound, handle_northbound_history,
+from china_finance_rss.server import ROUTES, handle_cls_hotplate, handle_cls_plate, build_health_payload
+from china_finance_rss.market_api import (
+    _transform_margin,
+    handle_margin,
 )
 
 
@@ -192,7 +192,7 @@ class SourceParserTests(unittest.TestCase):
 
 
 class MarketApiTests(unittest.TestCase):
-    """Tests for market-level APIs (融资融券, 北向资金).
+    """Tests for market-level APIs (融资融券).
 
     Transform functions are unit-tested; handlers rely on fetch_json caching.
     """
@@ -232,31 +232,6 @@ class MarketApiTests(unittest.TestCase):
         self.assertEqual(result['latest']['rzmre'], 0.0)  # '--' → 0
         self.assertAlmostEqual(result['latest']['rqjmc'], -0.05, places=4)
 
-    def test_transform_northbound_parses_snapshot(self):
-        raw = {
-            'h': {'zjlr': 2500000000, 'syed': 30000000000, 'zed': 52000000000,
-                  'buy_turnover': 18000000000, 'sell_turnover': 15500000000,
-                  'net_turnover': 2500000000, 'state': '开盘', 'up': 500, 'mid': 300, 'down': 200},
-            's': {'zjlr': -500000000, 'syed': 48000000000, 'zed': 52000000000,
-                  'buy_turnover': 12000000000, 'sell_turnover': 12500000000,
-                  'net_turnover': -500000000, 'state': '开盘', 'up': 200, 'mid': 400, 'down': 600},
-            'jlr': 2000000000,
-            'jmr': 1800000000,
-            'market_value': {'data_update_date': '2026-07-14', 'unit': '元'},
-        }
-        result = _transform_northbound(raw)
-        self.assertEqual(result['sh']['net_inflow'], 2500000000)
-        self.assertEqual(result['sz']['net_inflow'], -500000000)
-        self.assertEqual(result['total_net_inflow'], 2000000000)
-        self.assertEqual(result['total_net_buy'], 1800000000)
-        self.assertEqual(result['update_date'], '2026-07-14')
-
-    def test_transform_northbound_handles_empty_data(self):
-        result = _transform_northbound({})
-        self.assertEqual(result['sh']['net_inflow'], 0)
-        self.assertEqual(result['sz']['net_inflow'], 0)
-        self.assertEqual(result['total_net_inflow'], 0)
-
     def test_handle_margin_error_returns_degraded(self):
         # Pass an invalid market code → API returns error → degraded response
         result = handle_margin('invalid')
@@ -264,32 +239,17 @@ class MarketApiTests(unittest.TestCase):
         self.assertEqual(result['latest']['rzye'], 0)
         self.assertEqual(result['latest']['rqye'], 0)
 
-    def test_handle_northbound_returns_unified_structure(self):
-        result = handle_northbound()
-        for key in ('sh', 'sz', 'total_net_inflow', 'total_net_buy'):
-            self.assertIn(key, result)
-        for loc in ('sh', 'sz'):
-            self.assertIn('net_inflow', result[loc])
-            self.assertIn('buy_turnover', result[loc])
-            self.assertIn('sell_turnover', result[loc])
-
-    def test_handle_northbound_history_returns_dict(self):
-        result = handle_northbound_history('day')
-        self.assertIsInstance(result, dict)
-
     def test_healthz_includes_market_endpoints(self):
         payload = build_health_payload("https://feeds.example.com")
         paths = {f['path'] for f in payload['feeds']}
         self.assertIn('/market/margin', paths)
-        self.assertIn('/market/northbound', paths)
-        self.assertIn('/market/northbound/history', paths)
 
 
 class CacheMaintenanceTests(unittest.TestCase):
     """Tests for expired-cache reclamation fixes (2c2g memory issue)."""
 
     def test_sweep_expired_removes_stale_entries(self):
-        from cache import _sweep_expired
+        from china_finance_rss.cache import _sweep_expired
         import time
         cache_dict = {
             'fresh': {'data': 'x', 'time': time.time(),
@@ -305,7 +265,7 @@ class CacheMaintenanceTests(unittest.TestCase):
         self.assertIn('none', cache_dict)  # None entries are kept (handled on read)
 
     def test_sector_cache_bounded(self):
-        from stock_api import _sector_cache, _sector_cache_lock, \
+        from china_finance_rss.stock_api import _sector_cache, _sector_cache_lock, \
             _SECTOR_CACHE_MAX, _sector_cache_put
         import time
         with _sector_cache_lock:
@@ -322,7 +282,7 @@ class CacheMaintenanceTests(unittest.TestCase):
                 _sector_cache.update(saved)
 
     def test_sector_cache_ttl_eviction(self):
-        from stock_api import _sector_cache, _sector_cache_lock, _sweep_sector_cache
+        from china_finance_rss.stock_api import _sector_cache, _sector_cache_lock, _sweep_sector_cache
         import time
         with _sector_cache_lock:
             saved = dict(_sector_cache)
@@ -339,7 +299,7 @@ class CacheMaintenanceTests(unittest.TestCase):
         """When the elected leader's upstream fetch fails, waiting followers
         must re-enter single-flight election instead of all hitting upstream
         simultaneously (upstream stampede on failure)."""
-        import cache as cache_mod
+        import china_finance_rss.cache as cache_mod
         from unittest import mock
 
         original_cache = cache_mod.cache
@@ -409,7 +369,7 @@ class CacheMaintenanceTests(unittest.TestCase):
     def test_prefetch_round_robin_advances_cursor(self):
         """The prefetch round-robin cursor must advance across the pool so a
         large pool is refreshed fairly rather than always starting at index 0."""
-        from stock_api import _prefetch_rotate, _prefetch_advance, \
+        from china_finance_rss.stock_api import _prefetch_rotate, _prefetch_advance, \
             _prefetch_cursor, _prefetch_cursor_lock
         import threading
         with _prefetch_cursor_lock:

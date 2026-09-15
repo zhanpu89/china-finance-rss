@@ -4,15 +4,16 @@ import time
 import unittest
 from unittest.mock import Mock, patch
 
-import cdp_engine
-import config
-from server import BoundedThreadPoolServer
-from stream import (
+from china_finance_rss import cdp_engine as cdp_engine
+from china_finance_rss import config as config
+from china_finance_rss.server import BoundedThreadPoolServer
+from china_finance_rss.stream import (
     StreamHandler, _SSEConn, _groups,
     create_group, get_group, patch_group, destroy_group,
     _valid_fields, _build_frame, _refresh_pool, _broadcast, tick_interval,
     _deduped_codes, _active_codes, _sweep_idle_groups,
 )
+import china_finance_rss.stream as stream_mod
 
 
 def setUpModule():
@@ -50,7 +51,7 @@ class SubscriptionGroupTests(unittest.TestCase):
         self.assertIn('too many codes', err)
 
     def test_create_group_enforces_deduped_pool_limit(self):
-        import stream as stream_mod
+        import china_finance_rss.stream as stream_mod
         with patch.object(stream_mod, 'MAX_DEDUP_CODES', 3):
             _, err = create_group(['sh600519', 'sz000001', 'sh600000'], None)
             self.assertIsNone(err)
@@ -94,7 +95,7 @@ class FieldAndFrameTests(unittest.TestCase):
 
     def test_build_frame_maps_only_group_fields(self):
         g = create_group(['sh600519'], ['quote'])[0]
-        from stream import SubscriptionGroup
+        from china_finance_rss.stream import SubscriptionGroup
         # rebuild group directly with a specific field set for clarity
         _groups.clear()
         _groups[g] = SubscriptionGroup(g, {'sh600519'}, ['quote', 'timeline'])
@@ -110,14 +111,14 @@ class FieldAndFrameTests(unittest.TestCase):
         self.assertNotIn('fundflow', data['items']['sh600519'])
 
     def test_build_frame_skips_codes_missing_from_snapshot(self):
-        from stream import SubscriptionGroup
+        from china_finance_rss.stream import SubscriptionGroup
         _groups.clear()
         g = SubscriptionGroup('sid_x', {'sh600519'}, ['quote'])
         frame = _build_frame({'sz000001': {'quote': {}}}, g)
         self.assertIsNone(frame)
 
     def test_tick_interval_follows_l1_tier(self):
-        with patch('stream._trading_tiers', return_value={'L1': 8, 'L2': 12}):
+        with patch('china_finance_rss.stream._trading_tiers', return_value={'L1': 8, 'L2': 12}):
             self.assertEqual(tick_interval(), 8)
 
 
@@ -185,7 +186,7 @@ class HttpIntegrationTests(unittest.TestCase):
         self.assertEqual(resp.getheader('Content-Type'), 'text/event-stream')
         self.assertEqual(resp.getheader('Cache-Control'), 'no-cache')
 
-        with patch.dict('stream._FIELD_HANDLERS',
+        with patch.dict('china_finance_rss.stream._FIELD_HANDLERS',
                         {'quote': lambda codes: {'sh600519': {'name': '贵州茅台'}}}):
             snapshot = _refresh_pool(['sh600519'])
             _broadcast(snapshot)
@@ -221,7 +222,7 @@ class BatchShardingTests(unittest.TestCase):
     """
 
     def test_60_codes_all_fetched_and_returned_beyond_max_batch(self):
-        import stock_api as stock_api_mod
+        import china_finance_rss.stock_api as stock_api_mod
 
         codes = [f'sh{990000 + i}' for i in range(60)]
         self.assertGreater(len(codes), config._MAX_BATCH_SIZE)
@@ -361,7 +362,7 @@ class ZombieGroupTests(unittest.TestCase):
     def test_broadcast_skips_zombie_group_frame_build(self):
         sid, _ = create_group(['sh600519'], None)  # 无连接组
         snapshot = {'sh600519': {'quote': {'price': 1.0}}}
-        with patch('stream._build_frame', wraps=__import__('stream')._build_frame) as m:
+        with patch('china_finance_rss.stream._build_frame', wraps=stream_mod._build_frame) as m:
             _broadcast(snapshot)
             # 僵尸组不应 build frame
             m.assert_not_called()
@@ -373,7 +374,7 @@ class ZombieGroupTests(unittest.TestCase):
         with g.conns_lock:
             g.conns.add(conn)
         snapshot = {'sh600519': {'quote': {'price': 1.0}}}
-        with patch('stream._build_frame') as m:
+        with patch('china_finance_rss.stream._build_frame') as m:
             m.return_value = b'data: {"x":1}\n\n'
             _broadcast(snapshot)
             m.assert_called_once()

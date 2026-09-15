@@ -89,11 +89,6 @@ _MARGIN_URL = 'https://data.10jqka.com.cn/rzrq/fixdata/type'
 _MARGIN_HEADERS = {**_TENJQKA_HEADERS, 'Referer': 'https://data.10jqka.com.cn/market/rzrq/'}
 _MARGIN_CACHE_TTL = 600  # 10 min — data updates once per trading day
 
-# 北向资金 (Northbound Capital /沪深港通)
-_NORTHBOUND_SNAPSHOT_URL = 'https://data.10jqka.com.cn/hsgt/basedata/type/north/'
-_NORTHBOUND_HISTORY_URL = 'https://data.10jqka.com.cn/hsgt/history/type/north/date'
-_NORTHBOUND_HEADERS = {**_TENJQKA_HEADERS, 'Referer': 'https://data.10jqka.com.cn/hsgt/'}
-_NORTHBOUND_CACHE_TTL = 300  # 5 min
 
 # CDP page pool sizing & memory watchdog
 CDP_RESTART_INTERVAL = int(os.getenv('CDP_RESTART_INTERVAL', '7200'))
@@ -153,16 +148,8 @@ def _trading_tiers():
       L1  极实时  个股行情 (fundflow, timeline, basic_info)
       L2  实时    板块轮动 (hotplate, plate)
       L3  准实时  新闻快讯 (telegraph, kuaixun, flash)
-      L4  参考    静态日更 (f10, margin, northbound) — unchanged
+      L4  参考    静态日更 (f10, margin) — unchanged
     """
     if _is_trading_hours():
         return {'L1': 8, 'L2': 12, 'L3': 30, 'L4': 300}
     return {'L1': 120, 'L2': 120, 'L3': 180, 'L4': 300}
-
-
-def _china_trading_ttl():
-    """Backward-compat: return (base_ttl, stagger_step) using L2 tier."""
-    t = _trading_tiers()
-    base = t['L2']
-    stagger = max(3, base // 4)
-    return (base, stagger)

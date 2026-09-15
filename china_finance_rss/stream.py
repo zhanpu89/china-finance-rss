@@ -31,13 +31,13 @@ from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 
-import config
-from config import (
+from . import config
+from .config import (
     STREAM_PORT, VALID_STOCK_CODE,
     MAX_STREAM_CONNS, MAX_CODES_PER_SUB, MAX_DEDUP_CODES,
     STREAM_PING_INTERVAL, _trading_tiers,
 )
-from stock_api import (
+from .stock_api import (
     handle_cls_basic_infos, handle_cls_fundflow, handle_cls_timeline,
 )
 
@@ -505,7 +505,7 @@ class StreamHandler(BaseHTTPRequestHandler):
 
 def make_stream_server(max_workers=None):
     """Build the stream HTTP server (BoundedThreadPoolServer for load shed)."""
-    from server import BoundedThreadPoolServer
+    from .server import BoundedThreadPoolServer
     max_workers = max_workers or (MAX_STREAM_CONNS + 10)
     return BoundedThreadPoolServer((config.STREAM_HOST, STREAM_PORT), StreamHandler,
                                    max_workers=max_workers)

@@ -6,7 +6,7 @@ Eastmoney (东方财富), THS (同花顺), Jin10 (金十数据), Wallstreetcn (�
 ## Start
 
 ```bash
-python server.py
+python -m china_finance_rss.server
 ```
 
 Open `http://localhost:8053/`.
@@ -51,8 +51,6 @@ All require `?code=` with stock symbols (e.g. `?code=sh600519` or `?code=sh60051
 | `/cls/hotplate` | Sector capital flow rankings (行业/概念/地域) | No |
 | `/ths/longhu` | THS 龙虎榜 (top buy/sell brokerages) | No |
 | `/market/margin` | 融资融券 (margin lending balance) | No |
-| `/market/northbound` | 北向资金 snapshot (沪深港通) | No |
-| `/market/northbound/history` | 北向资金 history by period | No |
 
 ## Health Check
 

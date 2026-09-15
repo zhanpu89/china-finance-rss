@@ -8,8 +8,8 @@ into standard RSS 2.0 feeds.
 Sources: CLS (财联社), Eastmoney (东方财富), THS (同花顺)
 
 Usage:
-    python server.py
-    PORT=9000 python server.py
+    python -m china_finance_rss.server
+    PORT=9000 python -m china_finance_rss.server
 
 Dependencies:
     - websocket-client (optional, for CDP mode)
@@ -32,8 +32,8 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 from urllib.parse import parse_qs, urlencode
 
-from cdp_engine import ensure_chrome, CDPEngine, full_chrome_restart
-from config import (
+from .cdp_engine import ensure_chrome, CDPEngine, full_chrome_restart
+from .config import (
     PORT, CACHE_TTL, REQUEST_TIMEOUT, PUBLIC_BASE_URL, MAX_WORKERS,
     _MAX_BATCH_SIZE,
     _FINANCE_EXPECTED_KEYS, _QUOTATION_EXPECTED_KEYS,
@@ -43,15 +43,15 @@ from config import (
     CDP_RESTART_INTERVAL, stock_nav_page_names,
     cdp_engine, _trading_tiers,
 )
-from cache import fetch_json, feed_cache, _feed_cache_lock, _feed_fetch_locks, \
+from .cache import fetch_json, feed_cache, _feed_cache_lock, _feed_fetch_locks, \
     _feed_fetch_locks_lock, MAX_FEED_CACHE_SIZE, CACHE_JITTER, _fill_missing
-from utils import (
+from .utils import (
     generate_rss, generate_error_rss, generate_opml, count_rss_items,
     parse_cls_items, parse_jin10_items, parse_wallstreetcn_items,
     cls_sign_params, get_jin10_public_headers,
     strip_html, timestamp_to_rfc822, parse_china_datetime_to_rfc822, escape_xml,
 )
-from stock_api import (
+from .stock_api import (
     handle_cls_stock, handle_cls_stock_batch, handle_cls_fundflow,
     handle_cls_timeline, handle_cls_f10, handle_cls_basic_infos,
     handle_cls_announcement,
@@ -60,8 +60,8 @@ from stock_api import (
     _f10_prefetch_loop,
     _announcement_prefetch_loop,
 )
-from market_api import (
-    handle_margin, handle_northbound, handle_northbound_history,
+from .market_api import (
+    handle_margin,
 )
 
 log = logging.getLogger('server')
@@ -493,14 +493,6 @@ def build_health_payload(base_url, check_sources=False):
                   'path': '/market/margin',
                   'url': base_url + '/market/margin',
                   'status': 'configured'})
-    feeds.append({'name': 'Market Northbound (北向资金)',
-                  'path': '/market/northbound',
-                  'url': base_url + '/market/northbound',
-                  'status': 'configured'})
-    feeds.append({'name': 'Market Northbound History (北向资金历史)',
-                  'path': '/market/northbound/history',
-                  'url': base_url + '/market/northbound/history',
-                  'status': 'configured'})
 
     return {'status': status, 'cache_ttl': CACHE_TTL,
             'request_timeout': REQUEST_TIMEOUT, 'feeds': feeds}
@@ -608,14 +600,6 @@ class RSSHandler(BaseHTTPRequestHandler):
             params = parse_qs(parsed.query)
             market = params.get('market', ['99'])[0]
             self._send_json(handle_margin(market), write_body=write_body)
-            return
-        if path == '/market/northbound':
-            self._send_json(handle_northbound(), write_body=write_body)
-            return
-        if path == '/market/northbound/history':
-            params = parse_qs(parsed.query)
-            period = params.get('period', ['day'])[0]
-            self._send_json(handle_northbound_history(period), write_body=write_body)
             return
         if path in ROUTES:
             self._serve_feed(path, base_url, write_body=write_body)
@@ -775,9 +759,6 @@ class RSSHandler(BaseHTTPRequestHandler):
             ('/stock/basic_info', 'Stock Basic Info (个股基本信息)', '/stock/basic_info?code=sh600519', True),
             ('/stock/announcement', 'Stock Announcement (个股公告)', '/stock/announcement?code=sh600519', False),
             ('/market/margin', 'Market Margin (融资融券)', '/market/margin?market=99', False),
-            ('/market/northbound', 'Market Northbound (北向资金)', '/market/northbound', False),
-            ('/market/northbound/history', 'Market Northbound History (北向资金历史)',
-             '/market/northbound/history?period=day', False),
         ]
         for path, name, example, needs_cdp in json_apis:
             cdp_tag = '<span class="tag tag-cdp">CDP</span>' if needs_cdp else '<span class="tag tag-none">–</span>'
@@ -887,7 +868,7 @@ def init_cdp():
         for name in nav_names:
             cdp_engine.add_page(name, 'https://www.cls.cn/stock?code=sz300139', heartbeat=False)
         log.info(f'  ✓ CDP engine ready — finance, quotation, {len(nav_names)} stock pages')
-        import config
+        from . import config
         config.cdp_engine = cdp_engine
     except Exception as e:
         import traceback
@@ -906,8 +887,8 @@ def _cdp_memory_watchdog():
     release memory. This thread forces a `full_chrome_restart()` on a wall-clock
     interval regardless of traffic, keeping long-running memory bounded.
     """
-    import cdp_engine as cdp
-    import config as env
+    from . import cdp_engine as cdp
+    from . import config as env
     while True:
         time.sleep(CDP_RESTART_INTERVAL)
         try:
@@ -925,7 +906,7 @@ def _cdp_memory_watchdog():
 
 
 def main():
-    from utils import setup_logging
+    from .utils import setup_logging
     setup_logging()
 
     def _signal_handler(signum, frame):
@@ -939,7 +920,7 @@ def main():
         if cdp_engine:
             cdp_engine.shutdown()
 
-    from utils import warm_jin10_headers
+    from .utils import warm_jin10_headers
     threading.Thread(target=warm_jin10_headers, daemon=True).start()
     threading.Thread(target=init_cdp, daemon=True).start()
     threading.Thread(target=_cdp_memory_watchdog, daemon=True).start()
@@ -947,7 +928,7 @@ def main():
     threading.Thread(target=_timeline_prefetch_loop, daemon=True).start()
     threading.Thread(target=_f10_prefetch_loop, daemon=True).start()
     threading.Thread(target=_announcement_prefetch_loop, daemon=True).start()
-    from stream import push_loop, run_stream_server
+    from .stream import push_loop, run_stream_server
     threading.Thread(target=push_loop, daemon=True).start()
     threading.Thread(target=run_stream_server, daemon=True).start()
 
@@ -970,9 +951,7 @@ def main():
     log.info(f'  http://localhost:{PORT}/stock/basic_info  — Stock Basic Info (JSON, needs Chrome CDP)')
     log.info(f'  http://localhost:{PORT}/stock/announcement  — Stock Announcement (JSON, no CDP needed)')
     log.info(f'  http://localhost:{PORT}/market/margin  — Market Margin (融资融券, JSON, no CDP needed)')
-    log.info(f'  http://localhost:{PORT}/market/northbound  — Market Northbound (北向资金, JSON, no CDP needed)')
-    log.info(f'  http://localhost:{PORT}/market/northbound/history  — Market Northbound History (北向资金历史, JSON, no CDP needed)')
-    from config import STREAM_PORT
+    from .config import STREAM_PORT
     log.info(f'\nStream push (SSE, port {STREAM_PORT}):')
     log.info(f'  POST   http://localhost:{STREAM_PORT}/stream/subscriptions  — create subscription group')
     log.info(f'  PATCH  http://localhost:{STREAM_PORT}/stream/subscriptions/<sid> — add/remove codes')
