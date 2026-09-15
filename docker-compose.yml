@@ -5,6 +5,7 @@ services:
     restart: unless-stopped
     ports:
       - "8053:8053"
+      - "8054:8054"
     environment:
       - PORT=8053
       - CACHE_TTL=300
@@ -12,6 +13,7 @@ services:
       - MAX_WORKERS=10
       - PUBLIC_BASE_URL=
       - CDP_STOCK_PAGES=3
+      - STREAM_HOST=0.0.0.0
       - CDP_RESTART_INTERVAL=7200
       - LOG_DIR=/app/logs
       - LOG_BACKUP_DAYS=30

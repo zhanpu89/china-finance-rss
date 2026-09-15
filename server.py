@@ -906,11 +906,18 @@ def _cdp_memory_watchdog():
     release memory. This thread forces a `full_chrome_restart()` on a wall-clock
     interval regardless of traffic, keeping long-running memory bounded.
     """
+    import cdp_engine as cdp
     import config as env
     while True:
         time.sleep(CDP_RESTART_INTERVAL)
         try:
             if env.cdp_engine and env.cdp_engine.ready:
+                if time.time() - cdp._last_chrome_restart < cdp._CHROME_RESTART_THROTTLE * 2:
+                    # Chrome was just restarted (nav threshold): a watchdog
+                    # restart now would kill the fresh Chrome back-to-back.
+                    # Skip — memory was already reclaimed.
+                    log.info('  [CDP] watchdog: restart skipped (Chrome restarted recently)')
+                    continue
                 log.info('  [CDP] watchdog: restarting Chrome to reclaim renderer memory')
                 full_chrome_restart()
         except Exception as e:

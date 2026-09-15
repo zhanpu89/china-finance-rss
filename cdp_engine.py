@@ -1054,24 +1054,36 @@ class CDPPage:
     def _maybe_reconnect(self):
         """Restart Chrome entirely after threshold navigations to free memory.
 
-        Uses centralized full_chrome_restart() so only ONE thread kills/starts
-        Chrome. Other pages' ensure_chrome() calls block on _chrome_restart_lock
-        and find the fresh Chrome already running — no duplicate instances.
-
-        Uses class-level _restart_counter_lock to protect the shared counter
-        (not an instance lock, since _nav_restart_counter is a class variable).
+        The shared counter is bumped under the class-level
+        _restart_counter_lock for exactly a counter update + threshold
+        decision — no I/O. The actual restart (full_chrome_restart +
+        _reconnect, 4-24s) runs OUTSIDE that lock, so nav-threshold pages
+        block only each other's counter bump, not the whole navigation set.
+        The heavyweight restart is still single-threaded via
+        _chrome_restart_lock inside full_chrome_restart(); other pages that
+        cross the threshold meanwhile just bump the counter and re-connect
+        to the fresh Chrome via _ensure_ws().
         """
         with CDPPage._restart_counter_lock:
             CDPPage._nav_restart_counter += 1
             if CDPPage._nav_restart_counter >= self._MAX_PAGE_NAV_BEFORE_RECONNECT:
                 CDPPage._nav_restart_counter = 0
-                log.info(f"[CDP:{self.name}] nav threshold ({self._MAX_PAGE_NAV_BEFORE_RECONNECT}) reached, "
-                      f"full Chrome restart...")
-                full_chrome_restart(f"http://{self.cdp_host}:{self.cdp_port}")
-                # Reconnect this page to the fresh Chrome (clears cache, creates new tab)
-                self._reconnect()
-                return True
-        return False
+            else:
+                return False
+        if time.time() - _last_chrome_restart < _CHROME_RESTART_THROTTLE * 2:
+            # Chrome was just restarted (nav threshold or watchdog): a second
+            # full_chrome_restart would kill the fresh Chrome back-to-back,
+            # doubling the CDP-unavailable window. Counter already reset —
+            # caller reconnects to the new Chrome via _ensure_ws() (self-heal).
+            log.info(f"[CDP:{self.name}] nav threshold reached but Chrome restarted "
+                  f"recently — skipping full restart, reconnecting to new Chrome")
+            return False
+        log.info(f"[CDP:{self.name}] nav threshold ({self._MAX_PAGE_NAV_BEFORE_RECONNECT}) reached, "
+              f"full Chrome restart...")
+        full_chrome_restart(f"http://{self.cdp_host}:{self.cdp_port}")
+        # Reconnect this page to the fresh Chrome (clears cache, creates new tab)
+        self._reconnect()
+        return True
 
     def navigate_stock(self, stock_code, timeout=15, tabs=('fund_flow', 'f10')):
         """Navigate to a stock code, wait for fresh data, return True on success.

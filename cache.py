@@ -12,7 +12,10 @@ from config import CACHE_TTL, REQUEST_TIMEOUT
 cache = {}
 _cache_lock = threading.Lock()
 _fetch_inflight = {}
-MAX_CACHE_SIZE = 200
+# 2000 ≈ 200 max user codes × 4 URL variants × 2.5 headroom (a full watchlist
+# tick touches ~600-800 URL entries; 200 would flush the URL cache every
+# round → ~0 hit rate). Each entry averages ~10KB → ~20MB, fine on 2C2G.
+MAX_CACHE_SIZE = 2000
 CACHE_JITTER = 0.2
 # Sweep expired entries at most once per interval (avoid O(n) per request).
 _last_cache_sweep = 0.0

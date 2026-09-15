@@ -145,7 +145,10 @@ class _SSEConn:
     """One live SSE client: queue drained by its handler thread."""
 
     def __init__(self):
-        self.q = queue.Queue()
+        # Bounded queue: a slow client cannot make us buffer frames without
+        # bound (L1 tick drops frames for a lagging client — next tick
+        # overwrites). None sentinel wakes the handler to exit.
+        self.q = queue.Queue(maxsize=8)
         self.closed = False
 
 
@@ -281,6 +284,9 @@ def _release_conn():
 class StreamHandler(BaseHTTPRequestHandler):
     protocol_version = 'HTTP/1.1'
     server_version = 'ChinaFinanceRSS/stream'
+    timeout = 30  # socket timeout: a stalled client can't hold a pool thread
+                  # on rfile.read / wfile.write of a management request.
+                  # _serve_sse re-sets its own longer timeout below.
 
     def log_message(self, fmt, *args):
         log.info('[stream] %s - %s' % (self.address_string(), fmt % args))
@@ -288,8 +294,11 @@ class StreamHandler(BaseHTTPRequestHandler):
     # -- management endpoints (short-lived) --
 
     def _read_json_body(self):
-        length = int(self.headers.get('Content-Length') or 0)
-        if length > 65536:
+        try:
+            length = int(self.headers.get('Content-Length') or 0)
+        except (ValueError, TypeError):
+            return None
+        if length < 0 or length > 65536:
             return None
         body = self.rfile.read(length) if length else b''
         try:
@@ -390,6 +399,10 @@ class StreamHandler(BaseHTTPRequestHandler):
             self.send_header('Cache-Control', 'no-cache')
             self.send_header('Connection', 'keep-alive')
             self.end_headers()
+            # Socket-level timeout so a stalled client (full TCP window)
+            # can't hold the handler thread indefinitely on wfile.write;
+            # OSError is caught below alongside the disconnect cases.
+            self.connection.settimeout(STREAM_PING_INTERVAL * 2)
             while not conn.closed:
                 try:
                     frame = conn.q.get(timeout=STREAM_PING_INTERVAL)
@@ -417,7 +430,7 @@ def make_stream_server(max_workers=None):
     """Build the stream HTTP server (BoundedThreadPoolServer for load shed)."""
     from server import BoundedThreadPoolServer
     max_workers = max_workers or (MAX_STREAM_CONNS + 10)
-    return BoundedThreadPoolServer(('', STREAM_PORT), StreamHandler,
+    return BoundedThreadPoolServer((config.STREAM_HOST, STREAM_PORT), StreamHandler,
                                    max_workers=max_workers)
 
 

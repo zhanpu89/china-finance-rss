@@ -7,6 +7,7 @@ from datetime import datetime, timezone, timedelta
 # Env-based configuration
 PORT = int(os.getenv('PORT', '8053'))
 STREAM_PORT = int(os.getenv('STREAM_PORT', '8054'))
+STREAM_HOST = os.getenv('STREAM_HOST', '127.0.0.1')
 CDP_URL = os.getenv('CDP_URL', 'http://localhost:9222')
 CACHE_TTL = int(os.getenv('CACHE_TTL', '300'))
 REQUEST_TIMEOUT = int(os.getenv('REQUEST_TIMEOUT', '10'))
@@ -120,11 +121,11 @@ def stock_nav_page_names():
 _FUNDFLOW_POOL_REFRESH = 25
 _FUNDFLOW_MAX_POOL = 500
 _TIMELINE_POOL_REFRESH = 30
-_TIMELINE_MAX_POOL = 300
+_TIMELINE_MAX_POOL = 500
 _F10_POOL_REFRESH = 60
 _F10_MAX_POOL = 300
 _BASIC_INFO_POOL_REFRESH = 120
-_BASIC_INFO_MAX_POOL = 300
+_BASIC_INFO_MAX_POOL = 500
 _ANNOUNCEMENT_POOL_REFRESH = 60
 _ANNOUNCEMENT_MAX_POOL = 300
 
