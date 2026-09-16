@@ -9,7 +9,9 @@
 #
 services:
   rss:
-    build: .
+    build:
+      context: ../..          # 从 doc/deploy/ 指向 repo 根目录
+      dockerfile: Dockerfile
     container_name: china-finance-rss
     restart: unless-stopped
     ports:
