@@ -12,15 +12,18 @@ services:
       - MAX_WORKERS=20
       - MAX_INFLIGHT=40
       - PUBLIC_BASE_URL=
-      - CDP_STOCK_PAGES=8
+      - CDP_STOCK_PAGES=4
       - STREAM_HOST=0.0.0.0
       - CDP_RESTART_INTERVAL=7200
+      # ── HTTP 压缩（跨公网带宽节省）───────────────────────
+      - GZIP_MIN_BYTES=1024
+      - GZIP_COMPRESSLEVEL=1
       - LOG_DIR=/app/logs
       - LOG_BACKUP_DAYS=30
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
-    mem_limit: 2g
+    mem_limit: 1.5g
     mem_reservation: 256M
     dns:
       - 8.8.8.8
