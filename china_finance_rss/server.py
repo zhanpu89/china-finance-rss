@@ -16,6 +16,7 @@ Dependencies:
 """
 
 import atexit
+import gzip
 import json
 import re
 import signal
@@ -1216,18 +1217,31 @@ class RSSHandler(BaseHTTPRequestHandler):
 
     def _send_text(self, status_code, content_type, body, cache=True,
                    varies_on_host=False, write_body=True):
+        # Perf: gzip large bodies when the client advertises it (compression
+        # shrinks 334KB JSON quotes ~10x → network time dominates).  Raw body
+        # for clients without Accept-Encoding — wire contract unchanged.
         body_bytes = body.encode('utf-8')
+        gzipped = False
+        if (len(body_bytes) >= config.GZIP_MIN_BYTES
+                and 'gzip' in self.headers.get('Accept-Encoding', '')):
+            body_bytes = gzip.compress(body_bytes, config.GZIP_COMPRESSLEVEL)
+            gzipped = True
         self.send_response(status_code)
         self.send_header('Content-Type', content_type)
         self.send_header('Content-Length', str(len(body_bytes)))
+        if gzipped:
+            self.send_header('Content-Encoding', 'gzip')
         if cache:
             # S2-3: a request-derived base URL makes the body host-dependent, so
             # it must not be marked `public` (nor cached without `Vary`).
             scope = 'private' if varies_on_host else 'public'
             self.send_header('Cache-Control',
                              f'{scope}, max-age={self._cache_age()}')
-            if varies_on_host:
-                self.send_header('Vary', _BASE_URL_VARY)
+            # Vary: Accept-Encoding always (body depends on it when gzip-ready);
+            # host-sensitive base URL additionally varies on host headers.
+            vary = ('Host, X-Forwarded-Host, X-Forwarded-Proto, Accept-Encoding'
+                    if varies_on_host else 'Accept-Encoding')
+            self.send_header('Vary', vary)
         self.end_headers()
         if write_body:
             self.wfile.write(body_bytes)
