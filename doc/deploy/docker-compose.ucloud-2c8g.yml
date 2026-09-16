@@ -24,7 +24,7 @@ services:
                                       # （压测：100并发 503≈0%，15s 超时边界更宽松）
       - MAX_INFLIGHT=60               # = 2× MAX_WORKERS
       # ── CDP 浏览器池（内存充裕）────────────────────────────
-      - CDP_STOCK_PAGES=8             # 8GB 内存充裕，8 tab ≈ 400-800MB，无压力
+      - CDP_STOCK_PAGES=5             # 总内存 8GB 分区：本服务 3GB + 其他应用 5GB；5 tab ≈ 250-500MB，留足 Python 堆栈余量
       - CDP_RESTART_INTERVAL=7200
       # ── HTTP 压缩 ──────────────────────────────────────────
       - GZIP_MIN_BYTES=1024
@@ -38,7 +38,7 @@ services:
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
-    mem_limit: 6g                     # 8GB 总内存，给 OS 留 2GB（文件页缓存 + CDP 子进程）
+    mem_limit: 3g                     # 8GB 总内存，给 OS 留 2GB（文件页缓存 + CDP 子进程）
     mem_reservation: 256M
     dns:
       - 8.8.8.8
