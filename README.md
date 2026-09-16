@@ -37,7 +37,7 @@ All require `?code=` with stock symbols (e.g. `?code=sh600519` or `?code=sh60051
 | `/stock/fundflow` | Capital flow (主力/超大/大/中/小单净流入) | No |
 | `/stock/timeline` | Intraday price timeline | No |
 | `/stock/f10` | Company fundamentals & financials | Yes |
-| `/stock/basic_info` | Real-time quote + sector name (申万一级行业) | Yes |
+| `/stock/basic_info` | Real-time quote + sector name (申万一级行业) | No |
 | `/stock/announcement` | Company announcements | No |
 
 ## JSON Market APIs
@@ -63,14 +63,16 @@ http://localhost:8053/healthz?check=1
 | Variable | Default | Description |
 | --- | --- | --- |
 | `PORT` | `8053` | Server port |
-| `CACHE_TTL` | `300` | Cache TTL (seconds) |
 | `REQUEST_TIMEOUT` | `10` | Upstream request timeout |
 | `PUBLIC_BASE_URL` | auto | Public URL for RSS self-links & OPML |
 | `CDP_URL` | `http://localhost:9222` | Chrome DevTools URL |
 | `MAX_WORKERS` | `20` | Max concurrent request threads |
+| `LISTEN_BACKLOG` | `128` | TCP accept backlog; keep ≥ `MAX_INFLIGHT` and ≥ `MAX_STREAM_CONNS` |
 | `STREAM_HOST` | `127.0.0.1` | SSE listen addr; set `0.0.0.0` for cross-host/container access (no-auth mgmt surface) |
 | `CDP_RESTART_THROTTLE` | `15` | Full Chrome restart throttle (s); guards the `full_chrome_restart` lock (×2 = no re-restart within 30s) |
 | `STREAM_GROUP_IDLE_TTL` | `300` | Idle zombie subscription-group reaper (s); a group with no live connection is destroyed after this — clients must re-POST `/stream/subscriptions` after a long disconnect |
+
+> Cache TTL is **per data-domain and trading-hours aware** (`config.cache_policy`, single source of truth) — it is no longer a single env var. Examples: RSS/`news_url` 30s (trading) / 180s (off-hours), `quote` 8s / 120s, `plate` 12s / 120s, `f10`/`longhu` 300s, `margin` 600s, `sector` 7d. Upstream failures are rate-limited by a negative cache (5s) plus an escalating probe budget (2→4→5s).
 
 Do not commit `.env` files, cookies, tokens, private keys, Chrome profiles, or HAR captures.
 
