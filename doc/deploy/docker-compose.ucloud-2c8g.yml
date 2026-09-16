@@ -38,8 +38,8 @@ services:
       - LOG_DIR=/app/logs
       - LOG_BACKUP_DAYS=30
     volumes:
-      - ./data:/app/data
-      - ./logs:/app/logs
+      - ../../data:/app/data
+      - ../../logs:/app/logs
     mem_limit: 3g                     # 8GB 总内存，给 OS 留 2GB（文件页缓存 + CDP 子进程）
     mem_reservation: 256M
     dns:
