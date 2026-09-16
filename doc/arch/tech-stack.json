@@ -1,0 +1,148 @@
+{
+  "project": "china-finance-rss",
+  "version": "1.5",
+  "generatedAt": "2026-09-16",
+  "primaryLanguage": "python",
+  "moduleRoot": "china_finance_rss",
+  "totalComponents": 9,
+  "techStack": {
+    "backend": {
+      "language": "Python 3 (标准库 only)",
+      "framework": "http.server (ThreadingHTTPServer + BaseHTTPRequestHandler)",
+      "orm": "none (内存态，无 ORM)",
+      "concurrency": "threading + concurrent.futures.ThreadPoolExecutor",
+      "cache": "自研内存缓存 (cache.py: URL 缓存 / 负缓存 / 端点缓存 / feed 缓存)",
+      "push": "SSE (text/event-stream, 全量快照帧)：ts + 全码在位的 items（缺数据为 null）+ codes_total/fields/missing/missing_count + 条件 errors/stale/stale_count；同组帧对象共享同一引用；响应 Connection: close",
+      "cdp": "Chrome DevTools Protocol (cdp_engine.py, websocket 为可选延迟导入)",
+      "test": "unittest (python -m unittest discover -s tests -v)"
+    },
+    "database": {
+      "type": "none (无外部存储，全部状态在内存)",
+      "orm": "none",
+      "cache": "in-process only"
+    },
+    "frontend": {
+      "framework": "none",
+      "uiLib": "none",
+      "stateManagement": "none"
+    },
+    "infrastructure": {
+      "messageQueue": "none",
+      "searchEngine": "none",
+      "monitoring": "自研 metrics.py + logging (标准库，无监控依赖)",
+      "deployment": "Docker + docker-compose; 入口 python -m china_finance_rss.server; 端口 8053(主) / 8054(流)"
+    }
+  },
+  "runtimeDependencies": [],
+  "optionalRuntimeDependencies": [
+    { "name": "websocket-client", "scope": "cdp_engine 函数内延迟导入，仅 CDP 模式需要", "policy": "不得提升为硬依赖" }
+  ],
+  "devDependencies": [],
+  "architectureRules": {
+    "importRestrictions": {
+      "denylist": [
+        "requests",
+        "flask",
+        "fastapi",
+        "django",
+        "aiohttp",
+        "httpx",
+        "redis",
+        "pymysql",
+        "sqlalchemy",
+        "psycopg2",
+        "pytz",
+        "pandas",
+        "numpy",
+        "prometheus_client",
+        "playwright",
+        "selenium"
+      ],
+      "allowlist": {
+        "china_finance_rss/*.py": [
+          "china_finance_rss",
+          "http",
+          "urllib",
+          "json",
+          "re",
+          "os",
+          "sys",
+          "time",
+          "datetime",
+          "threading",
+          "queue",
+          "uuid",
+          "logging",
+          "collections",
+          "concurrent",
+          "email",
+          "subprocess",
+          "signal",
+          "atexit",
+          "gc",
+          "random",
+          "socket",
+          "itertools",
+          "hashlib",
+          "html",
+          "xml",
+          "websocket"
+        ],
+        "allowlistNote": "v1.4: 本表已按包内模块级 import 的实测闭包校正。新增 hashlib/html/xml（均来自 utils.py：cls_sign_params 的哈希、HTML 实体反转义、RSS/OPML 的 xml.etree.ElementTree）——三者都是标准库，缺失会让 check-arch-compliance.sh 对 utils.py 报假阳性。itertools 在包内无任何引用，保留为历史项（无害）。websocket 仍为唯一特例：仅 cdp_engine.execute_js() 内的函数级延迟导入（可选运行时依赖，CDP 模式才需要），不得提升为模块级硬依赖。"
+      }
+    },
+    "layerIsolation": [
+      {
+        "pattern": "china_finance_rss/cache.py",
+        "forbiddenImports": ["china_finance_rss.server", "china_finance_rss.stream", "china_finance_rss.stock_api", "china_finance_rss.market_api"],
+        "reason": "cache.py 必须保持纯缓存/契约层，反向依赖上层模块会形成环"
+      },
+      {
+        "pattern": "china_finance_rss/config.py",
+        "forbiddenImports": ["china_finance_rss.cache", "china_finance_rss.server", "china_finance_rss.stream", "china_finance_rss.stock_api", "china_finance_rss.market_api", "china_finance_rss.cdp_engine"],
+        "reason": "config 是 TTL/配置单一权威来源，禁止依赖任何业务模块"
+      },
+      {
+        "pattern": "china_finance_rss/cdp_engine.py",
+        "forbiddenImports": ["china_finance_rss.server", "china_finance_rss.stream", "china_finance_rss.stock_api"],
+        "reason": "cdp_engine 只允许依赖 config/metrics，禁止反向依赖调用方（含 stock_api）——与 stock_api → cdp_engine 构成单向同层边"
+      },
+      {
+        "pattern": "china_finance_rss/stock_api.py",
+        "forbiddenImports": ["china_finance_rss.server", "china_finance_rss.stream"],
+        "reason": "v1.4: stock_api 属 Layer 1，允许同层单向引用 cdp_engine.page_data（无环，与 cdp_engine 条目的 forbiddenImports 互为反向约束）；禁止依赖上层 server/stream"
+      },
+      {
+        "pattern": "china_finance_rss/metrics.py",
+        "forbiddenImports": ["china_finance_rss.cache", "china_finance_rss.server", "china_finance_rss.stream", "china_finance_rss.stock_api", "china_finance_rss.market_api", "china_finance_rss.cdp_engine"],
+        "reason": "metrics 必须是零业务依赖的叶子模块"
+      }
+    ],
+    "namingRules": {
+      "files": [
+        { "pattern": "china_finance_rss/*_api.py", "type": "mustEndWith", "expect": "_api" },
+        { "pattern": "tests/test_*.py", "type": "mustStartWith", "expect": "test_" }
+      ],
+      "handlers": "HTTP/业务处理器一律 handle_*；返回 dict 不抛异常（批量走 build_batch_response，单体走 error 客体；/cls/hotplate 为分区 error 客体）。v1.4 澄清：管道层（_run_batch/_process_chunk/_handle_cached_batch）返回 (results, errors) 二元组，批量 handler 内部调 build_batch_response 组装为 dict 后返回；server._handle_stock_batch 只做入参归一化 + 截断 + dropped 注入 + 键回写，不二次组装",
+      "fetch": "上游取数器一律 fetch_*；按码取数器签名至少含 (code, deadline=None)（v1.4 实为 (code, deadline=None, ttl=None)，ttl 供 INV-1a 同源同变量；后续可继续追加可选形参），非码取数器（如 fetch_cls_telegraph(feed_url=None)）不受此限。所有 HTTP 取数必须经 cache.fetch_json（唯一出口，URL 缓存 + 负缓存 + 单飞），长链路须把 deadline 透传为 fetch_json(deadline=)——其超期闸门位于正缓存之后",
+      "config": "禁止在非 config.py 模块中出现裸 TTL 数字字面量，一律经 config.cache_policy(domain) 派生；上游编码由域指定（fetch_json(..., encoding=...)）；v1.4 新增：**股票代码归一化一律经 config.canonical_code**（唯一权威，禁止任何模块出现本地代码正则/别名表），帧尺寸估算一律经 config.stream_frame_bytes",
+      "metrics": "v1.5: 观测写入一律经 metrics.incr/set_gauge；指标名须在 metrics._KNOWN 注册表内（未注册仅告警不阻断）；业务锁内不得发布指标（http_503_total 有 3 个计数点：_reject_503 主端口准入 / healthz / stream 连接上限；业务端点降级恒 200 + error 客体、不产生 503）"
+    },
+    "fileStructure": {
+      "package": "china_finance_rss/ (扁平包，不新增子包)",
+      "modules": [
+        "server.py",
+        "stream.py",
+        "config.py",
+        "cache.py",
+        "stock_api.py",
+        "market_api.py",
+        "cdp_engine.py",
+        "metrics.py",
+        "utils.py"
+      ],
+      "additions": ["metrics.py"],
+      "forbidden": ["china_finance_rss/ 之外的第二个代码根", "前端目录", "migrations/", "docker 之外的部署脚本"]
+    }
+  }
+}
