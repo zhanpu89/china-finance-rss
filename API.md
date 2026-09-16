@@ -134,242 +134,204 @@ Base URL: `http://localhost:8053`
 
 # 2. 个股数据 API（JSON）
 
-所有个股端点返回 `application/json; charset=utf-8`。接受 `?code=` 查询参数，支持批量查询（逗号分隔，上限 50 只）。
+所有个股端点返回 `application/json; charset=utf-8`。接受 `?code=` 查询参数，支持批量查询（逗号分隔，上限 50 只）。**批量时以 `code` 为顶层键**（`{"sh600519": {...}, "sz000001": {...}}`）；单只查询时同样返回 `{"code": data}` 包裹。
 
-**通用请求参数**:
-
-| 参数 | 类型 | 必需 | 说明 |
-|------|------|------|------|
-| `code` | string | 是 | 股票代码，格式 `{市场}{6位数字}`，如 `sh600519`。支持逗号分隔批量查询，如 `sh600519,sz000001` |
-
-**通用响应结构**（批量查询多只时返回 `{"code1": data1, "code2": data2}`；单只查询时直接返回到 `{"code": data}`）：
+> **数值单位约定（全章适用）**：`change` / `tr` / `amp` / `change_3` / `change_5` / `change_1y` 等带「率/比/幅」语义的字段均为**小数**，不是百分比数值——`change: -0.0116` 表示 **-1.16%**，`tr: 0.0021` 表示 **0.21%**。换算公式：百分比 = 小数值 × 100。
 
 ---
 
 ### `GET /stock/data`
 
-**个股行情详情** — REST 直调。响应格式为 `{"code": {...}}`。
+**个股行情详情** — CLS x-quote 详情（REST 直调，原样透传上游返回）。
 
 - **CDP**: 否
-- **响应字段**（`data` 内）：
+- **顶层键**：`{"<code>": {...}}`；内容为上游 `data` 客体原样透传（含 `label`/`plate`/`plate_rel`/`primary_industry`/`event` 等），**不做字段映射**；`label` 内为多维标签位（`suspend`/`financing`/`tong`/`sh`/`sz`/`index`/`stock`/`kcb` + 对应 `*_desc` 描述文本）。
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `secu_code` | string | 证券代码 |
-| `secu_name` | string | 证券名称 |
-| `latest_price` | number | 最新价 |
-| `change` | number | 涨跌额 |
-| `change_pct` | number | 涨跌幅（%） |
-| `high` | number | 最高价 |
-| `low` | number | 最低价 |
-| `open` | number | 开盘价 |
-| `pre_close` | number | 昨收价 |
-| `volume` | number | 成交量 |
-| `amount` | number | 成交额 |
-| `turnover_rate` | number | 换手率（%） |
-| `pe` | number | 市盈率 |
-| `pb` | number | 市净率 |
-| 其他字段 | — | 上游 API 返回的额外字段也会透传 |
+| `primary_industry` | object/null | 申万一级行业：`{plate_code, plate_name, change}`（`change` 为小数） |
+| `plate` | array | 所属板块列表：`{secu_code, secu_name, change(小数), assoc_desc}` |
+| `plate_rel` | array | 相关板块详情：`{plate_code, plate_name, change(小数), is_most_relevant, assoc_desc}` |
+| `label` | object | 标签位集合（含 `*_desc` 中文描述，如 `融资融券标的`/`沪股通/深股通`）；`kcb`=科创板等 |
+| `event` | object/null | 近期事件：`{content, secu_code, time, type}` |
+| `up_reason` / `up_time` | string | 上涨原因 / 触发时间（无则为 `""`） |
+| `growth_ms` | string/null | 增长里程碑（如无为 `null`） |
 
 ---
 
 ### `GET /stock/fundflow`
 
-**个股资金流向** — 个股主力资金流入流出数据。
+**个股资金流向** — CLS 口径主力资金流（REST 直调）。
 
 - **CDP**: 否（REST API + CDP evaluate_fetch 回退）
-- **请求示例**: `?code=sh600519`
-- **响应字段**：
+- **顶层键**：`{"<code>": {...}}`
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `code` | number | 状态码（200=成功） |
-| `data` | object/null | 资金流向数据 |
-| `data.main_inflow` | number | 主力净流入 |
-| `data.main_inflow_pct` | number | 主力净占比（%） |
-| `data.super_inflow` | number | 超大单净流入 |
-| `data.big_inflow` | number | 大单净流入 |
-| `data.mid_inflow` | number | 中单净流入 |
-| `data.small_inflow` | number | 小单净流入 |
-| 其他字段 | — | 上游 API 透传 |
+| `main_fund_in` | number | 主力净流入（**元**） |
+| `main_fund_out` | number | 主力净流出（**元**） |
+| `main_fund_diff` | number | 主力净额 = 流入 - 流出（**元**） |
+| `super_fund_diff` | number | 超大单净额（元） |
+| `large_fund_diff` | number | 大单净额（元） |
+| `medium_fund_diff` | number | 中单净额（元） |
+| `little_fund_diff` | number | 小单净额（元） |
+| `main_fund_3` / `_5` / `_10` / `_20` | number | 近 3/5/10/20 日主力净额（元） |
+| `date` | number | 数据日期 `YYYYMMDD`（如 `20260916`） |
+| `min_time` | number | 数据时点（HHMM，如 `1524` = 15:24） |
+| `year_up_ratio` | number | 年度上涨比例（小数，0~1） |
+| `year_up_num` | number | 年内上涨天数 |
+| `latest_up_date` | string/null | 最近上涨日期 |
+| `year_avr_open_change` / `year_avr_close_change` | number/null | 年内开盘/收盘平均涨跌幅（小数） |
 
 ---
 
 ### `GET /stock/timeline`
 
-**个股分时图** — 个股当日分时走势数据。
+**个股分时图** — 当日 241 点分时走势（REST 直调，一次取全）。
 
 - **CDP**: 否（REST API + CDP evaluate_fetch 回退）
-- **请求示例**: `?code=sh600519`
-- **响应字段**：
+- **顶层键**：`{"<code>": {"date": [...], "line": [...]}}`
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `code` | number | 状态码（200=成功） |
-| `data` | object | 分时数据 |
-| `data.prices` | array | 价格序列 |
-| `data.volumes` | array | 成交量序列 |
-| `data.avg_price` | number | 均价 |
-| `data.pre_close` | number | 昨收价 |
-| 其他字段 | — | 上游 API 透传 |
+| `date` | array | 分时日期（每元素 `YYYYMMDD`） |
+| `line` | array | 分时点序列（**241 点**：09:30~11:30 + 13:00~15:00） |
+| `line[].minute` | number | 分钟序号（`930` = 09:30，`1130`=11:30，`1300`=13:00…） |
+| `line[].last_px` | number | 该分钟最新价 |
+| `line[].av_px` | number | 均价 |
+| `line[].change` | number | 涨跌幅（**小数**，如 `0.0009` = 0.09%） |
+| `line[].change_px` | number | 涨跌额（元） |
+| `line[].preclose_px` / `open_px` | number | 昨收 / 今开 |
+| `line[].amp` | number | 振幅（**小数**） |
+| `line[].change_color` | number | 涨跌色（1=红/涨，2=绿/跌，0=平） |
+| `line[].business_amount` | number | 成交量（手） |
+| `line[].business_balance` | number | 成交额（元） |
+| `line[].purchases` / `sales` | number/null | 委买 / 委卖手数 |
 
 ---
 
 ### `GET /stock/f10` ⚡ 需要 Chrome CDP
 
-**个股 F10 财务概要** — 个股公司基本信息、财务数据（CDP 导航）。
+**个股 F10 全景** — 公司资料 / IPO / 经营 / 财务 / 分红 / 股本股东（CDP 导航）。
 
 - **CDP**: 是（依赖 Chrome CDP 导航到个股页面并点击 F10 选项卡）
-- **请求示例**: `?code=sh600519`
-- **响应字段**：
+- **顶层键**：`{"<code>": {...}}`
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `basic_info` | object | 基础信息 |
-| `basic_info.SecuCode` | string | 证券代码 |
-| `basic_info.SecuAbbr` | string | 证券简称 |
-| `basic_info.IndustryName` | string | 行业名称（如 "食品饮料-白酒"） |
-| `basic_info.ListingDate` | string | 上市日期 |
-| `basic_info.TotalCapital` | number | 总股本 |
-| `basic_info.NationalCapital` | number | 流通股本 |
-| `basic_info.PrimaryBusiness` | string | 主营业务 |
-| `ipo_info` | object/null | IPO 信息 |
-| `finance_info` | object/null | 财务信息 |
-| `finance_info.perShareEPS` | number | 每股收益 |
-| `finance_info.perShareBV` | number | 每股净资产 |
-| `finance_info.perShareCF` | number | 每股现金流 |
-| `finance_info.roe` | number | 净资产收益率（%） |
-| `finance_info.profitRatio` | number | 净利润率（%） |
-| 其他字段 | — | 上游 API 透传 |
+| `basic_info` | object | 公司资料：`SecuCode`/`SecuAbbr`/`company_name`/`IndustryName`(食品饮料-白酒Ⅱ-白酒Ⅲ)/`plate_names`/`LegalRepr`/`GeneralManager`/`EstablishmentDate`/`RegCapital`/`BriefIntroText`/`main_business` 等 |
+| `ipo_info` | object | IPO：`ListedDate`/`IssueVol`/`IssuePriceCeiling`/`IPOProceeds`/`WeightedPERatio`/`LotRateOnline` |
+| `operation_overview` | array | 主营构成：`{revenue_structure, operating_revenue, operating_profit}`（字符串带单位） |
+| `financial_analysis` | object | 财务：`eps`/`nav_ps`/`roe`/`debt_ratio`/`net_profit_margin`/`yoy_net_profit`/`yoy_revenue`/`total_revenue`/`net_profit`（**字符串带单位**，如 `'35.57元'`/`'17.72%'`，此处 % 为文本） |
+| `dividend` | array | 分红记录：`{data(报告期), plan(每10股派息+登记/除权日)}` |
+| `shares_and_holders` | object | 股本股东：`total_shares`/`a_shares_float`/`a_shares_holders_count` |
 
 ---
 
 ### `GET /stock/basic_info`
 
-**个股基本信息** — 实时行情 + 行业板块归属。分两阶段（均为 REST）：
-1. REST API 获取实时行情（<100ms，致命）
-2. REST 个股详情获取申万一级行业名称（非致命；命中 7 天 `sector` 缓存则跳过）
+**个股基本信息** — 实时行情 + 行业归属（两阶段 REST：行情致命 + 行业非致命，命中 7 天 `sector` 缓存则跳过）。
 
 - **CDP**: 否（纯 REST）
-- **请求示例**: `?code=sh600519`
-- **响应字段**：
+- **顶层键**：`{"<code>": {"code": 200, "msg": "", "data": {...}, "sector_name": "..."}}`
+
+**`data` 内字段**：
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `code` | number | 状态码 |
-| `data` | object | 行情数据 |
-| `data.secu_code` | string | 证券代码 |
-| `data.secu_name` | string | 证券名称 |
-| `data.latest_price` | number | 最新价 |
-| `data.change` | number | 涨跌额 |
-| `data.change_pct` | number | 涨跌幅（%） |
-| `data.high` | number | 最高价 |
-| `data.low` | number | 最低价 |
-| `data.open` | number | 开盘价 |
-| `data.pre_close` | number | 昨收价 |
-| `data.volume` | number | 成交量 |
-| `data.amount` | number | 成交额 |
-| `data.total_capital` | number | 总股本 |
-| `data.circulated_capital` | number | 流通股本 |
-| `data.total_market_value` | number | 总市值 |
-| `data.circulated_market_value` | number | 流通市值 |
-| `data.turnover_rate` | number | 换手率（%） |
-| `data.pe` | number | 市盈率 |
-| `data.pb` | number | 市净率 |
-| `sector_name` | string/null | 申万一级行业名称（如 "食品饮料"）；行业详情取数失败时缺省 |
+| `secu_code` / `ori_code` | string | 证券代码（`sh600519`）/ 纯数字码（`600519`） |
+| `secu_name` / `secu_type` | string | 证券名称 / 类型（`SHARE`） |
+| `last_px` | number | 最新价 |
+| `change_px` | number | 涨跌额（元） |
+| `change` | number | 涨跌幅（**小数**，`-0.0116` = -1.16%） |
+| `open_px` / `preclose_px` / `high_px` / `low_px` | number | 今开 / 昨收 / 最高 / 最低 |
+| `tr` | number | 换手率（**小数**，`0.0021` = 0.21%） |
+| `amp` | number | 振幅（**小数**，`0.0164` = 1.64%） |
+| `business_amount` | number | 成交量（手） |
+| `business_balance` | number | 成交额（元） |
+| `qrr` | number | 量比（如 `1.1283`） |
+| `mc` / `cmc` | number | 总市值 / 流通市值（元） |
+| `change_3` / `change_5` / `change_1y` | number | 3 日 / 5 日 / 1 年涨跌幅（**小数**） |
+| `up_price` / `down_price` | number | 涨停价 / 跌停价 |
+| `av_px` | number | 均价 |
+| `entrust_rate` | number | 委比（**小数**，`0.55` = 55%） |
+| `purchases` / `sales` | number | 委买 / 委卖 |
+| `pe` / `ttm_pe` / `dynamic_pe` | number | 市盈率（静态 / TTM / 动态） |
+| `pb` | number | 市净率 |
+| `TotalShares` / `NonRestrictedShares` | number | 总股本 / 流通股本（股） |
+| `NetAssetPS` | number | 每股净资产 |
+| `trade_status` | string | 交易状态（`ENDTR` = 收盘等） |
+| `unlisted` | boolean | 是否未上市 |
+| `trade_time` / `eoeId` / `market_enum` / `note` / `financing` | — | 内部扩展字段（常数/可空，忽略即可） |
+| **`sector_name`**（顶层） | string/null | 申万一级行业名（如 `食品饮料行业`）；取数失败时缺省 |
 
 ---
 
 ### `GET /stock/announcement`
 
-**个股公告** — 个股公告列表（REST API + CLS 签名）。
+**个股公告列表** — CLS 口径（REST API + CLS 签名）。
 
 - **CDP**: 否（REST API + CDP evaluate_fetch 回退）
-- **请求示例**: `?code=sh600519`
-- **响应字段**：
+- **顶层键**：`{"<code>": [公告数组]}`（**不是** `data.list`——code 直接对数组）
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `code` | number | 状态码（200=成功） |
-| `data` | object | 公告数据 |
-| `data.list` | array | 公告列表 |
-| `data.list[].id` | string | 公告 ID |
-| `data.list[].title` | string | 公告标题 |
-| `data.list[].time` | string | 发布时间 |
-| `data.list[].url` | string | 公告详情链接 |
+| `[].id` | string | 公告 ID |
+| `[].secu_code` | string | 证券代码 |
+| `[].title` | string | 公告标题 |
+| `[].time` | string | 发布时间（`YYYY-MM-DD HH:MM:SS`） |
+| `[].timestamp` | number | 时间戳（秒） |
+| `[].url` | string | 公告 PDF 链接 |
 
 ---
 
 # 3. 市场数据 API（JSON）
 
+所有市场端点返回 `application/json; charset=utf-8`。**带「率/比」语义的字段均为小数**（`0.048` = 4.8%），换算 = 小数值 × 100。
+
 ---
 
 ### `GET /finance/market` ⚡ 需要 Chrome CDP
 
-**财联社看盘** — 财联社大盘情绪与数据面板。
+**财联社看盘** — 大盘情绪与数据面板。
 
-- **CDP**: 是（依赖 Chrome CDP 持久页面）
+- **CDP**: 是（依赖 Chrome CDP 持久页面）；CDP 不可用时各键为 `null`/缺省
 - **请求参数**: 无
-- **响应字段**：
+- **响应**：顶层键 `live_refresh` / `basic_info` / `anchor` / `advance_decline` / `market_sentiment` / `articles` / `stock_quote`；每键为上游原样包裹 `{code|errno, msg, data}`。
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `market_sentiment` | object/null | 市场情绪指标（emotion） |
-| `articles` | array/null | 要闻文章列表 |
-| `advance_decline` | object/null | 涨跌家数（up_down） |
-| `live_refresh` | object/null | 实时刷新数据 |
+| `market_sentiment` | object/null | 市场情绪：`{code, msg, data}`，`data` 含情绪评分 |
+| `advance_decline` | object/null | 涨跌家数：`{code, msg, data}`，`data` 含 `up`/`down`/`flat` 与占比 |
+| `articles` | object/null | 要闻文章列表（上游 `errno` 包裹） |
+| `live_refresh` | object/null | 实时刷新：`{code, msg, data}`，`data` 为 **码 → 涨跌幅（小数）** 映射（如 `{"sh000688": 0.0414}` = +4.14%） |
 | `anchor` | object/null | 锚点/关注数据 |
-| `basic_info` | object/null | 基础指数信息 |
-| `ws_count` | number | 采集到的 WebSocket 消息总数（仅当 CDP 页面有 WS 数据时） |
-| `ws_latest` | array | 最近 5 条 WebSocket 消息（仅当 CDP 页面有 WS 数据时） |
-
-**`market_sentiment` 字段**:
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `emotion` | string | 市场情绪（如 "积极"/"谨慎"） |
-| `score` | number | 情绪评分 |
-
-**`advance_decline` 字段**:
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `up` | number | 上涨家数 |
-| `down` | number | 下跌家数 |
-| `flat` | number | 平盘家数 |
-| `up_pct` | number | 上涨占比（%） |
-
-**`basic_info` 字段**：
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `sh_index` | number | 上证指数 |
-| `sz_index` | number | 深证成指 |
-| `cy_index` | number | 创业板指 |
+| `basic_info` | object/null | 基础指数信息（`data.sh_index`/`sz_index`/`cy_index` 等） |
+| `stock_quote` | object/null | 个股速览（上游 `data` 原样） |
 
 ---
 
 ### `GET /finance/timeline` ⚡ 需要 Chrome CDP
 
-**财联社看盘分时图** — 来自 finance CDP 页面的指数分时数据。
+**财联社看盘分时图** — 指数分时数据。
 
 - **CDP**: 是
 - **请求参数**: 无
-- **响应**: 原始分时数据数组（tline 数据），格式由上游 CLS API 决定
+- **响应**：`{code, msg, data: [...]}`，`data` 为分时点数组，元素结构与个股分时 `line[]` 一致（`minute`/`last_px`/`change`(小数)/`change_px`/`amp`/`preclose_px`/`open_px`/`business_amount`/`business_balance`）
 
 ---
 
 ### `GET /quotation/market` ⚡ 需要 Chrome CDP
 
-**财联社行情** — 市场行情综合数据面板。
+**财联社行情** — 综合行情面板。
 
 - **CDP**: 是
 - **请求参数**: 无
-- **响应字段**：
+- **响应**：顶层键 `hot_plate` / `stock_ranking` / `stock_ipo` / `bj_stock_info` / `index_home` / `basic_info`；每键为上游原样包裹 `{code, msg, data}`（CDP 不可用时 `null`/缺省）。
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `hot_plate` | object/null | 热门板块排行 |
+| `hot_plate` | object/null | 热门板块排行（`data` 内为板块列表） |
 | `stock_ranking` | object/null | 个股排名（涨跌幅） |
 | `stock_ipo` | object/null | 新股信息 |
 | `bj_stock_info` | object/null | 北交所股票信息 |
@@ -380,11 +342,11 @@ Base URL: `http://localhost:8053`
 
 ### `GET /market/timeline` ⚡ 需要 Chrome CDP
 
-**指数分时图** — 来自 quotation CDP 页面的指数分时数据。
+**指数分时图** — 上证/深证等指数分时。
 
 - **CDP**: 是
 - **请求参数**: 无
-- **响应**: 原始分时数据数组（tline 数据）
+- **响应**：`{code, msg, data: {"<index_code>": {"date": YYYYMMDD, "line": [...]}}}`；`line[]` 元素为 `{minute, change(小数), last_px}`（含 241 点）
 
 ---
 
@@ -393,62 +355,55 @@ Base URL: `http://localhost:8053`
 **财联社板块** — 板块资金流向排行（行业、概念、地域）。
 
 - **CDP**: 否（REST API，使用 CLS 签名）
-- **来源**: `https://x-quote.cls.cn/web_quote/plate/plate_list`
 - **请求参数**: 无
-- **响应字段**：
+- **响应**：顶层键 `plate_industry` / `plate_concept` / `plate_area` / `hot_plates`；前三者结构相同（见下）。
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `plate_industry` | object | 行业板块排行 |
-| `plate_industry.list` | array | 行业板块列表 |
-| `plate_industry.list[].plate_name` | string | 板块名称 |
-| `plate_industry.list[].change_pct` | number | 板块涨跌幅（%） |
-| `plate_industry.list[].main_inflow` | number | 主力净流入 |
-| `plate_concept` | object | 概念板块排行 |
-| `plate_concept.list` | array | 概念板块列表（同上结构） |
-| `plate_area` | object | 地域板块排行 |
-| `plate_area.list` | array | 地域板块列表（同上结构） |
-| `hot_plates` | array | 综合热门板块（合并 `main_fund_diff` 的 top + last） |
-| `hot_plates[].plate_name` | string | 板块名称 |
-| `hot_plates[].change_pct` | number | 涨跌幅 |
-| `hot_plates[].main_fund_diff` | number | 主力资金净差 |
+| `plate_industry` / `plate_concept` / `plate_area` | object | 行业/概念/地域板块 |
+| `.{is_all}` | number | 是否全量（0/1） |
+| `.{plate_data}` | array | 板块列表（**每档 30 条**） |
+| `.{plate_data}[].secu_name` | string | 板块名称（如 `半导体`） |
+| `.{plate_data}[].secu_code` | string | 板块代码（`cls82245`） |
+| `.{plate_data}[].change` | number | 板块涨跌幅（**小数**，`0.048` = 4.8%） |
+| `.{plate_data}[].main_fund_diff` | number | 主力净额（元） |
+| `.{plate_data}[].limit_up` / `limit_down` | number | 上涨 / 下跌家数 |
+| `.{plate_data}[].limit_up_num` / `limit_down_num` | number | 涨停 / 跌停家数 |
+| `.{plate_data}[].trade_status` | string | 交易状态（`ENDTR` 等） |
+| `.{plate_data}[].first_stock` | object | 领涨股：`{secu_code, secu_name, last_px, change(小数), tr(小数)}` |
+| `.{main_fund_diff}` | object | 主力资金榜：`{top_main_fund_diff: [...], last_main_fund_diff: [...]}`（各 3 条） |
+| `hot_plates` | array | 综合热门板块（`plate_data` 同构元素，6 条） |
 
 ---
 
 ### `GET /ths/longhu`
 
-**同花顺龙虎榜** — 龙虎榜数据明细（含买卖营业部 Top5）。
+**同花顺龙虎榜** — 龙虎榜明细（含买卖营业部 Top5）。
 
 - **CDP**: 否（HTML 页面解析）
-- **来源**: `https://data.10jqka.com.cn/ifmarket/lhbtable` + `https://data.10jqka.com.cn/market/longhu/`
 - **请求参数**: 无
-- **响应字段**：
+- **响应**：`{data: [...], total: N}`。**金额/涨跌幅字段为带单位字符串**（上游原文，不做数值化）。
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `data` | array | 龙虎榜股票列表 |
-| `data[].code` | string | 股票代码 |
+| `data[].code` | string | 股票代码（`000592`，无市场前缀） |
 | `data[].name` | string | 股票名称 |
-| `data[].price` | string | 最新价 |
-| `data[].change_pct` | string | 涨跌幅（%） |
-| `data[].turnover` | string | 成交额 |
-| `data[].net_buy` | string | 净买入额 |
-| `data[].buy_top5` | array | 买入金额最大的前 5 名营业部（如 HTML 解析到） |
-| `data[].buy_top5[].name` | string | 营业部名称 |
-| `data[].buy_top5[].buy` | string | 买入金额（万元） |
-| `data[].buy_top5[].sell` | string | 卖出金额（万元） |
-| `data[].buy_top5[].net` | string | 净额（万元） |
-| `data[].sell_top5` | array | 卖出金额最大的前 5 名营业部（同上结构） |
+| `data[].price` | string | 最新价（如 `"8.71"`） |
+| `data[].change_pct` | string | 涨跌幅（**字符串带 `%`**，如 `"9.97%"`） |
+| `data[].turnover` | string | 成交额（**字符串带单位**，如 `"8.22亿"`） |
+| `data[].net_buy` | string | 净买入额（如 `"4.57亿"`） |
+| `data[].buy_top5` | array | 买入前 5 营业部：`{name, buy, sell, net}`（均字符串带单位，如 `"91398.90万"`） |
+| `data[].sell_top5` | array | 卖出前 5 营业部（同上结构） |
 | `total` | number | 总股票数 |
 
 ---
 
 ### `GET /market/margin`
 
-**融资融券** — 两市融资融券余额、买入额等数据。
+**融资融券** — 两市融资融券余额、买入额（同花顺口径）。
 
 - **CDP**: 否（REST API）
-- **来源**: `https://data.10jqka.com.cn/rzrq/fixdata/type/{market}/`
 - **请求参数**:
 
 | 参数 | 类型 | 必需 | 默认 | 说明 |
@@ -461,13 +416,13 @@ Base URL: `http://localhost:8053`
 |------|------|------|
 | `latest` | object | 最新交易日数据 |
 | `latest.date` | string | 日期（YYYY-MM-DD） |
-| `latest.rzye` | number | 融资余额（亿元） |
+| `latest.rzye` | number | 融资余额（**亿元**） |
 | `latest.rqye` | number | 融券余额（亿元） |
 | `latest.rzmre` | number | 融资买入额（亿元） |
 | `latest.rzjmr` | number | 融资净买入（亿元） |
 | `latest.rqjmc` | number | 融券净卖出（亿元） |
 | `latest.lr` | number | 两融余额（亿元） |
-| `latest.zb` | number | 占比（小数） |
+| `latest.zb` | number | 两融占比（**小数**，`0.0279` = 2.79%） |
 | `recent` | array | 最近 30 个交易日数据（每项同上结构） |
 | `_error` | string | 仅当请求失败时出现 |
 
