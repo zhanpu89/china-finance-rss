@@ -1,0 +1,50 @@
+# UCloud 2C8G — 主节点（下游同机房）
+# 压测基线：MAX_WORKERS=30/MAX_INFLIGHT=60，300并发 180 qps，CPU 86%
+# 角色：Nginx sticky 粘性目标节点，承载全部 SSE 连接 + 大半 REST 流量
+#
+# 启动：
+#   docker compose -f doc/deploy/docker-compose.ucloud-2c8g.yml up -d --build
+#
+# nginx 注意：
+#   upstream finsse { ip_hash; server UCloud:8054 weight=2; server Ali:8054 weight=1; }
+#   location /stream/ { proxy_read_timeout 3600s; proxy_buffering off; }
+#
+services:
+  rss:
+    build: .
+    container_name: china-finance-rss
+    restart: unless-stopped
+    ports:
+      - "8053:8053"     # REST
+      - "8054:8054"     # SSE
+    environment:
+      - PORT=8053
+      # ── 准入控制（8G 内存宽裕，IO 为主 GIL 争用可忽略）────
+      - MAX_WORKERS=30                # 2核 + 8G，IO bound 场景下 30 workers 实测稳定
+                                      # （压测：100并发 503≈0%，15s 超时边界更宽松）
+      - MAX_INFLIGHT=60               # = 2× MAX_WORKERS
+      # ── CDP 浏览器池（内存充裕）────────────────────────────
+      - CDP_STOCK_PAGES=8             # 8GB 内存充裕，8 tab ≈ 400-800MB，无压力
+      - CDP_RESTART_INTERVAL=7200
+      # ── HTTP 压缩 ──────────────────────────────────────────
+      - GZIP_MIN_BYTES=1024
+      - GZIP_COMPRESSLEVEL=1          # 统一速度优先（2核最优，8核可调回 6）
+      # ── SSE ──────────────────────────────────────────────
+      - STREAM_HOST=0.0.0.0
+      - REQUEST_TIMEOUT=10
+      # ── 日志 ──────────────────────────────────────────────
+      - LOG_DIR=/app/logs
+      - LOG_BACKUP_DAYS=30
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    mem_limit: 6g                     # 8GB 总内存，给 OS 留 2GB（文件页缓存 + CDP 子进程）
+    mem_reservation: 256M
+    dns:
+      - 8.8.8.8
+      - 223.5.5.5
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
