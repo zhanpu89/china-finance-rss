@@ -10,6 +10,7 @@ Base URL: `http://localhost:8053`
 - [2. 个股数据 API（JSON）](#2-个股数据-apijson)
 - [3. 市场数据 API（JSON）](#3-市场数据-apijson)
 - [4. 工具端点](#4-工具端点)
+- [5. SSE 实时推送](#5-sse-实时推送端口-8054)
 
 ---
 
@@ -25,7 +26,7 @@ Base URL: `http://localhost:8053`
 
 - **内容类型**: `application/rss+xml; charset=utf-8`
 - **来源**: `https://www.cls.cn/v1/roll/get_roll_list`
-- **缓存**: 300s（交易时段 30s）
+- **缓存**: 180s（交易时段 30s）
 - **请求参数**: 无
 - **响应格式**: RSS 2.0 XML
 
@@ -47,7 +48,7 @@ Base URL: `http://localhost:8053`
 
 - **内容类型**: `application/rss+xml; charset=utf-8`
 - **来源**: `https://newsapi.eastmoney.com/kuaixun/v1/getlist_102_ajaxResult_50_1_.html`
-- **缓存**: 300s（交易时段 30s）
+- **缓存**: 180s（交易时段 30s）
 - **请求参数**: 无
 - **响应格式**: RSS 2.0 XML
 
@@ -69,7 +70,7 @@ Base URL: `http://localhost:8053`
 
 - **内容类型**: `application/rss+xml; charset=utf-8`
 - **来源**: `https://news.10jqka.com.cn/tapp/news/push/stock/?page=1&tag=&track=website&pagesize=50`
-- **缓存**: 300s（交易时段 30s）
+- **缓存**: 180s（交易时段 30s）
 - **请求参数**: 无
 - **响应格式**: RSS 2.0 XML
 
@@ -91,7 +92,7 @@ Base URL: `http://localhost:8053`
 
 - **内容类型**: `application/rss+xml; charset=utf-8`
 - **来源**: `https://flash-api.jin10.com/get_flash_list?channel=-8200&limit=50`
-- **缓存**: 300s（交易时段 30s）
+- **缓存**: 180s（交易时段 30s）
 - **请求参数**: 无
 - **响应格式**: RSS 2.0 XML
 
@@ -113,7 +114,7 @@ Base URL: `http://localhost:8053`
 
 - **内容类型**: `application/rss+xml; charset=utf-8`
 - **来源**: `https://api-one-wscn.awtmt.com/apiv1/content/lives?channel=global-channel&client=pc&limit=50`
-- **缓存**: 300s（交易时段 30s）
+- **缓存**: 180s（交易时段 30s）
 - **请求参数**: 无
 - **响应格式**: RSS 2.0 XML
 
@@ -212,7 +213,7 @@ Base URL: `http://localhost:8053`
 
 ---
 
-### `GET /stock/f10`
+### `GET /stock/f10` ⚡ 需要 Chrome CDP
 
 **个股 F10 财务概要** — 个股公司基本信息、财务数据（CDP 导航）。
 
@@ -241,13 +242,13 @@ Base URL: `http://localhost:8053`
 
 ---
 
-### `GET /stock/basic_info` ⚡ 需要 Chrome CDP
+### `GET /stock/basic_info`
 
-**个股基本信息** — 实时行情 + 行业板块归属。分两阶段：
-1. REST API 获取实时行情（<100ms）
-2. CDP 导航获取申万一级行业名称
+**个股基本信息** — 实时行情 + 行业板块归属。分两阶段（均为 REST）：
+1. REST API 获取实时行情（<100ms，致命）
+2. REST 个股详情获取申万一级行业名称（非致命；命中 7 天 `sector` 缓存则跳过）
 
-- **CDP**: 是（需要 CDP 获取行业信息）
+- **CDP**: 否（纯 REST）
 - **请求示例**: `?code=sh600519`
 - **响应字段**：
 
@@ -273,7 +274,7 @@ Base URL: `http://localhost:8053`
 | `data.turnover_rate` | number | 换手率（%） |
 | `data.pe` | number | 市盈率 |
 | `data.pb` | number | 市净率 |
-| `sector_name` | string/null | 申万一级行业名称（如 "食品饮料"），仅当 CDP 可用时 |
+| `sector_name` | string/null | 申万一级行业名称（如 "食品饮料"）；行业详情取数失败时缺省 |
 
 ---
 
@@ -470,68 +471,6 @@ Base URL: `http://localhost:8053`
 
 ---
 
-### `GET /market/northbound`
-
-**北向资金（沪深港通）** — 北向资金实时快照。
-
-- **CDP**: 否（REST API）
-- **来源**: `https://data.10jqka.com.cn/hsgt/basedata/type/north/`
-- **请求参数**: 无
-- **响应字段**：
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `sh` | object | 沪股通数据 |
-| `sh.net_inflow` | number | 资金净流入 |
-| `sh.remaining_quota` | number | 剩余额度 |
-| `sh.total_quota` | number | 总额度 |
-| `sh.buy_turnover` | number | 买入成交额 |
-| `sh.sell_turnover` | number | 卖出成交额 |
-| `sh.net_turnover` | number | 净成交额 |
-| `sh.state` | string | 状态（如 "暂停"/"交易中"） |
-| `sh.up_stocks` | number | 上涨股票数 |
-| `sh.mid_stocks` | number | 平盘股票数 |
-| `sh.down_stocks` | number | 下跌股票数 |
-| `sz` | object | 深股通数据（结构同 `sh`） |
-| `total_net_inflow` | number | 沪深合计净流入 |
-| `total_net_buy` | number | 沪深合计净买入 |
-| `update_date` | string | 数据更新日期 |
-| `unit` | string | 金额单位（"元"） |
-| `_error` | string | 仅当请求失败时出现 |
-
----
-
-### `GET /market/northbound/history`
-
-**北向资金历史** — 北向资金历史走势数据。
-
-- **CDP**: 否（REST API）
-- **来源**: `https://data.10jqka.com.cn/hsgt/history/type/north/date/{period}/`
-- **请求参数**:
-
-| 参数 | 类型 | 必需 | 默认 | 说明 |
-|------|------|------|------|------|
-| `period` | string | 否 | `day` | 周期：`day`（日）, `week`（周）, `month`（月）, `quarter`（季）, `year`（年） |
-
-- **响应字段**：
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `dates` | array | 日期数组 |
-| `data` | array | 数据数组（与 dates 一一对应） |
-| `_error` | string | 仅当请求失败时出现 |
-
-每个 `data` 元素包含：
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `jlr` | number | 净流入 |
-| `jmr` | number | 净买入 |
-| `sh_zjlr` | number | 沪股通净流入 |
-| `sz_zjlr` | number | 深股通净流入 |
-
----
-
 # 4. 工具端点
 
 ---
@@ -572,7 +511,7 @@ Base URL: `http://localhost:8053`
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `status` | string | `"ok"` 或 `"degraded"`（任一源出错时） |
-| `cache_ttl` | number | 全局缓存 TTL（秒） |
+| `cache_ttl` | number | feed 域缓存 TTL（秒；交易时段 30 / 非交易时段 180） |
 | `request_timeout` | number | 全局请求超时（秒） |
 | `feeds` | array | 各端点状态列表 |
 | `feeds[].name` | string | 端点名称 |
@@ -581,6 +520,84 @@ Base URL: `http://localhost:8053`
 | `feeds[].status` | string | `"configured"`/`"ok"`/`"error"`/`"requires_chrome_cdp"` |
 | `feeds[].items` | number | 仅当 `check=1` 时：RSS 源的条目数 |
 | `feeds[].error` | string | 仅当 `check=1` 且出错时 |
+| `stale` | boolean | 仅当 `check=1` 但健康检查准入已满时：返回上次快照并标 `true`（不触网） |
+| `metrics` | object | 运行指标快照（计数/仪表；`snapshot()` 恒定发布全部注册名，未发生为 0） |
+| `policy` | object | 各数据域的 TTL/池策略快照（`cache_policy` 派生，观测用） |
+| `cdp` | object | CDP 引擎状态（`state`: `idle`/`restarting`/`unavailable` 等） |
+
+> 说明：`feeds[].status` 取值 `"configured"`/`"ok"`/`"error"`/`"requires_chrome_cdp"`。`/stock/data` 与 `/stock/basic_info` 为 `configured`（纯 REST）；`/stock/f10` 为 `requires_chrome_cdp`（CDP 导航）。
+
+---
+
+# 5. SSE 实时推送（端口 8054）
+
+订阅组管理与推送端点在 **8054**（`STREAM_PORT`），主端口 8053 不提供。
+
+> 管理面**无鉴权**，不应暴露到公网（见 README 的 `STREAM_HOST` 说明）。
+
+---
+
+### `POST /stream/subscriptions`
+
+**建组** — 创建订阅组。
+
+- **请求体**: `{"codes": ["sh600519", ...], "fields": ["quote"]}`
+  - `codes`: 必需，字符串数组；经 `canonical_code` 归一（`600519.SH` 与 `sh600519` 视为同一标的并折叠去重），单组上限 200
+  - `fields`: 可选；取值 `quote` / `fundflow` / `timeline`，缺省 = 全部；**显式传入非法字段 ⇒ 400**
+- **响应 `201`**:
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `sid` | string | 订阅组 ID |
+| `codes` | array | 归一后的代码（排序） |
+| `fields` | array | 生效字段集 |
+| `refresh_capacity_codes` | number | 单 tick 可全量刷新的码数上限（容量提示，附加键） |
+| `refresh_lag_ticks` | number | 仅当码数超容量时：每码刷新周期（tick） |
+| `capacity_warning` | string | 仅当超容量时：容量告警文案 |
+
+- **错误 `400`**: `JSON body must be an object` / `codes must be a list` / `codes required` / `invalid stock code: X` / `unknown field: X` / `too many codes (max 200)` / `too many groups (max 200)` / `pool would exceed 2000 codes` / `subscription frames would exceed <B>-byte stream frame budget`
+
+---
+
+### `GET /stream/subscriptions/<sid>`
+
+返回组状态 `{sid, fields, codes, conns, last_push_ts, created_ts}`；不存在 ⇒ `404`。
+
+---
+
+### `PATCH /stream/subscriptions/<sid>`
+
+请求体 `{"add": [...], "remove": [...]}`（均为字符串数组）⇒ `200 {sid, codes, refresh_capacity_codes, ...}`；不存在 ⇒ `404`。
+
+---
+
+### `DELETE /stream/subscriptions/<sid>`
+
+⇒ `200 {"deleted": true|false}`。
+
+---
+
+### `GET /stream/quote/<sid>` （SSE）
+
+长连接，推送 `text/event-stream`：
+
+- `event: quote` — **全量快照帧**，`data:` 为单行 JSON：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `ts` | number | 帧构建时间（毫秒） |
+| `codes_total` | number | 该组订阅码数 |
+| `fields` | array | 该组字段集 |
+| `items` | object | **覆盖全部订阅码**；无数据的字段为 `null` |
+| `missing` | array | 本 tick 无任何数据的码（排序） |
+| `missing_count` | number | `len(missing)` |
+| `stale` | array | 沿用上一 tick 值的码；仅非空时出现 |
+| `stale_count` | number | `len(stale)`；仅随 `stale` 出现 |
+| `errors` | object | 码 → 上游错误枚举（`upstream_timeout`/`upstream_error`/`cdp_unavailable`）；仅非空时出现 |
+
+- `event: ping` — 保活（`STREAM_PING_INTERVAL`，默认 20s）
+
+连接数上限 100 ⇒ 超限 `503`。组在无活动连接超过 `STREAM_GROUP_IDLE_TTL`（默认 300s）后被回收，需重新 `POST /stream/subscriptions`。
 
 ---
 
@@ -608,8 +625,9 @@ Base URL: `http://localhost:8053`
 
 ### 缓存
 
-- RSS 源: 缓存 `CACHE_TTL` 秒（默认 300s），交易时段降为 30s，带 ±20% 抖动防雪崩
-- REST JSON API: 使用全局 URL 缓存（`cache.py`），带 stampede protection（Leader Election）
+- RSS 源: 缓存 180s（交易时段降为 30s），带 ±20% 抖动防雪崩
+- REST JSON API: 统一走 `cache.fetch_json`（`cache.py`）：按数据域 TTL 缓存（`config.cache_policy` 单一权威，如 `quote` 盘中 8s / 非盘中 120s）+ 负缓存（失败后 5s 内快速失败，探测预算阶梯 2→4→5s）+ 单飞（single-flight，避免并发重复回源）
+- 失败语义: 业务降级（上游失败/CDP 不可用）恒以 **HTTP 200 + 结构化 `error` 客体**返回；HTTP 503 仅用于连接准入拒绝与 `/healthz` 降级
 
 ### 并发
 

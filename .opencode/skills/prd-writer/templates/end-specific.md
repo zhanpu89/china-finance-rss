@@ -1,3 +1,5 @@
+> 🔖 归属: prd-writer — 本模板仅由 prd-writer SKILL 加载。勿在 system-architect 上下文使用同名文件。
+
 # 端专属章节
 
 按端类型跳转。通用章节来自 `templates/common.md`。

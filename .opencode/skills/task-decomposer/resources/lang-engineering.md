@@ -1,31 +1,65 @@
-# 语言工程规则
+# 语言工程规则（Lang-Engineering）
 
-仅列项目特有禁令。标准语言工程规范 AI 已知。
+> 供编码规范/项目规则编写时锚定。不是语言科普，是"编码规范必须包含的禁令 + 理由 + 替代方案"。按 LC-001 跳转。
 
-## Java
+## 编写编码规范的三条原则
 
-- 禁止：`new Date()`/`SimpleDateFormat`/`System.out.println`/`e.printStackTrace()`/`double`/`float` 存金额/MD5/SHA1 存密码/`SELECT *`/N+1
-- 必须：`LocalDateTime`/`log.info`/`BigDecimal`/`BCryptPasswordEncoder`/参数化查询
-- 方法≤80行，嵌套≤4层
+1. **禁令必须带替代**：只写"禁止 X"不写"用 Y 替代"的规范没人执行。
+2. **禁令必须可 grep**：规范里的每条约项，评审能搜代码验证（`禁止 print` → 评审 grep `print(`）。
+3. **项目专属才写**：标准语法/风格（缩进/命名）不写进规范，写"本项目禁止事项"。
+
+## Java / Spring Boot
+
+| 禁止 | 理由 | 替代 |
+|------|------|------|
+| `new Date()`/`SimpleDateFormat` | 线程不安全、可读性差 | `LocalDateTime` + `DateTimeFormatter` |
+| `System.out.println`/`e.printStackTrace()` | 不可检索、无级别 | `log.info`/`log.error` + 统一日志 |
+| `double`/`float` 存金额 | 浮点精度丢失 | `BigDecimal` |
+| MD5/SHA1 存密码 | 可逆碰撞 | `BCryptPasswordEncoder` |
+| `SELECT *` | 传输冗余、隐式字段耦合 | 显式列名 |
+| 方法 >80 行 / 嵌套 >4 层 | 不可维护 | 拆方法/提前返回 |
+| 事务内网络 IO | 长事务锁 | 事务外取数、事务内校验 |
 
 ## Python
 
-- 禁止：`print()`/`except: pass`/裸 `except:`/`for i in range(len(...))`/密码硬编码/`SELECT *`
-- 必须：logging 替代 print/`async with` 管理资源/参数化查询
-- 方法≤60行
+| 禁止 | 理由 | 替代 |
+|------|------|------|
+| `print()` 调试残留 | 不可级别/不可检索 | `logging` |
+| `except: pass` / 裸 `except:` | 吞所有异常 | 捕获具体类型 + 记日志 |
+| `for i in range(len(...))` | 反惯用、易错 | `enumerate` |
+| 密码/密钥硬编码 | 泄露 | 环境变量 + secrets 管理 |
+| 方法 >60 行 | 不可维护 | 拆函数 |
 
 ## Go
 
-- 禁止：`log.Println` 替代 logging/忽略 `err`/同步 `time.Sleep` 重试/`interface{}` 滥用
-- 必须：`slog`/`zap` 结构化日志/error 链式处理/`errgroup` 并发控制
-- 方法≤60行
+| 禁止 | 理由 | 替代 |
+|------|------|------|
+| 忽略 err（`_ = f()`） | 静默失败 | 检查 + `%w` 包装 |
+| `time.Sleep` 同步重试 | 阻塞 + 不确定 | 指数退避 + 超时 |
+| `interface{}` 滥用 | 类型不安全 | 泛型/具体类型 |
+| 裸 `log.Println` | 无结构化 | `slog`/`zap` |
+| 方法 >60 行 | 不可维护 | 拆函数 |
 
-## Node.js
+## Node.js / TypeScript
 
-- 禁止：`console.log`/`try...catch` 吞异常/sync 文件操作/回调地狱/RAM 缓存替代 Redis
-- 必须：`winston`/`pino` 结构化日志/`async/await`/`class-validator` 校验
-- 方法≤60行
+| 禁止 | 理由 | 替代 |
+|------|------|------|
+| `console.log` 裸输出 | 无级别/无上下文 | `winston`/`pino` |
+| `try...catch` 吞异常 | 静默失败 | 捕获 + 结构化记录 |
+| 同步文件操作（大文件） | 阻塞事件循环 | `fs.promises` |
+| 回调地狱 | 不可读 | `async/await` |
+| 内存做缓存 | 重启丢失、多实例不一致 | Redis |
+| 方法 >60 行 | 不可维护 | 拆函数 |
 
-## 通用
+## 通用（跨语言）
 
-- 参数化查询防注入，缓存 TTL 有上限，外部调用有超时+熔断
+- 参数化查询防注入（DB 访问一律占位符，禁字符串拼接 SQL）
+- 外部调用：超时 + 熔断 + 重试（指数退避）
+- 缓存 TTL 有上限，防止脏数据无限期
+- 敏感信息禁入日志/异常消息
+
+## 自检
+
+- □ 每条约项有替代方案，无"裸禁令"
+- □ 每条约项评审可 grep 验证
+- □ 规范只含项目专属禁令，无标准语法填充

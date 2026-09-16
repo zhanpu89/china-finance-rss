@@ -1,8 +1,9 @@
 import unittest
 from email.utils import parsedate_to_datetime
+from unittest.mock import patch
 from xml.etree import ElementTree as ET
 
-from utils import (
+from china_finance_rss.utils import (
     generate_rss,
     generate_error_rss,
     generate_opml,
@@ -13,10 +14,10 @@ from utils import (
     parse_jin10_items,
     parse_wallstreetcn_items,
 )
-from server import ROUTES, handle_cls_hotplate, handle_cls_plate, build_health_payload
-from market_api import (
-    _transform_margin, _transform_northbound,
-    handle_margin, handle_northbound, handle_northbound_history,
+from china_finance_rss.server import ROUTES, handle_cls_hotplate, handle_cls_plate, build_health_payload
+from china_finance_rss.market_api import (
+    _transform_margin,
+    handle_margin,
 )
 
 
@@ -192,7 +193,7 @@ class SourceParserTests(unittest.TestCase):
 
 
 class MarketApiTests(unittest.TestCase):
-    """Tests for market-level APIs (融资融券, 北向资金).
+    """Tests for market-level APIs (融资融券).
 
     Transform functions are unit-tested; handlers rely on fetch_json caching.
     """
@@ -232,64 +233,27 @@ class MarketApiTests(unittest.TestCase):
         self.assertEqual(result['latest']['rzmre'], 0.0)  # '--' → 0
         self.assertAlmostEqual(result['latest']['rqjmc'], -0.05, places=4)
 
-    def test_transform_northbound_parses_snapshot(self):
-        raw = {
-            'h': {'zjlr': 2500000000, 'syed': 30000000000, 'zed': 52000000000,
-                  'buy_turnover': 18000000000, 'sell_turnover': 15500000000,
-                  'net_turnover': 2500000000, 'state': '开盘', 'up': 500, 'mid': 300, 'down': 200},
-            's': {'zjlr': -500000000, 'syed': 48000000000, 'zed': 52000000000,
-                  'buy_turnover': 12000000000, 'sell_turnover': 12500000000,
-                  'net_turnover': -500000000, 'state': '开盘', 'up': 200, 'mid': 400, 'down': 600},
-            'jlr': 2000000000,
-            'jmr': 1800000000,
-            'market_value': {'data_update_date': '2026-07-14', 'unit': '元'},
-        }
-        result = _transform_northbound(raw)
-        self.assertEqual(result['sh']['net_inflow'], 2500000000)
-        self.assertEqual(result['sz']['net_inflow'], -500000000)
-        self.assertEqual(result['total_net_inflow'], 2000000000)
-        self.assertEqual(result['total_net_buy'], 1800000000)
-        self.assertEqual(result['update_date'], '2026-07-14')
-
-    def test_transform_northbound_handles_empty_data(self):
-        result = _transform_northbound({})
-        self.assertEqual(result['sh']['net_inflow'], 0)
-        self.assertEqual(result['sz']['net_inflow'], 0)
-        self.assertEqual(result['total_net_inflow'], 0)
-
-    def test_handle_margin_error_returns_degraded(self):
-        # Pass an invalid market code → API returns error → degraded response
-        result = handle_margin('invalid')
-        self.assertIn('_error', result)
+    def test_handle_margin_invalid_market_degrades_without_network(self):
+        # P1-1: `market` is a contract enum ('99','1','2','3'); any other value
+        # is rejected before the URL is built — no upstream call, no cache key.
+        with patch('china_finance_rss.market_api.fetch_json') as mocked:
+            result = handle_margin('invalid')
+        mocked.assert_not_called()
+        self.assertEqual(result['_error'], 'upstream_error')
         self.assertEqual(result['latest']['rzye'], 0)
         self.assertEqual(result['latest']['rqye'], 0)
-
-    def test_handle_northbound_returns_unified_structure(self):
-        result = handle_northbound()
-        for key in ('sh', 'sz', 'total_net_inflow', 'total_net_buy'):
-            self.assertIn(key, result)
-        for loc in ('sh', 'sz'):
-            self.assertIn('net_inflow', result[loc])
-            self.assertIn('buy_turnover', result[loc])
-            self.assertIn('sell_turnover', result[loc])
-
-    def test_handle_northbound_history_returns_dict(self):
-        result = handle_northbound_history('day')
-        self.assertIsInstance(result, dict)
 
     def test_healthz_includes_market_endpoints(self):
         payload = build_health_payload("https://feeds.example.com")
         paths = {f['path'] for f in payload['feeds']}
         self.assertIn('/market/margin', paths)
-        self.assertIn('/market/northbound', paths)
-        self.assertIn('/market/northbound/history', paths)
 
 
 class CacheMaintenanceTests(unittest.TestCase):
     """Tests for expired-cache reclamation fixes (2c2g memory issue)."""
 
     def test_sweep_expired_removes_stale_entries(self):
-        from cache import _sweep_expired
+        from china_finance_rss.cache import _sweep_expired
         import time
         cache_dict = {
             'fresh': {'data': 'x', 'time': time.time(),
@@ -305,24 +269,26 @@ class CacheMaintenanceTests(unittest.TestCase):
         self.assertIn('none', cache_dict)  # None entries are kept (handled on read)
 
     def test_sector_cache_bounded(self):
-        from stock_api import _sector_cache, _sector_cache_lock, \
-            _SECTOR_CACHE_MAX, _sector_cache_put
+        from china_finance_rss.stock_api import _sector_cache, _sector_cache_lock, \
+            _sector_cache_put
+        from china_finance_rss.config import cache_policy
         import time
+        cap = cache_policy('sector')['cache_max']
         with _sector_cache_lock:
             saved = dict(_sector_cache)
         try:
             now = time.time()
-            for i in range(_SECTOR_CACHE_MAX + 50):
+            for i in range(cap + 50):
                 _sector_cache_put(f'test{i:05d}', '测试', now=now - i)
             with _sector_cache_lock:
-                self.assertLessEqual(len(_sector_cache), _SECTOR_CACHE_MAX)
+                self.assertLessEqual(len(_sector_cache), cap)
         finally:
             with _sector_cache_lock:
                 _sector_cache.clear()
                 _sector_cache.update(saved)
 
     def test_sector_cache_ttl_eviction(self):
-        from stock_api import _sector_cache, _sector_cache_lock, _sweep_sector_cache
+        from china_finance_rss.stock_api import _sector_cache, _sector_cache_lock, _sweep_sector_cache
         import time
         with _sector_cache_lock:
             saved = dict(_sector_cache)
@@ -336,102 +302,125 @@ class CacheMaintenanceTests(unittest.TestCase):
                 _sector_cache.update(saved)
 
     def test_fetch_json_leader_failure_does_not_stampede(self):
-        """When the elected leader's upstream fetch fails, waiting followers
-        must re-enter single-flight election instead of all hitting upstream
-        simultaneously (upstream stampede on failure)."""
-        import cache as cache_mod
+        """AR-10 / T-CACHE-2 new semantics: the elected leader's upstream
+        failure writes a URL-level negative-cache entry; waiting followers read
+        it and raise without touching upstream (no re-election, no stampede)."""
+        import time as _time
+        import urllib.error
+        from collections import OrderedDict
+        from concurrent.futures import ThreadPoolExecutor, as_completed
         from unittest import mock
-
-        original_cache = cache_mod.cache
-        original_inflight = cache_mod._fetch_inflight
-        original_lock = cache_mod._cache_lock
-
-        state = {'active': 0, 'max_active': 0, 'calls': 0}
-
-        def flaky_urlopen(req, timeout):
-            state['active'] += 1
-            state['max_active'] = max(state['max_active'], state['active'])
-            state['calls'] += 1
-            try:
-                # First attempt fails (transient upstream error); later
-                # attempts succeed.
-                if state['calls'] == 1:
-                    import urllib.error
-                    raise urllib.error.URLError('boom')
-                import time
-                time.sleep(0.01)
-                return _FakeResponse(b'{"ok": true}')
-            finally:
-                state['active'] -= 1
+        import china_finance_rss.cache as cache_mod
 
         class _FakeResponse:
             def __init__(self, body):
                 self._body = body
                 self.status = 200
+
             def read(self):
                 return self._body
+
             def __enter__(self):
                 return self
+
             def __exit__(self, *a):
                 return False
 
-        import threading
-        from concurrent.futures import ThreadPoolExecutor, as_completed
+        tracked = ('cache', '_negative', '_fetch_inflight', '_cache_stats',
+                   '_last_cache_sweep')
+        original = {k: getattr(cache_mod, k) for k in tracked}
+
+        state = {'active': 0, 'max_active': 0, 'calls': 0}
+
+        def flaky_urlopen(req, timeout=None):
+            state['active'] += 1
+            state['max_active'] = max(state['max_active'], state['active'])
+            state['calls'] += 1
+            try:
+                # Hold the leader long enough that every follower parks on the
+                # per-URL Event before the failure is recorded.
+                _time.sleep(0.1)
+                raise urllib.error.URLError('boom')
+            finally:
+                state['active'] -= 1
+
         try:
-            cache_mod.cache = {}
+            cache_mod.cache = OrderedDict()
+            cache_mod._negative = {}
             cache_mod._fetch_inflight = {}
-            cache_mod._cache_lock = threading.Lock()
+            cache_mod._cache_stats = {'hit': 0, 'miss': 0}
+            cache_mod._last_cache_sweep = 0.0
             with mock.patch.object(cache_mod, 'urlopen', side_effect=flaky_urlopen):
                 outcomes = {'ok': 0, 'err': 0}
                 with ThreadPoolExecutor(max_workers=8) as pool:
                     futures = [pool.submit(
-                        lambda: cache_mod.fetch_json('http://example.test/x', ttl=60))
+                        cache_mod.fetch_json, 'http://example.test/x', None, 60)
                         for _ in range(8)]
                     for f in as_completed(futures):
                         try:
-                            if f.result() == '{"ok": true}':
-                                outcomes['ok'] += 1
+                            f.result()
+                            outcomes['ok'] += 1
                         except Exception:
                             outcomes['err'] += 1
-            # Exactly one caller was the failed leader and saw the upstream
-            # error; every other caller must succeed via single-flight
-            # re-election (no stampede).
-            self.assertEqual(outcomes['err'], 1)
-            self.assertEqual(outcomes['ok'], 7)
-            # Single-flight guarantee: never more than 1 upstream request
-            # in flight at a time, even after a leader failure.
+            # Leader + 7 followers all fail fast from the shared negative entry.
+            self.assertEqual(outcomes['err'], 8)
+            self.assertEqual(outcomes['ok'], 0)
+            # Single-flight guarantee: never more than 1 upstream request in
+            # flight, and the leader's failure is the only upstream call.
             self.assertEqual(state['max_active'], 1)
+            self.assertEqual(state['calls'], 1)
+            self.assertIn('http://example.test/x', cache_mod._negative)
         finally:
-            cache_mod.cache = original_cache
-            cache_mod._fetch_inflight = original_inflight
-            cache_mod._cache_lock = original_lock
+            for k, v in original.items():
+                setattr(cache_mod, k, v)
 
-    def test_prefetch_round_robin_advances_cursor(self):
-        """The prefetch round-robin cursor must advance across the pool so a
-        large pool is refreshed fairly rather than always starting at index 0."""
-        from stock_api import _prefetch_rotate, _prefetch_advance, \
-            _prefetch_cursor, _prefetch_cursor_lock
+    def test_prefetch_loop_advances_cursor_across_passes(self):
+        """T1 / S1-2: fairness must hold through the REAL prefetch loop.
+
+        The previous version hand-fed `_prefetch_advance`, so the production
+        counting semantics (`_prefetch_advance(name, visited, len(codes))`) were
+        never exercised — exactly the path where codes that were *visited* but
+        returned no data failed to advance the cursor, so the head was
+        re-fetched every pass and the pool tail was permanently starved.
+        """
         import threading
-        with _prefetch_cursor_lock:
-            _prefetch_cursor.clear()
-        pool = {'a': 1, 'b': 2, 'c': 3}
-        lock = threading.Lock()
+        from collections import OrderedDict
+        import time as _time
+        from china_finance_rss import stock_api
+
+        class _Stop(BaseException):
+            pass
+
+        codes = [f'sh{600000 + i}' for i in range(6)]
+        pool = {c: _time.time() for c in codes}
+        seen = []
+        cycles = {'n': 0}
+        clock = {'t': 1_000_000.0}
+
+        def _fetch(code, deadline=None):
+            seen.append(code)
+            clock['t'] += 1.0                     # each call burns 1s of budget
+            return None                           # success-but-empty
+
+        def _sleep(_secs):
+            cycles['n'] += 1
+            clock['t'] += 100.0                   # fresh window per pass
+            if cycles['n'] > 3:
+                raise _Stop()
+
+        with stock_api._prefetch_cursor_lock:
+            stock_api._prefetch_cursor.clear()
         try:
-            # First pass starts at the head, processes 2 of 3 codes.
-            first = _prefetch_rotate(pool, lock, 'testpool')
-            self.assertEqual(first[0], 'a')
-            _prefetch_advance('testpool', 2, 3)
-            # Next pass continues from the third code (round-robin), so the
-            # pool tail is not starved.
-            second = _prefetch_rotate(pool, lock, 'testpool')
-            self.assertEqual(second[0], 'c')
-            _prefetch_advance('testpool', 1, 3)
-            # After a full cycle the cursor wraps back to the head.
-            third = _prefetch_rotate(pool, lock, 'testpool')
-            self.assertEqual(third[0], 'a')
+            with patch.object(stock_api, 'sleep', side_effect=_sleep), \
+                 patch.object(stock_api, 'time', new=lambda: clock['t']), \
+                 patch.object(stock_api, '_PREFETCH_PASS_BUDGET', 2.0):
+                with self.assertRaises(_Stop):
+                    stock_api._prefetch_loop('fundflow', 'fundflow', _fetch, pool,
+                                             OrderedDict(), {}, threading.Lock())
         finally:
-            with _prefetch_cursor_lock:
-                _prefetch_cursor.clear()
+            with stock_api._prefetch_cursor_lock:
+                stock_api._prefetch_cursor.clear()
+        self.assertEqual(set(seen), set(codes))   # the pool tail is reached
 
 
 if __name__ == "__main__":

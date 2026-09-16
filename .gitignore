@@ -23,3 +23,6 @@ chrome-user-data/
 data/
 logs/
 .codegraph/
+
+# 编排器工作记忆（会话态，不纳入版本管理）
+_MEMORY_CACHE.md

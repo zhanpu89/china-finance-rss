@@ -1,5 +1,7 @@
 # 文档对齐规则
 
+> **【通用方法论 · 项目资产】** 本文件随工具分发的版本是跨项目通用的专家标准。安装到项目后，整个 `.opencode/` 即成为你的**项目资产**——可直接改写本文件沉淀团队/项目专属规则，也可在项目 `opencode.json` 的 `instructions` 中增删规则条目。工具不预设任何项目特定内容。
+
 ## 编码阶段（code-developer）
 
 **禁止修改任何契约文档。** 发现契约与实现不符时，输出偏差清单，不做原地修改。
@@ -10,6 +12,6 @@
 
 ## 文档同步流程
 
-code-developer 输出 `>>DOC_SYNC: {文件路径} → {改动说明}` → 编排器主 agent 按清单执行修改（版本 +1，追加变更记录）→ code-reviewer 评审代码+更新后文档。
+code-developer 输出 `>>DOC_SYNC: {文件路径} → {改动说明}` → 编排器按漂移文件类型 dispatch 对应 subagent 同步契约 → code-reviewer 评审代码+更新后文档。
 
-> 契约文档的修改权在编排层，不在 code-developer。code-developer 只做标记，编排层统一执行，评审层统一验证。
+> 契约文档的修改权在编排层，不在 code-developer。code-developer 只做标记，编排层统一调度，评审层统一验证。

@@ -47,7 +47,7 @@ Markdown 漂移报告，格式：
 
 ## 修复（dispatch subagent 同步）
 
-发现 P0/P1 漂移后，**不直接 edit 文档**，按漂移文件类型 dispatch 对应 subagent：
+发现 P0/P1 漂移 → 编排器按漂移文件类型 dispatch 对应 subagent 修复（**不直接 edit**）：
 
 | 漂移文件 | subagent | 入参 |
 |---------|----------|------|

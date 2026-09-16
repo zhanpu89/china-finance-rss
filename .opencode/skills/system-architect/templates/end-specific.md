@@ -1,3 +1,5 @@
+> 🔖 归属: system-architect — 本模板仅由 system-architect SKILL 加载。勿在 prd-writer 上下文使用同名文件。
+
 # 端专属架构章节
 
 ## Web 前端（F1-F6）
