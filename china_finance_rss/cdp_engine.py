@@ -12,7 +12,6 @@ Compared to the old request-driven approach (create tab → navigate → wait �
 this reduces API latency from 3-8s to <1ms and captures WebSocket frames.
 """
 
-import atexit
 import gc
 import json
 import logging
@@ -22,18 +21,132 @@ import subprocess
 import threading
 import time
 import urllib.request
-from datetime import datetime, timezone, timedelta
 from urllib.parse import urlparse
+
+from . import config
+from . import metrics
 
 log = logging.getLogger('cdp')
 
 
-CDP_URL = os.getenv('CDP_URL', 'http://localhost:9222')
+# Env-registry single source (config.md §1.1): both names are registered in
+# config.py, so this module never re-reads os.environ — a second definition
+# would let an env change land on one side only (code-discipline §6).
+CDP_URL = config.CDP_URL
 # Short throttle so a crashed Chrome is restarted quickly (2c2g OOM recovery).
 _chrome_restart_lock = threading.RLock()  # RLock so full_chrome_restart→ensure_chrome doesn't deadlock
 _last_chrome_restart = 0
-_CHROME_RESTART_THROTTLE = int(os.getenv('CDP_RESTART_THROTTLE', '15'))
+_CHROME_RESTART_THROTTLE = config.CDP_RESTART_THROTTLE
 _RECONNECT_RETRY_WINDOW = 45  # seconds to wait out throttle + startup before giving up
+
+
+# ── Chrome restart window state machine (AR-12 / R19) ──────────────────────
+# Single authoritative state for the restart window. Written only by the
+# _mark_* primitives, read only through restart_window_snapshot().
+
+_RESTART_STATES = frozenset({'idle', 'restarting', 'unavailable'})
+_restart_window = {'state': 'idle', 'window_start': None, 'window_end': None}
+_restart_window_lock = threading.Lock()
+
+
+def restart_window_snapshot():
+    """Return a copy of the restart window (thread-safe)."""
+    with _restart_window_lock:                                # BR-CDP-4
+        return dict(_restart_window)
+
+
+def _publish_window():
+    metrics.set_gauge('cdp_restart_window', restart_window_snapshot())   # BR-CDP-5
+
+
+def _mark_restarting():
+    """idle/unavailable -> restarting (idempotent: window_start not refreshed)."""
+    changed = False
+    with _restart_window_lock:
+        if _restart_window['state'] != 'restarting':
+            _restart_window['state'] = 'restarting'
+            _restart_window['window_start'] = time.time()
+            _restart_window['window_end'] = None
+            changed = True
+    if changed:
+        _publish_window()
+
+
+def _mark_idle():
+    """any -> idle (idempotent: a plain reachable poll must not touch the window)."""
+    changed = False
+    with _restart_window_lock:
+        if _restart_window['state'] != 'idle':
+            _restart_window['state'] = 'idle'
+            _restart_window['window_end'] = time.time()
+            changed = True
+    if changed:
+        _publish_window()
+
+
+def _mark_unavailable():
+    """any -> unavailable (from idle the window opens and closes in one step)."""
+    changed = False
+    now = time.time()
+    with _restart_window_lock:
+        if _restart_window['state'] != 'unavailable':
+            if _restart_window['state'] == 'idle':
+                _restart_window['window_start'] = now
+            _restart_window['state'] = 'unavailable'
+            _restart_window['window_end'] = now
+            changed = True
+    if changed:
+        _publish_window()
+        log.error('[CDP] restart window → unavailable')
+
+
+def page_data(page):
+    """R18: the single defensive page-data accessor. Total function, never raises.
+
+    Returns a non-empty dict, or None when the page is None / get_data raises /
+    returns a non-dict / returns an empty dict (cache cleared during a restart
+    window). No key-level fallback — callers decide the endpoint shape.
+    """
+    if page is None:
+        return None
+    try:
+        data = page.get_data()
+    except Exception as exc:
+        log.warning('[CDP] page_data: get_data failed: %s', exc)
+        return None
+    if not isinstance(data, dict) or not data:
+        return None
+    return data
+
+
+def cdp_ready():
+    """True when config.cdp_engine is initialised and ready (watchdog reuse)."""
+    eng = config.cdp_engine
+    return bool(eng and eng.ready)
+
+
+def watchdog_restart_skip_reason(now=None):
+    """BR-CDP-6/7: the single decision function for the watchdog restart.
+
+    Returns None to allow a restart, else a reason string (short-circuited):
+    not_ready / already_restarting / trading_hours / recent_restart.
+    """
+    now = time.time() if now is None else now
+    if not cdp_ready():
+        return 'not_ready'
+    if restart_window_snapshot()['state'] == 'restarting':
+        return 'already_restarting'
+    if config._is_trading_hours(now):                             # ADR-012: avoid trading
+        return 'trading_hours'
+    if now - _last_chrome_restart < _CHROME_RESTART_THROTTLE * 2:
+        return 'recent_restart'
+    return None
+
+
+# REV-DES-19: publish the initial idle window at import time so
+# metrics.snapshot() always contains cdp_restart_window.
+_publish_window()
+
 
 API_KEY_MAP = {
     'emotion': 'market_sentiment',
@@ -186,6 +299,7 @@ def ensure_chrome(cdp_url=CDP_URL):
 
     try:
         urllib.request.urlopen(f"http://{host}:{port}/json", timeout=2)
+        _mark_idle()                                             # reachable -> idle
         return True
     except Exception:
         pass
@@ -195,43 +309,59 @@ def ensure_chrome(cdp_url=CDP_URL):
     with _chrome_restart_lock:
         if now - _last_chrome_restart < _CHROME_RESTART_THROTTLE:
             log.warning(f'[CDP] Chrome restart throttled (last restart: {_last_chrome_restart:.0f}, now: {now:.0f})')
-            return False
+            return False                                         # throttled = not attempted
         # Double-check after lock
         try:
             urllib.request.urlopen(f"http://{host}:{port}/json", timeout=2)
+            _mark_idle()
             return True
         except Exception:
             pass
 
-        _kill_chrome_on_port(port)
-        _last_chrome_restart = time.time()
+        # §3.2: the restart window must always reach a terminal state (idle on
+        # success / unavailable on failure). `which` and `Popen` raise under
+        # fork pressure (2c2g OOM), and this function is also called from
+        # _reconnect()/_ensure_ws() inside the heartbeat thread — an escape
+        # would both terminate that thread and leave the window stuck at
+        # 'restarting' (pinning watchdog_restart_skip_reason() at
+        # 'already_restarting' forever). Fail closed as 'unavailable'.
+        try:
+            _kill_chrome_on_port(port)
+            _last_chrome_restart = time.time()
 
-        candidates = [
-            'google-chrome', 'google-chrome-stable', 'chromium',
-            'chromium-browser', 'google-chrome-unstable',
-        ]
-        chrome = next((c for c in candidates if subprocess.run(
-            ['which', c], capture_output=True).returncode == 0), None)
-        if not chrome:
+            candidates = [
+                'google-chrome', 'google-chrome-stable', 'chromium',
+                'chromium-browser', 'google-chrome-unstable',
+            ]
+            chrome = next((c for c in candidates if subprocess.run(
+                ['which', c], capture_output=True).returncode == 0), None)
+            if not chrome:
+                _mark_unavailable()                              # real failure
+                return False
+
+            log.info(f'[CDP] starting {chrome} --headless --remote-debugging-port={port}')
+            subprocess.Popen([
+                chrome, '--headless', f'--remote-debugging-port={port}',
+                '--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage',
+                '--disable-extensions', '--disable-default-apps',
+                '--disable-component-extensions-with-background-pages',
+                '--js-flags=--max_old_space_size=512',
+                '--remote-allow-origins=*',
+            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+            for _ in range(15):
+                try:
+                    urllib.request.urlopen(f"http://{host}:{port}/json", timeout=2)
+                    _mark_idle()                                 # startup succeeded
+                    return True
+                except:
+                    time.sleep(1)
+            _mark_unavailable()                                  # 15 retries exhausted
             return False
-
-        log.info(f'[CDP] starting {chrome} --headless --remote-debugging-port={port}')
-        subprocess.Popen([
-            chrome, '--headless', f'--remote-debugging-port={port}',
-            '--no-sandbox', '--disable-gpu', '--disable-dev-shm-usage',
-            '--disable-extensions', '--disable-default-apps',
-            '--disable-component-extensions-with-background-pages',
-            '--js-flags=--max_old_space_size=512',
-            '--remote-allow-origins=*',
-        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-        for _ in range(15):
-            try:
-                urllib.request.urlopen(f"http://{host}:{port}/json", timeout=2)
-                return True
-            except:
-                time.sleep(1)
-        return False
+        except Exception as exc:
+            log.exception(f'[CDP] ensure_chrome: unexpected error ({exc})')
+            _mark_unavailable()                                  # never leave the window open
+            return False
 
 
 def full_chrome_restart(cdp_url=CDP_URL):
@@ -252,15 +382,28 @@ def full_chrome_restart(cdp_url=CDP_URL):
         now = time.time()
         if now - _last_chrome_restart < _CHROME_RESTART_THROTTLE * 2:
             log.warning(f'[CDP] full_chrome_restart: Chrome restarted recently ({now - _last_chrome_restart:.0f}s ago) — skipping back-to-back restart')
+            return False                                         # not attempted: state kept
+        _mark_restarting()                                       # enter the restart window
+        try:
+            _kill_chrome_on_port(port)
+            _last_chrome_restart = 0  # allow ensure_chrome to proceed
+            gc.collect()
+            ok = ensure_chrome(cdp_url)                          # marks idle/unavailable itself
+            if ok:
+                _last_chrome_restart = time.time()
+            log.info(f'[CDP] full_chrome_restart: {"OK" if ok else "FAILED"}')
+            return ok
+        except Exception as exc:
+            log.exception(f'[CDP] full_chrome_restart: unexpected error ({exc})')
             return False
-        _kill_chrome_on_port(port)
-        _last_chrome_restart = 0  # allow ensure_chrome to proceed
-        gc.collect()
-        ok = ensure_chrome(cdp_url)
-        if ok:
-            _last_chrome_restart = time.time()
-        log.info(f'[CDP] full_chrome_restart: {"OK" if ok else "FAILED"}')
-        return ok
+        finally:
+            # §3.2: `restarting` must always reach a terminal state — idle
+            # (success) or unavailable (failure); there is no "stuck
+            # restarting" transition. Otherwise one escaping exception pins
+            # watchdog_restart_skip_reason() at 'already_restarting' forever
+            # (watchdog restart permanently dead) and /healthz misreports.
+            if restart_window_snapshot()['state'] == 'restarting':
+                _mark_unavailable()
 
 
 def find_tab(pattern, cdp_url=CDP_URL):
@@ -306,6 +449,17 @@ def execute_js(ws_url, js, timeout=15):
             break
     ws.close()
     return None
+
+
+def _same_code(a, b):
+    """True when two spelling variants denote the same stock (P1-6).
+
+    Canonicalises with the single authority (``config.canonical_code``) so the
+    fixed upstream ``SecuCode`` matches whether the caller asked for
+    ``600519.SH`` or ``sh600519`` — an invalid/empty code never matches.
+    """
+    canon = config.canonical_code(a)
+    return canon is not None and canon == config.canonical_code(b)
 
 
 class CDPPage:
@@ -622,16 +776,30 @@ class CDPPage:
     def _heartbeat_interval(self):
         """Return heartbeat sleep interval based on China A-share trading hours.
 
-        During trading (Mon-Fri 09:30-11:30, 13:00-15:00 UTC+8): 10s.
+        Trading (Mon-Fri 09:30-11:30, 13:00-15:00 UTC+8): 10s.
         Outside trading: 60s — data doesn't change, reduce polling.
+        BR-CDP-8: trading-hours judgement has a single source in config.
         """
-        now = datetime.now(timezone.utc) + timedelta(hours=8)
-        if now.weekday() >= 5:
-            return 60
-        h, m = now.hour, now.minute
-        in_morning = (h == 9 and m >= 30) or (10 <= h <= 10) or (h == 11 and m <= 30)
-        in_afternoon = (13 <= h <= 14)
-        return 10 if (in_morning or in_afternoon) else 60
+        return 10 if config._is_trading_hours() else 60
+
+    def _evict_stalest_last_data_locked(self):
+        """Drop the stalest ``_last_data`` entry with symmetric bookkeeping (P2-⑤).
+
+        The hard cap used to delete only ``_last_data``, leaking one
+        ``_last_data_ts`` entry per eviction (symmetric tables drifted apart and
+        grew without bound).  ``_key_last_seen`` is the freshness clock shared
+        with ``self.cache``'s TTL sweep, so it (and the ``_api_urls`` re-fetch
+        registry) is dropped only once the key is gone from the live cache too —
+        otherwise the cache sweep would skip the key forever and leak it there
+        instead.  Caller must hold ``self._lock``.
+        """
+        oldest = min(self._last_data,
+                     key=lambda k: self._key_last_seen.get(k, 0))
+        del self._last_data[oldest]
+        self._last_data_ts.pop(oldest, None)
+        if oldest not in self.cache:
+            self._key_last_seen.pop(oldest, None)
+            self._api_urls.pop(oldest, None)
 
     def _ingest_payload(self, api_map, ws_data, now, run_refetch=True):
         """Merge collected API/WS payload into caches with freshness maintenance.
@@ -646,9 +814,10 @@ class CDPPage:
             for k in remapped:
                 self._last_data_ts[k] = now
             if len(self._last_data) > self._LAST_DATA_MAX_KEYS:
-                # Evict oldest key if too many unrecognized URLs accumulated
-                oldest = min(self._last_data, key=lambda k: self._key_last_seen.get(k, 0))
-                del self._last_data[oldest]
+                # Evict stalest keys until within cap; each eviction keeps the
+                # _last_data_ts / _key_last_seen side tables in sync (P2-⑤).
+                while len(self._last_data) > self._LAST_DATA_MAX_KEYS:
+                    self._evict_stalest_last_data_locked()
             for url_key, raw_val in api_map.items():
                 mapped = next((name for p, name in API_KEY_MAP.items()
                                if p in str(url_key)), None)
@@ -936,9 +1105,13 @@ class CDPPage:
                 self.cache.clear()
                 self._key_last_seen.clear()
                 self._api_urls.clear()
-                # Stale WebSocket data from old session — discard on reconnect
-                self._last_data.pop('__ws__', None)
-                self._last_data_ts.pop('__ws__', None)
+                # P1-3: the serving cache is session data too.  Clearing only
+                # `_key_last_seen` left `_last_data` behind, and a *missing*
+                # clock used to count as fresh in `get_data` — so the
+                # pre-restart snapshot stayed "fresh forever" and was re-issued
+                # with a new timestamp by the next fetch.  Clear both together.
+                self._last_data.clear()
+                self._last_data_ts.clear()
             # Three attempts share ONE budget so a half-dead Chrome can't hold
             # _reconnect_lock for minutes (healthy connects take <2s each).
             budget = time.time() + 35
@@ -974,15 +1147,19 @@ class CDPPage:
     def get_data(self):
         """Return merged data — latest from live cache, gaps filled by _last_data.
 
-        _last_data entries older than _last_data_max_age are skipped to
-        prevent serving permanently stale data.
+        `_last_data` entries older than `_last_data_max_age` are skipped to
+        prevent serving permanently stale data.  The age clock is
+        `_last_data_ts` (written together with the value, cleared on reconnect);
+        a *missing* clock counts as stale, never fresh — treating it as fresh
+        let a reconnect's cleared clock re-issue the old snapshot indefinitely
+        (P1-3).
         """
         with self._lock:
             now = time.time()
             merged = {}
             for key, val in self._last_data.items():
-                last_seen = self._key_last_seen.get(key)
-                if last_seen is None or now - last_seen < self._last_data_max_age:
+                ts = self._last_data_ts.get(key)
+                if ts is not None and now - ts < self._last_data_max_age:
                     merged[key] = val
             merged.update(self.cache)
             return merged
@@ -1089,11 +1266,42 @@ class CDPPage:
         self._reconnect()
         return True
 
+    def _fresh_secu_code_locked(self, now):
+        """`secu_code` of a non-aged `_last_data['basic_info']`, else None.
+
+        Caller must hold ``self._lock``.  The age clock is ``_last_data_ts`` —
+        written together with the value and cleared on reconnect — and a missing
+        clock counts as *stale* (P1-3), so a reconnect can no longer leave the
+        old snapshot matching a code "forever".
+        """
+        bi = (self._last_data.get('basic_info') or {}).get('data') or {}
+        ts = self._last_data_ts.get('basic_info')
+        if ts is None or now - ts >= self._last_data_max_age:
+            return None
+        return bi.get('secu_code') if isinstance(bi, dict) else None
+
+    def _acquire_navigate_lock(self, timeout):
+        """Bounded ``_navigate_lock`` acquire (P1-2).
+
+        Returns False without blocking when the timeout is non-positive or the
+        lock stays busy for the whole budget, so a queued request can degrade
+        instead of parking a worker/admission slot behind a ~60s navigation.
+        """
+        wait = max(0.0, timeout)
+        if wait <= 0.0:
+            return False
+        try:
+            return self._navigate_lock.acquire(timeout=wait)
+        except Exception:
+            return False
+
     def navigate_stock(self, stock_code, timeout=15, tabs=('fund_flow', 'f10')):
         """Navigate to a stock code, wait for fresh data, return True on success.
 
-        Fair queuing via blocking lock (no timeout+retry) — avoids wasted
-        CPU and retry deadlines under concurrent load.
+        Fair queuing with a *bounded* wait (P1-2): the lock wait is capped by
+        ``timeout``, so a busy page degrades to False instead of parking the
+        caller indefinitely (the CDP page pool is tiny and an unbounded wait
+        used to occupy every admission slot → site-wide 503).
 
         Args:
             tabs: Which tab sections to click after navigation.
@@ -1101,19 +1309,28 @@ class CDPPage:
                   ('fund_flow',)       — fund flow only.
                   ()                   — no tabs, fastest (~2-3s total).
         """
+        # P1-6: operate on one canonical spelling; both accepted ingress forms
+        # ('600519.SH' / 'sh600519') then compare equal against the upstream
+        # SecuCode instead of one of them never matching.
+        stock_code = config.canonical_code(stock_code) or stock_code
         url = f'https://www.cls.cn/stock?code={stock_code}'
-        # Fast path: skip navigation if cache already has fresh data for this code
+        # Fast path: skip navigation only when the cached snapshot is *fresh*
+        # for this code (max-age checked) — otherwise a stale page would never
+        # re-navigate (P1-3).
         with self._lock:
-            cached = ((self._last_data.get('basic_info') or {}).get('data') or {}).get('secu_code')
-        if cached == stock_code:
+            cached = self._fresh_secu_code_locked(time.time())
+        if _same_code(cached, stock_code):
             return True
-        # Block until lock acquired — fair queuing across concurrent requests
+        # Block until lock acquired — fair queuing, bounded by the budget (P1-2)
         wait_start = time.time()
-        self._navigate_lock.acquire()
+        if not self._acquire_navigate_lock(timeout):
+            return False
         try:
             remaining = timeout - (time.time() - wait_start)
             if remaining < 2:
-                return ((self._last_data.get('basic_info') or {}).get('data') or {}).get('secu_code') == stock_code
+                with self._lock:
+                    cached = self._fresh_secu_code_locked(time.time())
+                return _same_code(cached, stock_code)
             # Free Chrome renderer processes by reconnecting page periodically
             self._maybe_reconnect()
             if not self._ensure_ws():
@@ -1148,7 +1365,7 @@ class CDPPage:
                 self.refresh()
                 data = self.get_data()
                 bi = (data.get('basic_info') or {}).get('data') or {}
-                if bi.get('secu_code') == stock_code:
+                if _same_code(bi.get('secu_code'), stock_code):
                     if tabs:
                         time.sleep(1)
                     self.refresh()
@@ -1171,7 +1388,7 @@ class CDPPage:
                 # page pool, the page legitimately shows the *previous* code
                 # for a few seconds while the new code's page loads, so a
                 # naive stable_count abort yields spurious nulls.
-                secu_code = bi.get('secu_code')
+                secu_code = config.canonical_code(bi.get('secu_code'))
                 if secu_code:
                     if secu_code == last_seen_code:
                         stable_count += 1
@@ -1184,7 +1401,7 @@ class CDPPage:
             self.refresh()
             data = self.get_data()
             bi = (data.get('basic_info') or {}).get('data') or {}
-            return bi.get('secu_code') == stock_code
+            return _same_code(bi.get('secu_code'), stock_code)
         finally:
             self._navigate_lock.release()
 
@@ -1282,8 +1499,10 @@ class CDPEngine:
         try:
             urllib.request.urlopen(f"http://{host}:{port}/json", timeout=2)
             self._ready = True
+            _mark_idle()                                  # initial state is idle (idempotent)
             return True
-        except:
+        except Exception:
+            _mark_unavailable()
             return False
 
     def add_page(self, name, target_url, heartbeat=True):

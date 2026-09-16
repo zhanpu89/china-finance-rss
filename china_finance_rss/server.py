@@ -17,51 +17,54 @@ Dependencies:
 
 import atexit
 import json
-import os
-import random
 import re
 import signal
 import sys
 import threading
 import time
 import logging
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from email.utils import formatdate
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse
-from urllib.request import Request, urlopen
 from urllib.parse import parse_qs, urlencode
 
-from .cdp_engine import ensure_chrome, CDPEngine, full_chrome_restart
+from . import config
+from . import metrics
+from .cdp_engine import (ensure_chrome, CDPEngine, full_chrome_restart,
+                         restart_window_snapshot, watchdog_restart_skip_reason,
+                         page_data)
 from .config import (
-    PORT, CACHE_TTL, REQUEST_TIMEOUT, PUBLIC_BASE_URL, MAX_WORKERS,
+    PORT, REQUEST_TIMEOUT, PUBLIC_BASE_URL, MAX_WORKERS, MAX_INFLIGHT,
+    LISTEN_BACKLOG, DOMAIN_MATRIX, cache_policy,
     _MAX_BATCH_SIZE,
     _FINANCE_EXPECTED_KEYS, _QUOTATION_EXPECTED_KEYS,
     _HOTPLATE_BASE_URL, _HOTPLATE_HEADERS,
     _PLATE_INFO_URL, _PLATE_STOCKS_URL, _PLATE_INDUSTRY_URL,
     _PLATE_HEADERS,
     CDP_RESTART_INTERVAL, stock_nav_page_names,
-    cdp_engine, _trading_tiers,
+    cdp_engine,
 )
-from .cache import fetch_json, feed_cache, _feed_cache_lock, _feed_fetch_locks, \
-    _feed_fetch_locks_lock, MAX_FEED_CACHE_SIZE, CACHE_JITTER, _fill_missing
+from .cache import (fetch_json, feed_cache_get, feed_cache_put,
+                    _feed_fetch_locks, _feed_fetch_locks_lock,
+                    build_batch_response, _fill_missing, FetchError)
 from .utils import (
     generate_rss, generate_error_rss, generate_opml, count_rss_items,
     parse_cls_items, parse_jin10_items, parse_wallstreetcn_items,
     cls_sign_params, get_jin10_public_headers,
-    strip_html, timestamp_to_rfc822, parse_china_datetime_to_rfc822, escape_xml,
+    timestamp_to_rfc822, parse_china_datetime_to_rfc822,
 )
 from .stock_api import (
-    handle_cls_stock, handle_cls_stock_batch, handle_cls_fundflow,
+    handle_cls_stock_batch, handle_cls_fundflow,
     handle_cls_timeline, handle_cls_f10, handle_cls_basic_infos,
     handle_cls_announcement,
-    fetch_cls_fundflow, fetch_cls_timeline,
     _fundflow_prefetch_loop, _timeline_prefetch_loop,
     _f10_prefetch_loop,
     _announcement_prefetch_loop,
 )
 from .market_api import (
     handle_margin,
+    VALID_MARKETS,
 )
 
 log = logging.getLogger('server')
@@ -78,7 +81,7 @@ def handle_cls_telegraph(feed_url=None):
     }
     params['sign'] = cls_sign_params(params)
     headers = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.cls.cn/telegraph'}
-    data = json.loads(fetch_json(f'{url}?{urlencode(params)}', headers, ttl=_trading_tiers()['L3']))
+    data = json.loads(fetch_json(f'{url}?{urlencode(params)}', headers, ttl=cache_policy('news_url')['ttl']))
     return generate_rss('财联社电报', 'https://www.cls.cn/telegraph',
                         '财联社实时快讯', parse_cls_items(data), feed_url=feed_url)
 
@@ -87,7 +90,7 @@ def handle_eastmoney_kuaixun(feed_url=None):
     """Eastmoney 7x24 News (东方财富快讯)."""
     url = 'https://newsapi.eastmoney.com/kuaixun/v1/getlist_102_ajaxResult_50_1_.html'
     headers = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://kuaixun.eastmoney.com/'}
-    data = fetch_json(url, headers, ttl=_trading_tiers()['L3'])
+    data = fetch_json(url, headers, ttl=cache_policy('news_url')['ttl'])
     match = re.search(r'var ajaxResult=(\{.*\})', data, re.DOTALL)
     if not match:
         return generate_rss('东方财富快讯', 'https://kuaixun.eastmoney.com/',
@@ -119,7 +122,7 @@ def handle_ths_kuaixun(feed_url=None):
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         'Referer': 'https://news.10jqka.com.cn/'
     }
-    data = json.loads(fetch_json(url, headers, ttl=_trading_tiers()['L3']))
+    data = json.loads(fetch_json(url, headers, ttl=cache_policy('news_url')['ttl']))
     items = []
     for item in data.get('data', {}).get('list', []):
         try:
@@ -139,16 +142,26 @@ def handle_ths_kuaixun(feed_url=None):
 
 
 def handle_ths_longhu():
-    """THS Longhu (同花顺龙虎榜) — full table with top5 buy/sell brokerages."""
-    req = Request(
-        'https://data.10jqka.com.cn/ifmarket/lhbtable',
-        headers={
-            'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
-            'Referer': 'https://data.10jqka.com.cn/market/longhu/',
-            'X-Requested-With': 'XMLHttpRequest',
-        })
-    with urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
-        stock_html = resp.read().decode('gbk', errors='replace')
+    """THS Longhu (同花顺龙虎榜) — full table with top5 buy/sell brokerages.
+
+    Both upstreams go through cache.fetch_json via the shared ≤3-concurrency
+    fan-out pool (BR-SRV-9/30): no direct urlopen, and elapsed time is max(url)
+    not sum(url).  TTL *and* encoding come from `cache_policy('longhu')` — the
+    per-domain encoding authority is actually consumed here (P2), so a matrix
+    change can no longer silently drift from a hard-coded 'gbk' literal.
+    """
+    policy = cache_policy('longhu')
+    ttl = policy['ttl']
+    encoding = policy.get('encoding', 'utf-8')
+    fetched = _fetch_concurrent([
+        ('table', lambda: fetch_json(_LHBTABLE_URL, _LHBTABLE_HEADERS,
+                                     ttl=ttl, encoding=encoding)),
+        ('page', lambda: fetch_json(_LONGHU_PAGE_URL, _LONGHU_PAGE_HEADERS,
+                                    ttl=ttl, encoding=encoding)),
+    ])
+    stock_html = fetched['table']
+    if isinstance(stock_html, Exception):
+        raise stock_html
 
     rows = re.findall(r'<tr[^>]*>(.*?)</tr>', stock_html, re.DOTALL)
     stocks = []
@@ -168,14 +181,9 @@ def handle_ths_longhu():
             'net_buy': re.sub(r'<[^>]+>', '', cells[6]).strip(),
         })
 
-    page_req = Request(
-        'https://data.10jqka.com.cn/market/longhu/',
-        headers={
-            'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
-            'Accept-Language': 'zh-CN,zh;q=0.9',
-        })
-    with urlopen(page_req, timeout=REQUEST_TIMEOUT) as resp:
-        page_html = resp.read().decode('gbk', errors='replace')
+    page_html = fetched['page']
+    if isinstance(page_html, Exception):
+        raise page_html
 
     all_tables = re.findall(r'<table[^>]*>(.*?)</table>', page_html, re.DOTALL)
     broker_idx = 0
@@ -201,20 +209,36 @@ def handle_ths_longhu():
                 'sell': re.sub(r'<[^>]+>', '', bro_cells[2]).strip() + '万',
                 'net': re.sub(r'<[^>]+>', '', bro_cells[3]).strip() + '万',
             })
-        if not entries:
-            continue
         kind = 'buy_top5' if '买入' in label else 'sell_top5'
         stock_idx = broker_idx // 2
-        if stock_idx < len(stocks):
+        if stock_idx >= len(stocks):
+            # P0: a table the `stocks` list does not cover is a data error that
+            # must be visible — never silently dropped (it would shift every
+            # later stock's seats).
+            log.warning('[longhu] broker table #%d (%s) has no matching stock '
+                        'row (stocks=%d): entries dropped',
+                        broker_idx, kind, len(stocks))
+        elif entries:
             stocks[stock_idx][kind] = entries
+        # ★ P0: ALWAYS advance after a *matched label*, even when this table
+        # parsed 0 entries (`len(bro_cells) < 4`, blank name, or `<th>` data
+        # rows).  The buy/sell pairing is positional — two tables per stock, in
+        # order — so skipping the increment here shifted every later stock's
+        # seats by one and silently mis-attributed fund data (HTTP 200, no
+        # error signal).
         broker_idx += 1
+    expected = 2 * len(stocks)
+    if broker_idx != expected:
+        log.warning('[longhu] %d broker tables matched but %d stocks expect %d '
+                    '— buy/sell pairing is misaligned',
+                    broker_idx, len(stocks), expected)
     return {'data': stocks, 'total': len(stocks)}
 
 
 def handle_jin10_flash(feed_url=None):
     """Jin10 7x24 flash news (金十快讯)."""
     url = 'https://flash-api.jin10.com/get_flash_list?channel=-8200&limit=50'
-    data = json.loads(fetch_json(url, get_jin10_public_headers(), ttl=_trading_tiers()['L3']))
+    data = json.loads(fetch_json(url, get_jin10_public_headers(), ttl=cache_policy('news_url')['ttl']))
     return generate_rss('金十快讯', 'https://www.jin10.com/',
                         '金十数据7x24快讯', parse_jin10_items(data), feed_url=feed_url)
 
@@ -227,7 +251,7 @@ def handle_wallstreetcn_live(feed_url=None):
         'Accept': 'application/json,text/plain,*/*',
         'Referer': 'https://wallstreetcn.com/live',
     }
-    data = json.loads(fetch_json(url, headers, ttl=_trading_tiers()['L3']))
+    data = json.loads(fetch_json(url, headers, ttl=cache_policy('news_url')['ttl']))
     return generate_rss('华尔街见闻快讯', 'https://wallstreetcn.com/live',
                         '华尔街见闻7x24快讯', parse_wallstreetcn_items(data), feed_url=feed_url)
 
@@ -235,14 +259,14 @@ def handle_wallstreetcn_live(feed_url=None):
 # ── CDP-based JSON handlers ────────────────────────────────────────────────
 
 def handle_finance_market(feed_url=None):
-    """CLS Finance Market Data (财联社看盘) via Chrome CDP."""
+    """CLS Finance Market Data (财联社看盘) via Chrome CDP (BR-SRV-27)."""
     global cdp_engine
     if not cdp_engine or not cdp_engine.ready:
         return {'error': 'Chrome CDP not available. See README.'}
     page = cdp_engine.get_page('cls_finance')
-    if not page:
+    data = page_data(page)                      # A 类唯一防御取数入口
+    if data is None:
         return {'error': 'Finance page not initialized.'}
-    data = page.get_data()
     ws_raw = data.pop('__ws__', None)
     data.pop('timeline', None)
     result = {}
@@ -254,14 +278,14 @@ def handle_finance_market(feed_url=None):
 
 
 def handle_cls_quotation(feed_url=None):
-    """CLS Quotation Market Data (财联社行情) via Chrome CDP."""
+    """CLS Quotation Market Data (财联社行情) via Chrome CDP (BR-SRV-27)."""
     global cdp_engine
     if not cdp_engine or not cdp_engine.ready:
         return {'error': 'Chrome CDP not available. See README.'}
     page = cdp_engine.get_page('cls_quotation')
-    if not page:
+    data = page_data(page)
+    if data is None:
         return {'error': 'Quotation page not initialized.'}
-    data = page.get_data()
     data.pop('timeline', None)
     result = {}
     _fill_missing(result, data, _QUOTATION_EXPECTED_KEYS)
@@ -274,9 +298,13 @@ def handle_market_timeline():
     if not cdp_engine or not cdp_engine.ready:
         return {'error': 'Chrome CDP not available. See README.'}
     page = cdp_engine.get_page('cls_quotation')
-    if not page:
+    data = page_data(page)
+    if data is None:
         return {'error': 'Quotation page not initialized.'}
-    return page.get_data().get('timeline')
+    tl = data.get('timeline')
+    if tl is None:                              # R18: never return bare null
+        return {'error': 'timeline unavailable'}
+    return tl
 
 
 def handle_finance_timeline():
@@ -285,21 +313,30 @@ def handle_finance_timeline():
     if not cdp_engine or not cdp_engine.ready:
         return {'error': 'Chrome CDP not available. See README.'}
     page = cdp_engine.get_page('cls_finance')
-    if not page:
+    data = page_data(page)
+    if data is None:
         return {'error': 'Finance page not initialized.'}
-    return page.get_data().get('timeline')
+    tl = data.get('timeline')
+    if tl is None:                              # R18: never return bare null
+        return {'error': 'timeline unavailable'}
+    return tl
 
 
 # ── Hotplate ───────────────────────────────────────────────────────────────
 
 def handle_cls_hotplate(feed_url=None):
-    """CLS Hotplate Data (财联社板块) — uses same sign mechanism as telegraph."""
+    """CLS Hotplate Data (财联社板块) — uses same sign mechanism as telegraph.
+
+    3 partitions fetched through the shared ≤3-concurrency pool (BR-SRV-30),
+    each with its own derived stagger TTL (BR-SRV-11). Partition failures
+    degrade independently; all-partition failure adds a top-level `error`
+    (BR-SRV-31).
+    """
     result = {}
     hot_plates = None
-    tiers = _trading_tiers()
-    _BASE_TTL = tiers['L2']
-    _STAGGER = max(3, _BASE_TTL // 4)
-    _TTL_OFFSETS = {'industry': 0, 'concept': _STAGGER, 'area': _STAGGER * 2}
+    base, stagger = _plate_ttls()
+    offsets = {'industry': 0, 'concept': stagger, 'area': stagger * 2}
+    specs = []
     for ptype in ('industry', 'concept', 'area'):
         params = {
             'app': 'CailianpressWeb', 'os': 'web', 'sv': '8.7.9',
@@ -307,21 +344,29 @@ def handle_cls_hotplate(feed_url=None):
         }
         params['sign'] = cls_sign_params(params)
         url = f'{_HOTPLATE_BASE_URL}?{urlencode(params)}'
-        try:
-            raw = json.loads(fetch_json(url, _HOTPLATE_HEADERS,
-                                        ttl=_BASE_TTL + _TTL_OFFSETS[ptype]))
-            data = raw.get('data') or raw
-            result[f'plate_{ptype}'] = data
-            if hot_plates is None:
-                mfd = data.get('main_fund_diff') or {}
-                top = mfd.get('top_main_fund_diff') or []
-                last = mfd.get('last_main_fund_diff') or []
-                if top or last:
-                    hot_plates = top + last
-        except Exception as e:
-            result[f'plate_{ptype}'] = {'error': str(e)}
+        ttl = base + offsets[ptype]      # default-arg capture (no loop-var closure)
+        specs.append((ptype, lambda url=url, ttl=ttl:
+                      json.loads(fetch_json(url, _HOTPLATE_HEADERS, ttl=ttl))))
+    fetched = _fetch_concurrent(specs)
+    errors = []
+    for ptype in ('industry', 'concept', 'area'):
+        raw = fetched.get(ptype)
+        if isinstance(raw, Exception):
+            result[f'plate_{ptype}'] = {'error': str(raw)}
+            errors.append(str(raw))
+            continue
+        data = raw.get('data') or raw
+        result[f'plate_{ptype}'] = data
+        if hot_plates is None:
+            mfd = data.get('main_fund_diff') or {}
+            top = mfd.get('top_main_fund_diff') or []
+            last = mfd.get('last_main_fund_diff') or []
+            if top or last:
+                hot_plates = top + last
     if hot_plates:
         result['hot_plates'] = hot_plates
+    if len(errors) == len(specs):
+        result['error'] = '; '.join(errors)
     return result
 
 
@@ -331,12 +376,11 @@ def handle_cls_plate(code):
     Args:
         code: CLS plate code, e.g. 'cls80484'
 
-    Returns dict with plate info, constituent stocks, and industry breakdown.
+    3 segments fetched through the shared ≤3-concurrency pool (BR-SRV-30);
+    per-segment dependency semantics preserved verbatim.
     """
     result = {'code': code}
-    tiers = _trading_tiers()
-    _BASE_TTL = tiers['L2']
-    _STAGGER = max(3, _BASE_TTL // 4)
+    base, stagger = _plate_ttls()          # info=0 / stocks=1 / industry=2
 
     def _signed_url(base_url, extra=None):
         params = {
@@ -348,42 +392,31 @@ def handle_cls_plate(code):
         params['sign'] = cls_sign_params(params)
         return f'{base_url}?{urlencode(params)}'
 
-    # 1) Plate info (summary, change, up/down counts)
-    try:
-        raw = json.loads(fetch_json(
-            _signed_url(_PLATE_INFO_URL), _PLATE_HEADERS,
-            ttl=_BASE_TTL))
-        if raw.get('code') == 200:
-            result['info'] = raw.get('data', {})
-        else:
-            result['info'] = {'error': raw.get('msg', 'unknown')}
-    except Exception as e:
-        result['info'] = {'error': str(e)}
+    specs = [
+        ('info', lambda: json.loads(fetch_json(
+            _signed_url(_PLATE_INFO_URL), _PLATE_HEADERS, ttl=base))),
+        ('stocks', lambda: json.loads(fetch_json(
+            _signed_url(_PLATE_STOCKS_URL), _PLATE_HEADERS, ttl=base + stagger))),
+        ('industry', lambda: json.loads(fetch_json(
+            _signed_url(_PLATE_INDUSTRY_URL), _PLATE_HEADERS, ttl=base + stagger * 2))),
+    ]
+    fetched = _fetch_concurrent(specs)
 
-    # 2) Constituent stocks
-    try:
-        raw = json.loads(fetch_json(
-            _signed_url(_PLATE_STOCKS_URL), _PLATE_HEADERS,
-            ttl=_BASE_TTL + _STAGGER))
-        if raw.get('code') == 200:
-            result['stocks'] = raw.get('data', {}).get('stocks', [])
-        else:
-            result['stocks'] = []
-    except Exception as e:
-        result['stocks'] = []
+    raw = fetched.get('info')              # 1) info: failure ⇒ error object
+    if isinstance(raw, Exception):
+        result['info'] = {'error': str(raw)}
+    elif raw.get('code') == 200:
+        result['info'] = raw.get('data', {})
+    else:
+        result['info'] = {'error': raw.get('msg', 'unknown')}
 
-    # 3) Industry breakdown
-    try:
-        raw = json.loads(fetch_json(
-            _signed_url(_PLATE_INDUSTRY_URL), _PLATE_HEADERS,
-            ttl=_BASE_TTL + _STAGGER * 2))
-        if raw.get('code') == 200:
-            result['industry'] = raw.get('data', [])
-        else:
-            result['industry'] = []
-    except Exception as e:
-        result['industry'] = []
+    raw = fetched.get('stocks')            # 2) stocks: failure/non-200 ⇒ []
+    result['stocks'] = raw.get('data', {}).get('stocks', []) \
+        if (not isinstance(raw, Exception) and raw.get('code') == 200) else []
 
+    raw = fetched.get('industry')          # 3) industry: failure/non-200 ⇒ []
+    result['industry'] = raw.get('data', []) \
+        if (not isinstance(raw, Exception) and raw.get('code') == 200) else []
     return result
 
 
@@ -428,74 +461,543 @@ ROUTES = {
 }
 
 
-# ── Health payload ──────────────────────────────────────────────────────────
+# ── Route tables / shapes ───────────────────────────────────────────────────
 
-def build_health_payload(base_url, check_sources=False):
-    """Build a JSON-serializable health payload."""
+_SHAPES = frozenset({'batch', 'object', 'rss', 'text'})
+
+# 14 JSON branches → shape. A new JSON endpoint MUST be registered here,
+# otherwise _handle_request falls through to 404 (BR-SRV-2). /healthz reuses
+# the `object` shape but is deliberately NOT in this table (else the guard
+# below would fail at import).
+_JSON_SHAPES = {
+    '/finance/market': 'object', '/finance/timeline': 'object',
+    '/quotation/market': 'object', '/market/timeline': 'object',
+    '/stock/data': 'batch', '/stock/fundflow': 'batch', '/stock/timeline': 'batch',
+    '/stock/f10': 'batch', '/stock/basic_info': 'batch', '/stock/announcement': 'batch',
+    '/cls/hotplate': 'object', '/cls/plate': 'object',
+    '/ths/longhu': 'text', '/market/margin': 'object',
+}
+assert len(_JSON_SHAPES) == 14      # structure guard (P1-6 anti-regression)
+
+_STOCK_BATCH_HANDLERS = {
+    '/stock/data': handle_cls_stock_batch,
+    '/stock/fundflow': handle_cls_fundflow,
+    '/stock/timeline': handle_cls_timeline,
+    '/stock/f10': handle_cls_f10,
+    '/stock/basic_info': handle_cls_basic_infos,
+    '/stock/announcement': handle_cls_announcement,
+}
+assert set(_STOCK_BATCH_HANDLERS) == {p for p, s in _JSON_SHAPES.items()
+                                      if s == 'batch'}
+
+# 4 CDP panels → their handler (P2: the router dispatches from tables, and the
+# guard shape is read from _JSON_SHAPES below — never a drifting literal).
+_PANEL_HANDLERS = {
+    '/finance/market': handle_finance_market,
+    '/finance/timeline': handle_finance_timeline,
+    '/quotation/market': handle_cls_quotation,
+    '/market/timeline': handle_market_timeline,
+}
+# P2: _JSON_SHAPES must actually be consumed, not decorative.  This set is the
+# routing's declared JSON coverage; the assertion makes a new _JSON_SHAPES entry
+# without a branch (or a branch without a shape) fail at import time.
+_JSON_DISPATCHED_PATHS = (frozenset(_PANEL_HANDLERS)
+                          | set(_STOCK_BATCH_HANDLERS)
+                          | {'/cls/hotplate', '/cls/plate',
+                             '/ths/longhu', '/market/margin'})
+assert _JSON_DISPATCHED_PATHS == frozenset(_JSON_SHAPES)
+
+# path → cache-policy domain for Cache-Control max-age (BR-SRV-8). Unregistered
+# paths (/healthz, /, /opml.xml) fall back to _DEFAULT_AGE_DOMAIN.
+_CACHE_AGE_DOMAINS = {
+    # live CDP panels are real-time quote surfaces — never the 300s default (P2)
+    '/finance/market': 'quote', '/finance/timeline': 'quote',
+    '/quotation/market': 'quote', '/market/timeline': 'quote',
+    '/stock/data': 'quote', '/stock/basic_info': 'quote',
+    '/stock/fundflow': 'fundflow', '/stock/timeline': 'timeline',
+    '/stock/f10': 'f10', '/stock/announcement': 'announcement',
+    '/cls/hotplate': 'plate', '/cls/plate': 'plate',
+    '/ths/longhu': 'longhu', '/market/margin': 'margin',
+    '/cls/telegraph': 'news_url', '/eastmoney/kuaixun': 'news_url',
+    '/ths/kuaixun': 'news_url', '/jin10/flash': 'news_url',
+    '/wallstreetcn/live': 'news_url',
+}
+_DEFAULT_AGE_DOMAIN = 'f10'          # L4, factor 1.0 ⇒ constant 300
+
+# ── Request-derived base URL hardening (S2-3) ───────────────────────────────
+# X-Forwarded-Host / Host are attacker-controllable, and the derived base URL is
+# embedded in feed/opml bodies.  There is no env whitelist, so validate the
+# format (hostname[:port] or [ipv6][:port]) — anything else falls back to
+# localhost — and mark host-dependent responses `private` + `Vary` so a shared
+# cache cannot serve one host's feed URLs to another (cache poisoning).
+_HOST_RE = re.compile(r'^[A-Za-z0-9](?:[A-Za-z0-9.\-]{0,253}[A-Za-z0-9])?'
+                      r'(?::\d{1,5})?$')
+_HOST_IPV6_RE = re.compile(r'^\[[0-9A-Fa-f:.]{2,45}\](?::\d{1,5})?$')
+_BASE_URL_VARY = 'Host, X-Forwarded-Host, X-Forwarded-Proto'
+
+
+def _valid_host_header(host):
+    """True when ``host`` is a well-formed ``hostname[:port]`` / ``[v6][:port]``.
+
+    Rejects empty / over-long / host-list / injection values (``@``, ``/``,
+    whitespace, CR/LF) so a forged Host cannot redefine published feed links."""
+    if not host or len(host) > 260:
+        return False
+    return bool(_HOST_RE.match(host) or _HOST_IPV6_RE.match(host))
+
+
+def _normalize_proto(value):
+    """``X-Forwarded-Proto`` → 'http'/'https' (anything else ⇒ 'http')."""
+    proto = (value or '').split(',')[0].strip().lower()
+    return proto if proto in ('http', 'https') else 'http'
+
+
+# longhu upstreams (module-level constants extracted from the old inline
+# Request(...) literals; see server.md §10#1).
+_LHBTABLE_URL = 'https://data.10jqka.com.cn/ifmarket/lhbtable'
+_LHBTABLE_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
+    'Referer': 'https://data.10jqka.com.cn/market/longhu/',
+    'X-Requested-With': 'XMLHttpRequest',
+}
+_LONGHU_PAGE_URL = 'https://data.10jqka.com.cn/market/longhu/'
+_LONGHU_PAGE_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36',
+    'Accept-Language': 'zh-CN,zh;q=0.9',
+}
+
+
+# ── Unified exception boundary ──────────────────────────────────────────────
+
+def _guard(fn, *, shape, requested=None, dropped=0, rss_info=None, feed_url=None):
+    """Execute fn(); any Exception → structured degraded body by shape.
+
+    BR-SRV-3: never bubbles to do_GET/do_HEAD. `KeyboardInterrupt`/`SystemExit`
+    are BaseException and pass through (BR-SRV-4).
+    """
+    if shape not in _SHAPES:
+        raise ValueError(f'unknown guard shape: {shape!r}')
+    try:
+        return fn()
+    except Exception as exc:
+        log.exception('[guard:%s] handler raised: %s', shape, exc)
+        if shape == 'batch':
+            codes = list(dict.fromkeys(requested or []))
+            errors = {c: 'upstream_error' for c in codes}
+            return build_batch_response(codes, {}, errors, dropped=dropped)
+        if shape == 'rss':
+            info = rss_info or {}
+            return generate_error_rss(info.get('title', 'feed'),
+                                      info.get('link', ''),
+                                      info.get('description', ''),
+                                      exc, feed_url=feed_url)
+        return {'error': str(exc)}
+
+
+def _json_payload_has_data(payload):
+    """True when a JSON endpoint payload carries real data (P2 degrade semantics).
+
+    A payload that is only an error marker — top-level ``error`` whose every
+    sibling is itself an ``{'error': ...}`` wrapper / empty container, or the
+    reserved ``_error`` degrade key (margin, ``handle_margin``) — means the
+    upstream/CDP is wholly unavailable.  The HTTP layer maps it to 503, matching
+    `/healthz` (S2-5), instead of reporting a healthy 200 for a dead browser.
+    """
+    if not isinstance(payload, dict):
+        return True
+    if '_error' in payload:                       # reserved degrade marker
+        return False
+    if 'error' not in payload:
+        return True
+    for key, value in payload.items():
+        if key == 'error':
+            continue
+        if value in (None, [], {}):
+            continue
+        if isinstance(value, dict) and set(value) <= {'error'}:
+            continue
+        return True
+    return False
+
+
+# ── Stock-batch ingress: canonical code identity (P1-6) ─────────────────────
+
+def _parse_stock_codes(codes_str):
+    """``(codes, requested)`` for one ``?code=a,b,c`` value — ingress fold (P1-6).
+
+    ``codes`` is what the handler is called with: one canonical code per
+    distinct stock, in request order (``600519.SH`` / ``SH600519`` /
+    ``sh600519`` all fold to ``sh600519`` through the single authority
+    ``config.canonical_code``).  Folding *before* the ``_MAX_BATCH_SIZE``
+    accounting means a re-spelled duplicate cannot burn a second slot, and
+    downstream there is exactly one pool / cache / ledger key per stock however
+    the client spelled it.
+
+    ``requested`` is positionally aligned with ``codes`` and carries the
+    spelling the client actually sent.  That is the key the response must use:
+    ``cache.build_batch_response`` — and therefore ``_guard``'s batch degrade
+    body — keys off its ``requested`` list, so the response contract (one row
+    per requested code, spelled the way it was requested) is unchanged.
+
+    A code the authority rejects has no canonical form, so its own spelling is
+    its identity: the handler reports it per code as ``null`` (SA-T13).  A bad
+    code *value* therefore stays a per-code ``null``, never a 400 — 400 is for
+    a missing / empty ``?code=`` (server.md §2.1).
+    """
+    codes, requested, seen = [], [], set()
+    for raw in codes_str.split(','):
+        raw = raw.strip()
+        if not raw:
+            continue
+        canon = config.canonical_code(raw)
+        key = canon if canon is not None else raw        # invalid ⇒ own spelling
+        if key in seen:                                  # re-spelled duplicate
+            continue
+        seen.add(key)
+        codes.append(key)
+        requested.append(raw)
+    return codes, requested
+
+
+def _rekey_batch_response(data, codes, requested):
+    """Re-key a handler-assembled batch body onto the requested spellings (P1-6).
+
+    ``_handle_stock_batch`` calls the handler with canonical codes, so the body
+    and its ``_errors`` sub-mapping come back keyed canonically.  The response
+    contract is the client's spelling, so data keys are folded back here
+    (``codes[i]`` → ``requested[i]``).
+
+    This is a pure rename, not assembly: the key set is exactly the handler's
+    (``build_batch_response`` remains the sole assembler of ``_``-prefixed
+    reserved keys — server.md §2.4), and a request that needed no re-spelling
+    (the common ``sh600519`` case) returns ``data`` untouched, so its body stays
+    byte-identical.
+    """
+    if not isinstance(data, dict):
+        return data
+    rename = dict(zip(codes, requested))
+    if not any(canon != raw for canon, raw in rename.items()):
+        return data
+    out = {}
+    for key, value in data.items():
+        if key == '_errors' and isinstance(value, dict):
+            out[key] = {rename.get(c, c): kind for c, kind in value.items()}
+        elif key.startswith('_'):
+            out[key] = value
+        else:
+            out[rename.get(key, key)] = value
+    return out
+
+
+# ── External upstream fan-out (≤ _FANOUT_MAX_WORKERS concurrent) ────────────
+
+_FANOUT_MAX_WORKERS = 3
+# AC-E2 (P1-2): one fan-out cycle must drain within a single REQUEST_TIMEOUT.
+# The pool is shared by hotplate/plate/longhu and may already be busy with
+# another request's tasks, so the wait is bounded by a deadline instead of by
+# each fn's own socket timeout (unbounded `fut.result()` let the queue stretch
+# a single request to ~190s while slot #4..N waited).
+_FANOUT_WAIT_BUDGET = REQUEST_TIMEOUT
+_fanout_executor = None
+_fanout_lock = threading.Lock()
+
+
+def _get_fanout_executor():
+    """Lazily create the shared ≤3-concurrency fan-out pool (BR-SRV-30)."""
+    global _fanout_executor
+    with _fanout_lock:
+        if _fanout_executor is None:
+            _fanout_executor = ThreadPoolExecutor(
+                max_workers=_FANOUT_MAX_WORKERS, thread_name_prefix='fanout')
+        return _fanout_executor
+
+
+def _fetch_concurrent(specs):
+    """specs = [(key, fn)]; expand concurrently (≤3); return {key: result|Exception}.
+
+    Never raises. Result order follows specs (deterministic). A single spec
+    runs inline to avoid pool overhead.
+
+    BR-SRV-30 / AC-E2: all specs share one `_FANOUT_WAIT_BUDGET` deadline, so a
+    request never blocks longer than one REQUEST_TIMEOUT even when the shared
+    pool is saturated. An expired spec is cancelled (a task still sitting in the
+    work queue never runs; one already running is left to its own
+    REQUEST_TIMEOUT bound) and degrades to FetchError('upstream_timeout').
+    Nothing is counted here: a real upstream failure is counted by
+    cache.fetch_json when it actually happens (no double count).
+    """
+    if not specs:
+        return {}
+    if len(specs) == 1:
+        k, fn = specs[0]
+        try:
+            return {k: fn()}
+        except Exception as exc:
+            return {k: exc}
+    ex = _get_fanout_executor()
+    futs = {ex.submit(fn): k for k, fn in specs}
+    done, _ = wait(futs, timeout=_FANOUT_WAIT_BUDGET)   # ★ bounded drain (P1-2)
+    out = {}
+    for fut, k in futs.items():
+        if fut in done:
+            try:
+                out[k] = fut.result()
+            except Exception as exc:
+                out[k] = exc
+            continue
+        fut.cancel()                        # queued ⇒ never runs; running ⇒
+        out[k] = FetchError('upstream_timeout')   # left to its own 10s bound
+    return out
+
+
+def _plate_ttls():
+    """Return (base_ttl, stagger); stagger = max(3, base//4) (BR-SRV-10)."""
+    base = cache_policy('plate')['ttl']
+    return base, max(3, base // 4)
+
+
+# ── Health payload (bounded admission + budgets + snapshot) ─────────────────
+
+_MAX_HEALTH_INFLIGHT = config.MAX_HEALTH_INFLIGHT
+_health_sem = threading.BoundedSemaphore(_MAX_HEALTH_INFLIGHT)
+_health_executor = None
+_health_executor_lock = threading.Lock()
+_health_inflight = 0
+_health_inflight_lock = threading.Lock()
+_health_last_snapshot = None
+_health_last_lock = threading.Lock()
+
+_HEALTH_TOTAL_BUDGET = 10.0
+_HEALTH_SOURCE_BUDGET = 3.0
+_HEALTH_POLL = 0.25
+
+
+def _base_feed_entries(base_url):
+    """15 healthz feed entries (5 RSS + 10 JSON/CDP); status per §2.9.1."""
     feeds = []
-    status = 'ok'
-
     for path, info in ROUTES.items():
-        entry = {
+        feeds.append({
             'name': info['name'],
             'path': path,
             'url': base_url + path,
             'status': 'configured',
-        }
-        if check_sources:
+        })
+    feeds.extend([
+        {'name': 'CLS Finance Market (财联社看盘)', 'path': '/finance/market',
+         'url': base_url + '/finance/market', 'status': 'requires_chrome_cdp'},
+        {'name': 'CLS Quotation Market (财联社行情)', 'path': '/quotation/market',
+         'url': base_url + '/quotation/market', 'status': 'requires_chrome_cdp'},
+        {'name': 'CLS Stock Detail (财联社个股详情)', 'path': '/stock/data',
+         'url': base_url + '/stock/data', 'status': 'configured'},
+        {'name': 'CLS Stock Fund Flow (财联社个股资金流向)', 'path': '/stock/fundflow',
+         'url': base_url + '/stock/fundflow', 'status': 'configured'},
+        {'name': 'CLS Hotplate (财联社板块)', 'path': '/cls/hotplate',
+         'url': base_url + '/cls/hotplate', 'status': 'configured'},
+        {'name': 'CLS Plate Detail (财联社板块详情)', 'path': '/cls/plate?code=cls80484',
+         'url': base_url + '/cls/plate?code=cls80484', 'status': 'configured'},
+        {'name': 'CLS Stock Timeline (个股分时图)', 'path': '/stock/timeline',
+         'url': base_url + '/stock/timeline', 'status': 'configured'},
+        {'name': 'CLS Stock F10 (个股F10财务概要)', 'path': '/stock/f10',
+         'url': base_url + '/stock/f10', 'status': 'requires_chrome_cdp'},
+        {'name': 'CLS Stock Basic Info (个股基本信息)', 'path': '/stock/basic_info',
+         'url': base_url + '/stock/basic_info', 'status': 'configured'},
+        {'name': 'Market Margin (融资融券)', 'path': '/market/margin',
+         'url': base_url + '/market/margin', 'status': 'configured'},
+    ])
+    return feeds
+
+
+def _policy_snapshot():
+    """{domain: cache_policy(domain)} — domain enum from config.DOMAIN_MATRIX."""
+    return {d: cache_policy(d) for d in sorted(DOMAIN_MATRIX)}
+
+
+def _set_health_inflight(delta):
+    global _health_inflight
+    with _health_inflight_lock:
+        _health_inflight = max(0, _health_inflight + delta)
+        metrics.set_gauge('healthz_inflight', _health_inflight)
+
+
+def _release_health_slot():
+    """Release one healthz admission slot (BR-SRV-19; once per batch)."""
+    _set_health_inflight(-1)
+    _health_sem.release()
+
+
+class _HealthBatch:
+    """Per-?check=1 in-flight ledger (P1-1).
+
+    The admission slot must cover the batch's real in-flight futures, so the
+    slot is released only when ALL of this batch's futures have finished —
+    not when the polling loop returns."""
+
+    __slots__ = ('_remaining', '_lock', '_done')
+
+    def __init__(self, n):
+        self._remaining = n
+        self._lock = threading.Lock()
+        self._done = False
+
+    def task_done(self, _fut=None):
+        """Future completion callback; idempotent — releases the slot once."""
+        release = False
+        with self._lock:
+            self._remaining -= 1
+            if self._remaining <= 0 and not self._done:
+                self._done = True
+                release = True
+        if release:
+            _release_health_slot()
+
+    def settle(self):
+        """Release the slot NOW, outstanding futures notwithstanding (P1-5).
+
+        Idempotent with :meth:`task_done` via the same `_done` latch: whichever
+        path releases first wins, so the error guard in `build_health_payload`
+        and a late future callback can never double-release the
+        `BoundedSemaphore` (an over-release raises `ValueError`)."""
+        release = False
+        with self._lock:
+            if not self._done:
+                self._done = True
+                release = True
+        if release:
+            _release_health_slot()
+
+
+def _get_health_executor():
+    global _health_executor
+    with _health_executor_lock:
+        if _health_executor is None:
+            _health_executor = ThreadPoolExecutor(
+                max_workers=_MAX_HEALTH_INFLIGHT, thread_name_prefix='healthz')
+        return _health_executor
+
+
+def _check_one_feed(feed_path, base_url, info):
+    """Total function: any exception → error entry (never raises)."""
+    try:
+        xml = info['handler'](feed_url=base_url + feed_path)
+        return {'status': 'ok', 'items': count_rss_items(xml), 'error': None}
+    except Exception as exc:
+        return {'status': 'error', 'items': None, 'error': str(exc)}
+
+
+def _run_health_checks(base_url, batch=None):
+    """BR-SRV-20: 5 sources concurrent; per-source 3s and total 10s budgets.
+
+    The admission slot is settled by `batch` as each future truly finishes
+    (P1-1).  P1-5: a caller may pass the ledger it created, so an exception here
+    can be settled by `build_health_payload` instead of leaking the slot.
+    Total for `Exception`; `BaseException` propagates to the caller's guard.
+    """
+    out = {}
+    try:
+        executor = _get_health_executor()
+    except Exception as exc:
+        for path in ROUTES:
+            out[path] = {'status': 'error', 'items': None, 'error': str(exc)}
+        _release_health_slot()
+        return out
+
+    if batch is None:
+        batch = _HealthBatch(len(ROUTES))    # ledger before any submit
+    started = time.monotonic()
+    pending = {}                             # fut -> (path, submitted_at)
+    for path, info in ROUTES.items():
+        try:
+            fut = executor.submit(_check_one_feed, path, base_url, info)
+        except Exception as exc:
+            out[path] = {'status': 'error', 'items': None, 'error': str(exc)}
+            batch.task_done()
+            continue
+        fut.add_done_callback(batch.task_done)
+        pending[fut] = (path, time.monotonic())
+
+    while pending:
+        now = time.monotonic()
+        for fut in [f for f, (_p, t) in pending.items()
+                    if now - t >= _HEALTH_SOURCE_BUDGET]:
+            out[pending.pop(fut)[0]] = {'status': 'timeout', 'items': None,
+                                        'error': 'timeout'}
+        if not pending:
+            break
+        elapsed = now - started
+        if elapsed >= _HEALTH_TOTAL_BUDGET:
+            break
+        next_due = min(t for _p, t in pending.values()) + _HEALTH_SOURCE_BUDGET
+        timeout = min(_HEALTH_POLL, max(0.0, next_due - now),
+                      max(0.0, _HEALTH_TOTAL_BUDGET - elapsed))
+        done, _ = wait(set(pending), timeout=timeout, return_when=FIRST_COMPLETED)
+        for fut in done:
+            path = pending.pop(fut)[0]
             try:
-                xml = info['handler'](feed_url=base_url + path)
-                entry['status'] = 'ok'
-                entry['items'] = count_rss_items(xml)
-            except Exception as exc:
-                entry['status'] = 'error'
-                entry['error'] = str(exc)
+                out[path] = fut.result()
+            except Exception as exc:        # ★ P1-5: never bubble mid-wait
+                out[path] = {'status': 'error', 'items': None,
+                             'error': str(exc)}
+    for fut, (path, _t) in pending.items():
+        out[path] = {'status': 'timeout', 'items': None, 'error': 'timeout'}
+    return out
+
+
+def _remember_health_snapshot(payload):
+    global _health_last_snapshot
+    with _health_last_lock:
+        _health_last_snapshot = json.loads(json.dumps(payload, ensure_ascii=False))
+
+
+def build_health_payload(base_url, check_sources=False):
+    """Build a JSON-serializable health payload (signature unchanged)."""
+    feeds = _base_feed_entries(base_url)
+    status = 'ok'
+
+    if check_sources:
+        if not _health_sem.acquire(blocking=False):     # BR-SRV-18: bounded admission
+            metrics.incr('healthz_stale_total')
+            with _health_last_lock:
+                snap = _health_last_snapshot
+            if snap is None:                            # first check already rejected
+                snap = {'status': 'degraded',
+                        'cache_ttl': cache_policy('feed')['ttl'],
+                        'request_timeout': REQUEST_TIMEOUT,
+                        'feeds': feeds, 'metrics': metrics.snapshot(),
+                        'policy': _policy_snapshot(),
+                        'cdp': restart_window_snapshot()}
+            return {**snap, 'stale': True}              # no fetch, no snapshot refresh
+        _set_health_inflight(+1)
+        # ★ P1-5: create the ledger the caller owns BEFORE the risky call, so an
+        # exception (executor creation, a `BaseException` out of `fut.result()`,
+        # …) settles the admission slot exactly once instead of leaking it
+        # forever — 5 leaks pinned every later `?check=1` to a stale body.
+        batch = _HealthBatch(len(ROUTES))
+        try:
+            results = _run_health_checks(base_url, batch)
+        except BaseException:
+            batch.settle()
+            raise
+        for entry in feeds:
+            res = results.get(entry['path'])
+            if res is None:
+                continue
+            entry['status'] = res['status']
+            if res['items'] is not None:
+                entry['items'] = res['items']
+            if res['error'] is not None:
+                entry['error'] = res['error']
+            if res['status'] != 'ok':
                 status = 'degraded'
-        feeds.append(entry)
 
-    feeds.append({'name': 'CLS Finance Market (财联社看盘)',
-                  'path': '/finance/market',
-                  'url': base_url + '/finance/market',
-                  'status': 'requires_chrome_cdp'})
-    feeds.append({'name': 'CLS Quotation Market (财联社行情)',
-                  'path': '/quotation/market',
-                  'url': base_url + '/quotation/market',
-                  'status': 'requires_chrome_cdp'})
-    feeds.append({'name': 'CLS Stock Detail (财联社个股详情)',
-                  'path': '/stock/data',
-                  'url': base_url + '/stock/data',
-                  'status': 'requires_chrome_cdp'})
-    feeds.append({'name': 'CLS Stock Fund Flow (财联社个股资金流向)',
-                  'path': '/stock/fundflow',
-                  'url': base_url + '/stock/fundflow',
-                  'status': 'configured'})
-    feeds.append({'name': 'CLS Hotplate (财联社板块)',
-                  'path': '/cls/hotplate',
-                  'url': base_url + '/cls/hotplate',
-                  'status': 'configured'})
-    feeds.append({'name': 'CLS Plate Detail (财联社板块详情)',
-                  'path': '/cls/plate?code=cls80484',
-                  'url': base_url + '/cls/plate?code=cls80484',
-                  'status': 'configured'})
-    feeds.append({'name': 'CLS Stock Timeline (个股分时图)',
-                  'path': '/stock/timeline',
-                  'url': base_url + '/stock/timeline',
-                  'status': 'configured'})
-    feeds.append({'name': 'CLS Stock F10 (个股F10财务概要)',
-                  'path': '/stock/f10',
-                  'url': base_url + '/stock/f10',
-                  'status': 'configured'})
-    feeds.append({'name': 'CLS Stock Basic Info (个股基本信息)',
-                  'path': '/stock/basic_info',
-                  'url': base_url + '/stock/basic_info',
-                  'status': 'requires_chrome_cdp'})
-    feeds.append({'name': 'Market Margin (融资融券)',
-                  'path': '/market/margin',
-                  'url': base_url + '/market/margin',
-                  'status': 'configured'})
-
-    return {'status': status, 'cache_ttl': CACHE_TTL,
-            'request_timeout': REQUEST_TIMEOUT, 'feeds': feeds}
+    payload = {'status': status,
+               'cache_ttl': cache_policy('feed')['ttl'],
+               'request_timeout': REQUEST_TIMEOUT,
+               'feeds': feeds,
+               'metrics': metrics.snapshot(),
+               'policy': _policy_snapshot(),
+               'cdp': restart_window_snapshot()}
+    _remember_health_snapshot(payload)
+    return payload
 
 
 # ── HTTP Server ─────────────────────────────────────────────────────────────
@@ -520,13 +1022,13 @@ class RSSHandler(BaseHTTPRequestHandler):
     def do_HEAD(self):
         try:
             self._handle_request(write_body=False)
-        except (BrokenPipeError, ConnectionResetError):
+        except OSError:          # P2: TimeoutError ⊂ OSError (stream parity)
             pass
 
     def do_GET(self):
         try:
             self._handle_request(write_body=True)
-        except (BrokenPipeError, ConnectionResetError):
+        except OSError:
             pass
 
     def _handle_request(self, write_body=True):
@@ -534,181 +1036,221 @@ class RSSHandler(BaseHTTPRequestHandler):
         path = parsed.path
         base_url = self._base_url()
 
-        if path == '/':
+        if path == '/':                                     # static, no IO
             self._serve_index(write_body=write_body)
             return
-        if path == '/opml.xml':
+        if path == '/opml.xml':                             # static, no IO
+            # S2-3: the OPML embeds the (possibly request-derived) base URL ⇒
+            # non-public + Vary whenever it is not from PUBLIC_BASE_URL.
             self._send_text(200, 'text/x-opml; charset=utf-8',
-                            generate_opml(base_url, ROUTES), write_body=write_body)
+                            generate_opml(base_url, ROUTES),
+                            varies_on_host=not PUBLIC_BASE_URL,
+                            write_body=write_body)
             return
-        if path == '/healthz':
+        if path == '/healthz':                              # BR-SRV-21: object guard
             query = parse_qs(parsed.query)
             check_sources = query.get('check', ['0'])[0] in ('1', 'true', 'yes')
-            payload = build_health_payload(base_url, check_sources=check_sources)
-            status_code = 503 if payload['status'] == 'degraded' else 200
+            payload = _guard(
+                lambda: build_health_payload(base_url, check_sources=check_sources),
+                shape='object')
+            # S2-5: the guard's failure body is {'error': ...} with no 'status';
+            # treating that as 200 made a broken health check read as healthy.
+            if 'error' in payload or 'status' not in payload:
+                status_code = 503
+            else:
+                status_code = 503 if payload.get('status') == 'degraded' else 200
+            if status_code == 503:
+                metrics.incr('http_503_total')              # P2: real 503 total
             body = json.dumps(payload, ensure_ascii=False, indent=2)
             self._send_text(status_code, 'application/json; charset=utf-8',
                             body, cache=False, write_body=write_body)
             return
-        if path == '/finance/market':
-            self._send_json(handle_finance_market(), write_body=write_body)
+
+        # ── 4 panels (object) — handler + shape from the dispatch tables ────
+        if path in _PANEL_HANDLERS:
+            self._send_json_shape(path, _PANEL_HANDLERS[path],
+                                  write_body=write_body)
             return
-        if path == '/finance/timeline':
-            self._send_json(handle_finance_timeline(), write_body=write_body)
+
+        # ── 6 batch (batch) — shape derived from the route table ────────────
+        if path in _STOCK_BATCH_HANDLERS:
+            self._handle_stock_batch(parsed, _STOCK_BATCH_HANDLERS[path],
+                                     write_body=write_body, path=path)
             return
-        if path == '/quotation/market':
-            self._send_json(handle_cls_quotation(), write_body=write_body)
-            return
-        if path == '/market/timeline':
-            self._send_json(handle_market_timeline(), write_body=write_body)
-            return
-        if path == '/stock/data':
-            self._handle_stock_batch(parsed, handle_cls_stock_batch, write_body=write_body)
-            return
-        if path == '/stock/fundflow':
-            self._handle_stock_batch(parsed, handle_cls_fundflow, write_body=write_body)
-            return
-        if path == '/stock/timeline':
-            self._handle_stock_batch(parsed, handle_cls_timeline, write_body=write_body)
-            return
-        if path == '/stock/f10':
-            self._handle_stock_batch(parsed, handle_cls_f10, write_body=write_body)
-            return
-        if path == '/stock/basic_info':
-            self._handle_stock_batch(parsed, handle_cls_basic_infos, write_body=write_body)
-            return
-        if path == '/stock/announcement':
-            self._handle_stock_batch(parsed, handle_cls_announcement, write_body=write_body)
-            return
+
+        # ── remaining 4 JSON branches ───────────────────────────────────────
         if path == '/cls/hotplate':
-            self._send_json(handle_cls_hotplate(), write_body=write_body)
+            self._send_json_shape(path, handle_cls_hotplate,
+                                  write_body=write_body)
             return
         if path == '/cls/plate':
-            params = parse_qs(parsed.query)
-            code = params.get('code', [''])[0]
-            if not code:
-                self._send_error('Missing ?code= parameter. Usage: /cls/plate?code=cls80484')
+            code = parse_qs(parsed.query).get('code', [''])[0]
+            if not code:                                    # 400 before guard
+                self._send_error(
+                    'Missing ?code= parameter. Usage: /cls/plate?code=cls80484',
+                    write_body=write_body)
                 return
-            self._send_json(handle_cls_plate(code), write_body=write_body)
+            self._send_json_shape(path, lambda: handle_cls_plate(code),
+                                  write_body=write_body)
             return
-        if path == '/ths/longhu':
-            body = json.dumps(handle_ths_longhu(), ensure_ascii=False, indent=2)
+        if path == '/ths/longhu':                           # text: JSON body, no cache
+            data = _guard(handle_ths_longhu, shape=_JSON_SHAPES[path])
+            body = json.dumps(data, ensure_ascii=False, indent=2)
             self._send_text(200, 'application/json; charset=utf-8',
                             body, cache=False, write_body=write_body)
             return
         if path == '/market/margin':
-            params = parse_qs(parsed.query)
-            market = params.get('market', ['99'])[0]
-            self._send_json(handle_margin(market), write_body=write_body)
+            market = parse_qs(parsed.query).get('market', ['99'])[0]
+            if market not in VALID_MARKETS:                 # 400 before guard:
+                self._send_error(                           # no URL, no cache key
+                    'Invalid ?market= parameter. Allowed: '
+                    + ','.join(VALID_MARKETS),
+                    write_body=write_body)
+                return
+            self._send_json_shape(path, lambda: handle_margin(market),
+                                  write_body=write_body)
             return
+
+        # ── 5 RSS (rss) ─────────────────────────────────────────────────────
         if path in ROUTES:
             self._serve_feed(path, base_url, write_body=write_body)
             return
 
         self.send_error(404, 'Not Found. Visit / for available feeds.')
 
-    def _handle_stock_batch(self, parsed, handler, write_body=True):
+    def _handle_stock_batch(self, parsed, handler, write_body=True, path=None):
         params = parse_qs(parsed.query)
         if 'code' not in params:
-            self._send_error('Missing ?code= parameter. Usage: /stock/...?code=sh600519 or ...?code=sh600519,sz000001')
+            self._send_error('Missing ?code= parameter. Usage: /stock/...?code=sh600519 or ...?code=sh600519,sz000001',
+                             write_body=write_body)
             return
-        codes_str = params['code'][0]
-        stock_codes = [c.strip() for c in codes_str.split(',') if c.strip()]
+        # ★ P1-6: fold every code through the single authority on the way in
+        # (`config.canonical_code`), so `600519.SH` / `SH600519` / `sh600519`
+        # are one stock for the batch budget, for the handler, and for every
+        # pool/cache/ledger key downstream.  `requested` carries the client's
+        # spelling, which is what the response is keyed by.
+        stock_codes, requested = _parse_stock_codes(params['code'][0])
         if not stock_codes:
-            self._send_error('No valid stock codes provided.')
+            self._send_error('No valid stock codes provided.', write_body=write_body)
             return
-        if len(stock_codes) > _MAX_BATCH_SIZE:
-            dropped = stock_codes[_MAX_BATCH_SIZE:]
-            log.warning(f'Batch truncated: {len(dropped)} codes dropped, '
-                        f'samples={dropped[:3]}')
+        dropped = 0
+        if len(stock_codes) > _MAX_BATCH_SIZE:              # BR-SRV-14
+            dropped = len(stock_codes) - _MAX_BATCH_SIZE
+            log.warning(f'Batch truncated: {dropped} codes dropped, '
+                        f'samples={stock_codes[_MAX_BATCH_SIZE:_MAX_BATCH_SIZE + 3]}')
             stock_codes = stock_codes[:_MAX_BATCH_SIZE]
-        data = handler(stock_codes)
+            requested = requested[:_MAX_BATCH_SIZE]     # keep the two aligned
+        # BR-SRV-15: inject `dropped` only — assembly point is the handler.
+        # P2: the guard shape comes from the _JSON_SHAPES table, not a literal.
+        data = _guard(lambda: handler(stock_codes, dropped=dropped),
+                      shape=_JSON_SHAPES.get(path, 'batch'),
+                      requested=requested, dropped=dropped)
+        # ★ P1-6: the handler answered in canonical codes; the response contract
+        # is the requested spelling (a no-op when nothing was re-spelled).
+        data = _rekey_batch_response(data, stock_codes, requested)
         body = json.dumps(data, ensure_ascii=False, indent=2)
         self._send_text(200, 'application/json; charset=utf-8',
                         body, cache=True, write_body=write_body)
 
-    def _send_error(self, msg):
+    def _send_error(self, msg, write_body=True):
         body = json.dumps({'error': msg}, ensure_ascii=False, indent=2)
         self._send_text(400, 'application/json; charset=utf-8',
-                        body, cache=False, write_body=True)
+                        body, cache=False, write_body=write_body)
 
-    def _send_json(self, data, write_body=True):
+    def _send_json(self, data, write_body=True, cache=True, status=200):
         body = json.dumps(data, ensure_ascii=False, indent=2)
-        self._send_text(200, 'application/json; charset=utf-8',
-                        body, cache=True, write_body=write_body)
+        self._send_text(status, 'application/json; charset=utf-8',
+                        body, cache=cache, write_body=write_body)
+
+    def _send_json_shape(self, path, fn, write_body=True, cache=True):
+        """Send a JSON endpoint whose guard shape comes from `_JSON_SHAPES`.
+
+        P2: keeps the shape registry authoritative — the router never invents a
+        literal shape string that could drift from the table.  A payload that is
+        only an error marker (upstream/CDP wholly unavailable) degrades to 503
+        like `/healthz` (S2-5), instead of reading as a healthy 200."""
+        payload = _guard(fn, shape=_JSON_SHAPES[path])
+        status = 200 if _json_payload_has_data(payload) else 503
+        if status == 503:
+            metrics.incr('http_503_total')          # P2: real 503 total
+        self._send_json(payload, write_body=write_body,
+                        cache=cache and status == 200, status=status)
 
     def _get_or_fetch_feed(self, path, fetch_func):
-        """Thread-safe feed cache with stampede protection and LRU eviction."""
-        now = time.time()
-        with _feed_cache_lock:
-            cached = feed_cache.get(path)
-            if cached and now < cached['expires_at']:
-                return cached['xml']
+        """BR-SRV-6: stampede protection + double-checked cache lookup.
 
-        with _feed_fetch_locks_lock:
-            if path not in _feed_fetch_locks:
-                _feed_fetch_locks[path] = threading.Lock()
-            lock = _feed_fetch_locks[path]
-
-        with lock:
-            with _feed_cache_lock:
-                cached = feed_cache.get(path)
-                if cached and time.time() < cached['expires_at']:
-                    return cached['xml']
-            try:
-                xml = fetch_func()
-            except Exception:
-                raise
-            with _feed_cache_lock:
-                if len(feed_cache) >= MAX_FEED_CACHE_SIZE:
-                    oldest = min(feed_cache, key=lambda k: feed_cache[k]['time'])
-                    del feed_cache[oldest]
-                feed_cache[path] = {
-                    'xml': xml, 'time': time.time(),
-                    'expires_at': time.time() + CACHE_TTL * (1 + random.uniform(-CACHE_JITTER, CACHE_JITTER))
-                }
+        LRU / TTL / sweeping are owned by cache.py; this only sequences
+        miss → per-path lock → second get → fetch → put.
+        """
+        xml = feed_cache_get(path)                      # ① hit path: no policy read
+        if xml is not None:
+            return xml
+        with _feed_fetch_locks_lock:                    # ② build lock, release at once
+            lock = _feed_fetch_locks.setdefault(path, threading.Lock())
+        with lock:                                      # ③
+            xml = feed_cache_get(path)                  # ★ double-check
+            if xml is not None:
+                return xml
+            ttl = cache_policy('feed')['ttl']           # ★ P2-1: only after 2nd miss
+            xml = fetch_func()                          # fetch only on a real miss
+            feed_cache_put(path, xml, ttl)              # failure ⇒ raises, no cache write
         return xml
 
     def _serve_feed(self, path, base_url, write_body=True):
-        handler = ROUTES[path]['handler']
+        info = ROUTES[path]
         feed_url = base_url + path
-        try:
-            xml = self._get_or_fetch_feed(path, lambda: handler(feed_url=feed_url))
-        except Exception as exc:
-            info = ROUTES[path]
-            xml = generate_error_rss(info['title'], info['link'],
-                                     info['description'], exc, feed_url=feed_url)
+        xml = _guard(lambda: self._get_or_fetch_feed(
+            path, lambda: info['handler'](feed_url=feed_url)),
+            shape='rss', rss_info=info, feed_url=feed_url)
+        # S2-3: the feed body embeds feed_url (derived from the request Host when
+        # PUBLIC_BASE_URL is unset) ⇒ never `public` without Vary in that case.
         self._send_text(200, 'application/rss+xml; charset=utf-8',
-                        xml, write_body=write_body)
+                        xml, varies_on_host=not PUBLIC_BASE_URL,
+                        write_body=write_body)
 
     def _base_url(self):
+        """Public base URL for published links: config first, else validated Host.
+
+        S2-3: with PUBLIC_BASE_URL set it always wins.  Otherwise the value is
+        taken from X-Forwarded-Host/Host — attacker-controllable — so it is
+        format-validated (invalid ⇒ localhost) and the caller marks the response
+        host-dependent (private + Vary).
+        """
         if PUBLIC_BASE_URL:
             return PUBLIC_BASE_URL
-        proto = self.headers.get('X-Forwarded-Proto', 'http').split(',')[0].strip()
-        host = self.headers.get('X-Forwarded-Host') or self.headers.get('Host')
-        return f'{proto}://{host or f"localhost:{PORT}"}'.rstrip('/')
+        proto = _normalize_proto(self.headers.get('X-Forwarded-Proto'))
+        raw = (self.headers.get('X-Forwarded-Host')
+               or self.headers.get('Host') or '')
+        host = raw.split(',')[0].strip()
+        if not _valid_host_header(host):
+            host = f'localhost:{PORT}'
+        return f'{proto}://{host}'.rstrip('/')
 
     def _cache_age(self):
-        """Return Cache-Control max-age by endpoint tier (matches server TTL)."""
-        tiers = _trading_tiers()
-        path = self.path.split('?')[0]
-        if path.startswith(('/stock/fundflow', '/stock/timeline',
-                            '/stock/basic_info', '/stock/data')):
-            return tiers['L1']
-        if path.startswith(('/cls/hotplate', '/cls/plate')):
-            return tiers['L2']
-        if path.startswith(('/cls/telegraph', '/eastmoney', '/ths',
-                            '/jin10', '/wallstreetcn')):
-            return tiers['L3']
-        return tiers['L4']
+        """BR-SRV-8: path → domain → policy (no bare TTL literals).
 
-    def _send_text(self, status_code, content_type, body, cache=True, write_body=True):
+        P2: parse with `urlparse` (the router's own rule) so an absolute-form
+        request line (`GET http://host/stock/data?x=1`) resolves its path
+        instead of falling through to the 300 s default domain and stamping
+        real-time quotes `max-age=300`."""
+        path = urlparse(self.path).path
+        domain = _CACHE_AGE_DOMAINS.get(path, _DEFAULT_AGE_DOMAIN)
+        return cache_policy(domain)['ttl']
+
+    def _send_text(self, status_code, content_type, body, cache=True,
+                   varies_on_host=False, write_body=True):
         body_bytes = body.encode('utf-8')
         self.send_response(status_code)
         self.send_header('Content-Type', content_type)
         self.send_header('Content-Length', str(len(body_bytes)))
         if cache:
-            self.send_header('Cache-Control', f'public, max-age={self._cache_age()}')
+            # S2-3: a request-derived base URL makes the body host-dependent, so
+            # it must not be marked `public` (nor cached without `Vary`).
+            scope = 'private' if varies_on_host else 'public'
+            self.send_header('Cache-Control',
+                             f'{scope}, max-age={self._cache_age()}')
+            if varies_on_host:
+                self.send_header('Vary', _BASE_URL_VARY)
         self.end_headers()
         if write_body:
             self.wfile.write(body_bytes)
@@ -752,11 +1294,11 @@ class RSSHandler(BaseHTTPRequestHandler):
             ('/cls/hotplate', 'Hotplate (板块)', '/cls/hotplate', False),
             ('/cls/plate', 'Plate Detail (板块详情)', '/cls/plate?code=cls80484', False),
             ('/ths/longhu', 'THS Longhu (龙虎榜)', '/ths/longhu', False),
-            ('/stock/data', 'Stock Detail (个股详情)', '/stock/data?code=sz300139', True),
+            ('/stock/data', 'Stock Detail (个股详情)', '/stock/data?code=sz300139', False),
             ('/stock/fundflow', 'Stock Fund Flow (资金流向)', '/stock/fundflow?code=sh600519', False),
             ('/stock/timeline', 'Stock Timeline (个股分时图)', '/stock/timeline?code=sh600519', False),
-            ('/stock/f10', 'Stock F10 (个股财务概要)', '/stock/f10?code=sh600519', False),
-            ('/stock/basic_info', 'Stock Basic Info (个股基本信息)', '/stock/basic_info?code=sh600519', True),
+            ('/stock/f10', 'Stock F10 (个股财务概要)', '/stock/f10?code=sh600519', True),
+            ('/stock/basic_info', 'Stock Basic Info (个股基本信息)', '/stock/basic_info?code=sh600519', False),
             ('/stock/announcement', 'Stock Announcement (个股公告)', '/stock/announcement?code=sh600519', False),
             ('/market/margin', 'Market Margin (融资融券)', '/market/margin?market=99', False),
         ]
@@ -789,13 +1331,22 @@ class BoundedThreadPoolServer(ThreadingHTTPServer):
 
     allow_reuse_address = True
     daemon_threads = True
+    # BUG-P6C-03: socketserver defaults to backlog 5 — under burst connects the
+    # accept queue overflows and clients retransmit ~1s later (SYN RTO).  Read
+    # by server_activate() for BOTH the main port (≤MAX_INFLIGHT) and the
+    # stream port (make_stream_server, ≤MAX_STREAM_CONNS=100), so one value
+    # configures both; see config.LISTEN_BACKLOG.
+    request_queue_size = LISTEN_BACKLOG
 
-    def __init__(self, *args, max_workers=MAX_WORKERS, **kwargs):
+    def __init__(self, *args, max_workers=MAX_WORKERS, max_inflight=None, **kwargs):
         super().__init__(*args, **kwargs)
         self.executor = ThreadPoolExecutor(max_workers=max_workers)
         self._inflight = 0
         self._inflight_lock = threading.Lock()
-        self._max_inflight = max_workers * 2  # queued + running
+        # Main port: MAX_INFLIGHT (40). Stream port passes
+        # max_inflight=MAX_STREAM_CONNS+10 explicitly (P1-4) so the 100-conn
+        # cap is not masked by the main-port default.
+        self._max_inflight = MAX_INFLIGHT if max_inflight is None else max_inflight
 
     def _reject_503(self, request):
         try:
@@ -808,6 +1359,10 @@ class BoundedThreadPoolServer(ThreadingHTTPServer):
         except Exception:
             pass
         finally:
+            try:
+                metrics.incr('http_503_total')      # BR-SRV-25: single count point
+            except Exception:
+                pass
             try:
                 request.close()
             except Exception:
@@ -882,25 +1437,23 @@ def _cdp_memory_watchdog():
     """Periodically restart Chrome to reclaim V8/renderer memory.
 
     `_maybe_reconnect` (in cdp_engine) only restarts Chrome after ~30 stock
-    navigations. Under low traffic (RSS + flickering /stock/data) navigation
-    volume rarely reaches that, so Chrome's renderers grow over days and never
-    release memory. This thread forces a `full_chrome_restart()` on a wall-clock
-    interval regardless of traffic, keeping long-running memory bounded.
+    navigations. Under low traffic navigation volume rarely reaches that, so
+    renderers grow over days and never release memory. This thread forces a
+    `full_chrome_restart()` on a wall-clock interval regardless of traffic.
+
+    The skip decision (trading-hours avoidance + throttle + restart window +
+    not-ready) is centralized in cdp_engine.watchdog_restart_skip_reason()
+    (BR-SRV-26 / ADR-012).
     """
-    from . import cdp_engine as cdp
-    from . import config as env
     while True:
         time.sleep(CDP_RESTART_INTERVAL)
         try:
-            if env.cdp_engine and env.cdp_engine.ready:
-                if time.time() - cdp._last_chrome_restart < cdp._CHROME_RESTART_THROTTLE * 2:
-                    # Chrome was just restarted (nav threshold): a watchdog
-                    # restart now would kill the fresh Chrome back-to-back.
-                    # Skip — memory was already reclaimed.
-                    log.info('  [CDP] watchdog: restart skipped (Chrome restarted recently)')
-                    continue
-                log.info('  [CDP] watchdog: restarting Chrome to reclaim renderer memory')
-                full_chrome_restart()
+            reason = watchdog_restart_skip_reason()
+            if reason is not None:
+                log.info('  [CDP] watchdog: restart skipped (%s)', reason)
+                continue                        # defer one cycle, no accumulation
+            log.info('  [CDP] watchdog: restarting Chrome to reclaim renderer memory')
+            full_chrome_restart()
         except Exception as e:
             log.error(f'  [CDP] watchdog error: {e}')
 
@@ -933,7 +1486,7 @@ def main():
     threading.Thread(target=run_stream_server, daemon=True).start()
 
     log.info(f'China Finance RSS Bridge running on http://localhost:{PORT}')
-    log.info(f'Cache TTL: {CACHE_TTL}s | Timeout: {REQUEST_TIMEOUT}s')
+    log.info(f'Cache TTL: {cache_policy("feed")["ttl"]}s | Timeout: {REQUEST_TIMEOUT}s')
     log.info('Available feeds:')
     for path, info in ROUTES.items():
         log.info(f'  http://localhost:{PORT}{path}  — {info["name"]}')
@@ -944,11 +1497,11 @@ def main():
     log.info(f'  http://localhost:{PORT}/market/timeline  — Market Index Timeline (JSON, needs Chrome CDP)')
     log.info(f'  http://localhost:{PORT}/cls/hotplate  — Hotplate Data (JSON, no CDP needed)')
     log.info(f'  http://localhost:{PORT}/cls/plate?code=cls80484  — Plate Detail (JSON, no CDP needed)')
-    log.info(f'  http://localhost:{PORT}/stock/data  — Stock Detail Data (JSON, needs Chrome CDP)')
+    log.info(f'  http://localhost:{PORT}/stock/data  — Stock Detail Data (JSON, no CDP needed)')
     log.info(f'  http://localhost:{PORT}/stock/fundflow  — Stock Fund Flow (JSON, no CDP needed)')
     log.info(f'  http://localhost:{PORT}/stock/timeline  — Stock Timeline (JSON, no CDP needed)')
-    log.info(f'  http://localhost:{PORT}/stock/f10  — Stock F10 Financial Summary (JSON, no CDP needed)')
-    log.info(f'  http://localhost:{PORT}/stock/basic_info  — Stock Basic Info (JSON, needs Chrome CDP)')
+    log.info(f'  http://localhost:{PORT}/stock/f10  — Stock F10 Financial Summary (JSON, needs Chrome CDP)')
+    log.info(f'  http://localhost:{PORT}/stock/basic_info  — Stock Basic Info (JSON, no CDP needed)')
     log.info(f'  http://localhost:{PORT}/stock/announcement  — Stock Announcement (JSON, no CDP needed)')
     log.info(f'  http://localhost:{PORT}/market/margin  — Market Margin (融资融券, JSON, no CDP needed)')
     from .config import STREAM_PORT
