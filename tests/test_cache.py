@@ -340,26 +340,34 @@ class NegativeCacheTests(_CacheTestCase):
 # ── S1-6 probe-budget escalation ───────────────────────────────────────────
 
 class ProbeEscalationTests(_CacheTestCase):
-    def test_probe_budget_escalates_then_caps(self):          # S1-6
+    def test_probe_budget_escalates_then_caps(self):          # S1-6 / AC-S3
         url = 'http://t/escalate'
         cache_mod._record_failure(url, 'upstream_timeout')     # fail_count 1
         self.assertEqual(cache_mod._fetch_budget(url), config.PROBE_TIMEOUT)
         cache_mod._record_failure(url, 'upstream_timeout')     # 2
         self.assertEqual(cache_mod._fetch_budget(url), config.PROBE_TIMEOUT * 2)
-        cache_mod._record_failure(url, 'upstream_timeout')     # 3
-        self.assertEqual(cache_mod._fetch_budget(url), config.PROBE_TIMEOUT * 4)
-        cache_mod._record_failure(url, 'upstream_timeout')     # 4
-        self.assertEqual(cache_mod._fetch_budget(url), config.REQUEST_TIMEOUT)
+        cache_mod._record_failure(url, 'upstream_timeout')     # 3 ⇒ 8s capped to 5s
+        self.assertEqual(cache_mod._fetch_budget(url),
+                         cache_mod._PROBE_BUDGET_CAP)
+        cache_mod._record_failure(url, 'upstream_timeout')     # 4 → stays capped
+        self.assertEqual(cache_mod._fetch_budget(url),
+                         cache_mod._PROBE_BUDGET_CAP)
         cache_mod._record_failure(url, 'upstream_timeout')     # 5 → stays capped
-        self.assertEqual(cache_mod._fetch_budget(url), config.REQUEST_TIMEOUT)
+        self.assertEqual(cache_mod._fetch_budget(url),
+                         cache_mod._PROBE_BUDGET_CAP)
+        self.assertLess(cache_mod._PROBE_BUDGET_CAP, config.REQUEST_TIMEOUT)
 
     def test_slow_upstream_gets_full_budget_within_a_few_probes(self):  # S1-6
         # A 5s-needing upstream no longer waits the full 600s streak for a
-        # usable budget: the 3rd consecutive failure already probes at 8s.
+        # usable budget: the 2nd consecutive failure probes at 4s and the 3rd
+        # already reaches the 5s cap (AC-S3).
         url = 'http://t/slow-upstream'
         cache_mod._record_failure(url, 'upstream_timeout')
         cache_mod._record_failure(url, 'upstream_timeout')
         self.assertGreaterEqual(cache_mod._fetch_budget(url), 4.0)
+        cache_mod._record_failure(url, 'upstream_timeout')
+        self.assertEqual(cache_mod._fetch_budget(url),
+                         cache_mod._PROBE_BUDGET_CAP)
 
     def test_aged_streak_still_gets_full_budget(self):        # BR-CACHE-20
         url = 'http://t/aged'

@@ -76,6 +76,13 @@ _HISTORY_AGE = 600.0
 # jitter, it is not a network budget of its own.
 _FOLLOWER_WAIT_MARGIN = 1.0
 
+# Half-open probe-budget cap (AC-S3 裁决).  The escalating probe (S1-6) tops
+# out here rather than at REQUEST_TIMEOUT: a sustained black-hole upstream then
+# settles at a ~10s cycle (5s probe + 5s NEG_TTL), so roughly half the requests
+# are slow and P95 ≈ 5s, while a single request can never exceed 15s.  Derived
+# from the previous 2s→4s→8s→REQUEST_TIMEOUT ladder by capping the 8s rung.
+_PROBE_BUDGET_CAP = 5.0
+
 
 class FetchError(Exception):
     """The single failure type raised by :func:`fetch_json` (cache.md §2.2)."""
@@ -145,19 +152,24 @@ def _cache_put(d, key, value, ttl=None, metric_key='url'):
 
 
 def _probe_budget(fail_count):
-    """Escalating half-open probe budget (S1-6): 2s→4s→8s→REQUEST_TIMEOUT.
+    """Escalating half-open probe budget (S1-6): 2s → 4s → 5s (cap, AC-S3).
 
     A slow-not-dead upstream (e.g. one needing ~5s) used to stay pinned at
     ``PROBE_TIMEOUT`` until the failure streak aged out (``_HISTORY_AGE``,
     600s), because ``first_at`` is only refreshed on ageing.  Doubling the
     budget per consecutive failure lets such an upstream clear its history
     within a few cycles instead of ten minutes.  ``fail_count < 1`` behaves
-    like a single failure.  The final rung is the normal cold budget.
+    like a single failure.
+
+    AC-S3 裁决封顶 ``_PROBE_BUDGET_CAP`` (5s) 而非 ``REQUEST_TIMEOUT`` (10s)：
+    持续黑洞下稳态周期 ≈ 5s 探测 + 5s 负缓存 = 10s，慢请求占比 ≈ 50% ⇒
+    P95 ≈ 5s；单请求 ≤15s 恒成立。  ``_fetch_budget`` 对老化 (``_HISTORY_AGE``)
+    的失败历史仍返回 ``REQUEST_TIMEOUT``——那是"一次性全预算探测"，不走上限。
     """
     budget = PROBE_TIMEOUT
     steps = max(int(fail_count), 1) - 1
-    while steps > 0 and budget < REQUEST_TIMEOUT:
-        budget = min(budget * 2, REQUEST_TIMEOUT)
+    while steps > 0 and budget < _PROBE_BUDGET_CAP:
+        budget = min(budget * 2, _PROBE_BUDGET_CAP)
         steps -= 1
     return budget
 

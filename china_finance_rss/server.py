@@ -594,32 +594,6 @@ def _guard(fn, *, shape, requested=None, dropped=0, rss_info=None, feed_url=None
         return {'error': str(exc)}
 
 
-def _json_payload_has_data(payload):
-    """True when a JSON endpoint payload carries real data (P2 degrade semantics).
-
-    A payload that is only an error marker — top-level ``error`` whose every
-    sibling is itself an ``{'error': ...}`` wrapper / empty container, or the
-    reserved ``_error`` degrade key (margin, ``handle_margin``) — means the
-    upstream/CDP is wholly unavailable.  The HTTP layer maps it to 503, matching
-    `/healthz` (S2-5), instead of reporting a healthy 200 for a dead browser.
-    """
-    if not isinstance(payload, dict):
-        return True
-    if '_error' in payload:                       # reserved degrade marker
-        return False
-    if 'error' not in payload:
-        return True
-    for key, value in payload.items():
-        if key == 'error':
-            continue
-        if value in (None, [], {}):
-            continue
-        if isinstance(value, dict) and set(value) <= {'error'}:
-            continue
-        return True
-    return False
-
-
 # ── Stock-batch ingress: canonical code identity (P1-6) ─────────────────────
 
 def _parse_stock_codes(codes_str):
@@ -1053,8 +1027,10 @@ class RSSHandler(BaseHTTPRequestHandler):
             payload = _guard(
                 lambda: build_health_payload(base_url, check_sources=check_sources),
                 shape='object')
-            # S2-5: the guard's failure body is {'error': ...} with no 'status';
-            # treating that as 200 made a broken health check read as healthy.
+            # S2-5 / N1: this 503 belongs to the *health* endpoint's own
+            # semantics (the guard's failure body is {'error': ...} with no
+            # 'status'; treating that as 200 made a broken health check read as
+            # healthy).  Data endpoints do NOT share it — see `_send_json_shape`.
             if 'error' in payload or 'status' not in payload:
                 status_code = 503
             else:
@@ -1157,24 +1133,25 @@ class RSSHandler(BaseHTTPRequestHandler):
         self._send_text(400, 'application/json; charset=utf-8',
                         body, cache=False, write_body=write_body)
 
-    def _send_json(self, data, write_body=True, cache=True, status=200):
+    def _send_json(self, data, write_body=True, cache=True):
         body = json.dumps(data, ensure_ascii=False, indent=2)
-        self._send_text(status, 'application/json; charset=utf-8',
+        self._send_text(200, 'application/json; charset=utf-8',
                         body, cache=cache, write_body=write_body)
 
     def _send_json_shape(self, path, fn, write_body=True, cache=True):
         """Send a JSON endpoint whose guard shape comes from `_JSON_SHAPES`.
 
         P2: keeps the shape registry authoritative — the router never invents a
-        literal shape string that could drift from the table.  A payload that is
-        only an error marker (upstream/CDP wholly unavailable) degrades to 503
-        like `/healthz` (S2-5), instead of reading as a healthy 200."""
+        literal shape string that could drift from the table.
+
+        N1 (编排层裁决): 业务降级体 — 上游/CDP 整体不可用时 ``_guard`` 给出的
+        ``{'error': ...}`` / ``_error`` 体 — **恒以 HTTP 200 + 结构化 error 体
+        返回**，与旧版本及既有业务系统消费的契约一致（状态码不由 payload 内容
+        决定）。真实的 503 仅保留两条路径：连接准入拒绝
+        (``BoundedThreadPoolServer._reject_503``) 与 ``/healthz`` degraded。
+        """
         payload = _guard(fn, shape=_JSON_SHAPES[path])
-        status = 200 if _json_payload_has_data(payload) else 503
-        if status == 503:
-            metrics.incr('http_503_total')          # P2: real 503 total
-        self._send_json(payload, write_body=write_body,
-                        cache=cache and status == 200, status=status)
+        self._send_json(payload, write_body=write_body, cache=cache)
 
     def _get_or_fetch_feed(self, path, fetch_func):
         """BR-SRV-6: stampede protection + double-checked cache lookup.

@@ -584,17 +584,18 @@ class HttpSemanticsTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body)['status'], 'ok')
 
-    def test_cdp_unavailable_panel_is_503_and_counted(self):
-        """P2: a wholly unavailable CDP panel must read as 503 like /healthz,
-        not a healthy 200 that only a body parse can refute."""
+    def test_cdp_unavailable_panel_is_200_with_error_body(self):
+        """N1: a wholly unavailable CDP panel degrades with HTTP 200 + an error
+        body (the old contract, kept for existing consumers) — not a 503, and
+        it must not move the real-503 counter."""
         before = srv.metrics.snapshot()['http_503_total']
         with patch.dict(srv._PANEL_HANDLERS,
                         {'/finance/market':
                          lambda: {'error': 'Chrome CDP not available'}}):
             status, body = self._req('GET', '/finance/market')
-        self.assertEqual(status, 503)
+        self.assertEqual(status, 200)
         self.assertIn('error', json.loads(body))
-        self.assertEqual(srv.metrics.snapshot()['http_503_total'], before + 1)
+        self.assertEqual(srv.metrics.snapshot()['http_503_total'], before)
 
     def test_panel_with_data_is_200(self):
         with patch.dict(srv._PANEL_HANDLERS,
@@ -602,30 +603,34 @@ class HttpSemanticsTests(unittest.TestCase):
             status, body = self._req('GET', '/finance/market')
         self.assertEqual(status, 200)
 
-    def test_hotplate_all_partitions_failing_is_503(self):
+    def test_hotplate_all_partitions_failing_is_200_with_error_body(self):
         def boom(url, headers=None, ttl=None, encoding=None):
             raise RuntimeError('upstream down')
         with patch.object(srv, 'fetch_json', side_effect=boom):
             status, body = self._req('GET', '/cls/hotplate')
-        self.assertEqual(status, 503)
+        self.assertEqual(status, 200)
         self.assertIn('error', json.loads(body))
 
-    def test_margin_degraded_is_503(self):
+    def test_margin_degraded_is_200_with_error_body(self):
         with patch.object(srv, 'handle_margin',
                           return_value={'latest': {'rzye': 0}, 'recent': [],
                                         '_error': 'upstream_timeout'}):
             status, body = self._req('GET', '/market/margin')
-        self.assertEqual(status, 503)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)['_error'], 'upstream_timeout')
 
-    def test_json_payload_has_data_classification(self):
-        self.assertFalse(srv._json_payload_has_data({'error': 'x'}))
-        self.assertFalse(srv._json_payload_has_data(
-            {'error': 'all', 'plate_industry': {'error': 'a'}}))
-        self.assertFalse(srv._json_payload_has_data(
-            {'latest': {'rzye': 0}, 'recent': [], '_error': 'upstream_timeout'}))
-        self.assertTrue(srv._json_payload_has_data({'basic_info': {'x': 1}}))
-        self.assertTrue(srv._json_payload_has_data(
-            {'error': 'partial', 'plate_concept': {'k': 1}}))
+    def test_guard_captured_error_body_is_200(self):
+        """N1: the fourth degrade face — a data endpoint whose handler *raises*
+        — also answers HTTP 200 with the guard's ``{'error': ...}`` body, and
+        must not move the real-503 counter."""
+        def boom():
+            raise RuntimeError('boom')
+        before = srv.metrics.snapshot()['http_503_total']
+        with patch.dict(srv._PANEL_HANDLERS, {'/finance/market': boom}):
+            status, body = self._req('GET', '/finance/market')
+        self.assertEqual(status, 200)
+        self.assertIn('error', json.loads(body))
+        self.assertEqual(srv.metrics.snapshot()['http_503_total'], before)
 
     def test_opml_is_private_and_varies_on_host(self):
         """S2-3: with no PUBLIC_BASE_URL the OPML embeds a request-derived URL,
