@@ -265,7 +265,8 @@ def _chrome_pids_by_flag(flag):
             if not entry.isdigit():
                 continue
             try:
-                cmdline = open(f'/proc/{entry}/cmdline', 'rb').read().decode('utf-8', errors='replace')
+                with open(f'/proc/{entry}/cmdline', 'rb') as f:
+                    cmdline = f.read().decode('utf-8', errors='replace')
                 if flag in cmdline:
                     pids.append(int(entry))
             except (OSError, IOError):
