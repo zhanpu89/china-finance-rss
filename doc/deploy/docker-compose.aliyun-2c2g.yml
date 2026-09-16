@@ -1,0 +1,48 @@
+# 阿里云 2C2G — 容灾节点
+# 压测基线：MAX_WORKERS=20/MAX_INFLIGHT=40，300并发 244 qps，CPU 92%，内存稳定 35%
+# 角色：UCloud 主节点宕机时接管全部 SSE（ip_hash 粘性 fallback）+ REST 轮询冗余
+#
+# 启动：
+#   docker compose -f doc/deploy/docker-compose.aliyun-2c2g.yml up -d --build
+#
+# nginx 注意：upstream 用 ip_hash，阿里云节点 weight=1（UCloud 为 weight=2）
+#
+services:
+  rss:
+    build: .
+    container_name: china-finance-rss
+    restart: unless-stopped
+    ports:
+      - "8053:8053"     # REST
+      - "8054:8054"     # SSE 长连接
+    environment:
+      - PORT=8053
+      # ── 准入控制（2C2G 最优，勿超 30）─────────────────────
+      - MAX_WORKERS=20                # 2核下 20 workers 已到 CPU 92% 上限（压测实证）
+      - MAX_INFLIGHT=40               # = 2× MAX_WORKERS（满则 503 load shed）
+      # ── CDP 浏览器池（内存受限，降半）────────────────────
+      - CDP_STOCK_PAGES=4             # 2GB 总内存，CDP chromium ~50-100MB/tab；4 tab ≈ 200-400MB
+                                      # 不影响热点股（短线用户关注标的有限）
+      - CDP_RESTART_INTERVAL=7200     # 2h 定期重启 CDP 防内存泄漏
+      # ── HTTP 压缩（跨公网带宽节省）────────────────────────
+      - GZIP_MIN_BYTES=1024           # ≥1KB JSON 响应压缩（实测节省 77% 带宽）
+      - GZIP_COMPRESSLEVEL=1          # 速度优先（2核压测 level=6 有超时，level=1 无）
+      # ── SSE ──────────────────────────────────────────────
+      - STREAM_HOST=0.0.0.0           # Docker 桥接网络必须
+      - REQUEST_TIMEOUT=10            # 外部源请求超时（对齐探测预算）
+      # ── 日志 ──────────────────────────────────────────────
+      - LOG_DIR=/app/logs
+      - LOG_BACKUP_DAYS=30
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    mem_limit: 1.5g                   # 给 OS 留 500MB（系统 + 文件页缓存）
+    mem_reservation: 256M
+    dns:
+      - 223.5.5.5                     # 阿里 DNS（就近）
+      - 8.8.8.8
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

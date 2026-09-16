@@ -9,7 +9,8 @@ services:
     environment:
       - PORT=8053
       - REQUEST_TIMEOUT=10
-      - MAX_WORKERS=10
+      - MAX_WORKERS=20
+      - MAX_INFLIGHT=40
       - PUBLIC_BASE_URL=
       - CDP_STOCK_PAGES=8
       - STREAM_HOST=0.0.0.0

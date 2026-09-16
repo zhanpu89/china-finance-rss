@@ -215,6 +215,12 @@ def stock_nav_page_names():
 # int there would be a dead setting an operator could not act on (P2-9).
 # 'n/a' literals are kept in the matrix for 1:1 SAD reading; cache_policy
 # normalises them to None (BR-CFG-11).
+# HTTP response compression (server._send_text).  Responses below the
+# minimum size are sent raw (compression overhead not worth it); gzip
+# applies only when the client advertises Accept-Encoding: gzip.
+GZIP_MIN_BYTES = int(os.getenv('GZIP_MIN_BYTES', '1024'))
+GZIP_COMPRESSLEVEL = int(os.getenv('GZIP_COMPRESSLEVEL', '1'))  # speed over ratio (CPU cost under 2-core stress)
+
 DOMAIN_MATRIX = {
     'quote':        ('L1', 1.0, 1.0, 'dedup', 2000),                  # stock/data, basic_info, 实时价
     'fundflow':     ('L1', 1.0, 1.0, 'dedup', 2000),

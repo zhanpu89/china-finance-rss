@@ -843,5 +843,92 @@ class StockBatchIngressTests(unittest.TestCase):
                          second['body']['sh600519'])
 
 
+class GzipResponseTests(unittest.TestCase):
+    """_send_text gzip：Accept-Encoding 协商 + 阈值 + Vary 合并。"""
+
+    def _fake_handler(self, accept_encoding):
+        import io
+        from unittest.mock import Mock
+        from china_finance_rss.server import RSSHandler
+        h = RSSHandler.__new__(RSSHandler)   # 绕过 __init__（不起真实 socket）
+        h.headers = {'Accept-Encoding': accept_encoding}
+        h.send_response = Mock()
+        h.send_header = Mock()
+        h.end_headers = Mock()
+        h.wfile = io.BytesIO()
+        h._cache_age = lambda: 60
+        return h
+
+    def _captured(self, h):
+        ctype = clen = cenc = vary = None
+        for args in h.send_header.call_args_list:
+            name, val = args[0]
+            if name == 'Content-Type': ctype = val
+            elif name == 'Content-Length': clen = int(val)
+            elif name == 'Content-Encoding': cenc = val
+            elif name == 'Vary': vary = val
+        return ctype, clen, cenc, vary
+
+    def test_large_body_with_accept_gzip_is_compressed(self):
+        import gzip
+        body = '{"x": "' + 'a' * 5000 + '"}'
+        h = self._fake_handler('gzip, deflate')
+        h._send_text(200, 'application/json', body)
+        ctype, clen, cenc, vary = self._captured(h)
+        self.assertEqual(cenc, 'gzip')
+        self.assertLess(clen, len(body.encode()))
+        self.assertEqual(ctype, 'application/json')
+        self.assertIn('Accept-Encoding', vary or '')
+        raw = h.wfile.getvalue()
+        self.assertEqual(gzip.decompress(raw).decode(), body)
+
+    def test_compress_level_1_used(self):
+        """默认 compresslevel=1 (速度优先) 产生的 gzip 可正常解压。"""
+        import gzip as gz_mod
+        body = '{"x": "' + 'b' * 3000 + '"}'
+        h = self._fake_handler('gzip')
+        h._send_text(200, 'application/json', body)
+        raw = h.wfile.getvalue()
+        self.assertTrue(raw[:2] == b'\x1f\x8b', '应产生 gzip 头')
+        self.assertEqual(gz_mod.decompress(raw).decode(), body)
+
+    def test_no_accept_encoding_stays_raw(self):
+        body = '{"x": "' + 'a' * 5000 + '"}'
+        h = self._fake_handler('')
+        h._send_text(200, 'application/json', body)
+        _, clen, cenc, _ = self._captured(h)
+        self.assertIsNone(cenc)
+        self.assertEqual(clen, len(body.encode()))
+        self.assertEqual(h.wfile.getvalue().decode(), body)
+
+    def test_small_body_never_compressed(self):
+        body = '{"ok": 1}'
+        h = self._fake_handler('gzip')
+        h._send_text(200, 'application/json', body)
+        _, clen, cenc, _ = self._captured(h)
+        self.assertIsNone(cenc, '低于阈值的响应不应压缩')
+        self.assertEqual(clen, len(body.encode()))
+
+    def test_vary_merged_for_host_dependent_feed(self):
+        body = '{"x": "' + 'a' * 5000 + '"}'
+        h = self._fake_handler('gzip')
+        h._send_text(200, 'application/rss+xml', body, varies_on_host=True)
+        _, _, cenc, vary = self._captured(h)
+        self.assertEqual(cenc, 'gzip')
+        for part in ('Host', 'X-Forwarded-Host', 'X-Forwarded-Proto', 'Accept-Encoding'):
+            self.assertIn(part, vary, f'Vary 应含 {part}')
+
+    def test_head_request_content_length_matches_compressed(self):
+        # write_body=False 时 Content-Length 应等于压缩后的 GET 长度
+        import gzip
+        body = '{"x": "' + 'a' * 5000 + '"}'
+        h = self._fake_handler('gzip')
+        h._send_text(200, 'application/json', body, write_body=False)
+        _, clen, cenc, _ = self._captured(h)
+        self.assertEqual(cenc, 'gzip')
+        from china_finance_rss import config as _cfg
+        self.assertEqual(clen, len(gzip.compress(body.encode(), _cfg.GZIP_COMPRESSLEVEL)))
+        self.assertEqual(h.wfile.getvalue(), b'', 'HEAD 不应写 body')
+
 if __name__ == '__main__':
     unittest.main()
