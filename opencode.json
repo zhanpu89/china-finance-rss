@@ -11,6 +11,31 @@
     ".opencode/rules/project-mirror.md"
   ],
   "agent": {
+    "explore": {
+      "description": "只读探索：搜索/定位/理解代码，禁止任何写入",
+      "mode": "subagent",
+      "permission": {
+        "edit": "deny",
+        "write": "deny",
+        "bash": "deny",
+        "read": "allow",
+        "glob": "allow",
+        "grep": "allow"
+      }
+    },
+    "general": {
+      "description": "通用研究执行：只读与分析，禁止任何写入与 bash 执行",
+      "mode": "subagent",
+      "permission": {
+        "edit": "deny",
+        "write": "deny",
+        "bash": "deny",
+        "read": "allow",
+        "glob": "allow",
+        "grep": "allow",
+        "webfetch": "ask"
+      }
+    },
     "prd-writer": {
       "description": "需求分析与 PRD 文档撰写",
       "mode": "subagent",
@@ -56,26 +81,23 @@
       "mode": "subagent",
       "permission": {
         "edit": {
-          "opencode.json": "deny",
-          "AGENTS.md": "deny",
-          ".opencode/**": "deny",
-          "doc/arch/**": "deny",
-          "doc/prd/**": "deny",
-          "doc/review/**": "deny",
-          "doc/detailed/**": "deny",
-          "doc/tester/**": "deny",
-          "src/**": "allow",
-          "app/**": "allow",
-          "frontend/**": "allow",
+          "*": "deny",
+          "china_finance_rss/**": "allow",
           "tests/**": "allow"
         },
         "write": {
-          "src/**": "allow",
-          "app/**": "allow",
-          "frontend/**": "allow",
+          "*": "deny",
+          "china_finance_rss/**": "allow",
           "tests/**": "allow"
         },
-        "bash": "deny"
+        "bash": {
+          "python -m py_compile": "allow",
+          "python -m unittest": "allow",
+          "git diff": "allow",
+          "git status": "allow",
+          "git log": "allow",
+          "*": "deny"
+        }
       },
       "prompt": "{file:.opencode/skills/code-developer/SKILL.md}"
     },
@@ -96,13 +118,11 @@
         "edit": {
           "*": "deny",
           "doc/tester/**": "allow",
-          "src/test/**": "allow",
           "tests/**": "allow"
         },
         "write": {
           "*": "deny",
           "doc/tester/**": "allow",
-          "src/test/**": "allow",
           "tests/**": "allow"
         },
         "bash": "allow"
@@ -123,9 +143,49 @@
       "description": "全流程软件工程编排器（主 agent 模式）",
       "mode": "primary",
       "permission": {
-        "edit": "deny",
-        "write": "deny",
-        "bash": "allow",
+        "edit": {
+          "*": "deny",
+          "_MEMORY_CACHE.md": "allow",
+          ".opencode/project/**": "allow",
+          "doc/review/**": "allow",
+          "doc/tester/**": "allow"
+        },
+        "write": {
+          "*": "deny",
+          "_MEMORY_CACHE.md": "allow",
+          ".opencode/project/**": "allow",
+          "doc/review/**": "allow",
+          "doc/tester/**": "allow"
+        },
+        "bash": {
+          "git status": "allow",
+          "git log": "allow",
+          "git diff": "allow",
+          "git diff --stat": "allow",
+          "git diff --check": "allow",
+          "git fetch": "allow",
+          "git pull": "allow",
+          "git push": "allow",
+          "git add *": "allow",
+          "git commit *": "allow",
+          "git branch *": "allow",
+          "git checkout *": "allow",
+          "git stash *": "allow",
+          "git remote *": "allow",
+          "git mv *": "allow",
+          "git reset *": "allow",
+          "git rm *": "allow",
+          "git tag *": "allow",
+          "git show *": "allow",
+          "git rebase *": "allow",
+          "git cherry-pick *": "allow",
+          ".opencode/scripts/check-*.sh": "allow",
+          ".opencode/scripts/mirror-log.sh": "allow",
+          ".opencode/scripts/project-init.sh": "allow",
+          ".opencode/scripts/log-*.sh": "allow",
+          "curl *": "allow",
+          "*": "deny"
+        },
         "read": "allow",
         "glob": "allow",
         "grep": "allow",
