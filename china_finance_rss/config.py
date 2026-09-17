@@ -3,12 +3,14 @@
 Single authority for TTL / pool limits / endpoint cache limits / upstream
 encoding (:func:`cache_policy`), the trading-hours time source, and every
 env-registered IO/resource budget.  Imports stdlib only (``os`` / ``re`` /
-``datetime``) and never imports a ``china_finance_rss`` module (layerIsolation).
+``datetime`` / ``urllib.parse``) and never imports a ``china_finance_rss``
+module (layerIsolation).
 """
 
 import os
 import re
 from datetime import datetime, timezone, timedelta
+from urllib.parse import urlsplit
 
 # Env-based configuration
 PORT = int(os.getenv('PORT', '8053'))
@@ -42,10 +44,24 @@ PROBE_TIMEOUT = int(os.getenv('PROBE_TIMEOUT', '2'))
 # lookup (measured 340ms/request → 48ms reused on the 2C2G node).  These bound
 # the per-host pool, evict idle sockets, and cache name→address lookups.
 # HTTP_POOL_MAX_PER_HOST is per (scheme, host, port); excess concurrent
-# requests use short-lived connections rather than blocking.
-HTTP_POOL_MAX_PER_HOST = int(os.getenv('HTTP_POOL_MAX_PER_HOST', '16'))
+# requests use short-lived connections rather than blocking.  Must stay
+# >= BATCH_MAX_WORKERS: a narrower pool would queue the batch fan-out on the
+# pool itself and make the capacity model's worker count unreachable
+# (BUG-SSE-DEPTH-01).  24 leaves headroom over the 20-wide batch phase.
+HTTP_POOL_MAX_PER_HOST = int(os.getenv('HTTP_POOL_MAX_PER_HOST', '24'))
 HTTP_POOL_IDLE_TTL = float(os.getenv('HTTP_POOL_IDLE_TTL', '60'))
 HTTP_DNS_CACHE_TTL = float(os.getenv('HTTP_DNS_CACHE_TTL', '300'))
+
+# Process-start transport pre-warm (`cache.warm_transport`).  The first refresh
+# of a cold process is otherwise fully cold — empty connection pool and empty
+# DNS cache — so a 50-code quote fan-out pays every TCP/TLS handshake and name
+# lookup at once (measured ≈4.2 s, over the 0.8×tick budget).  Pre-dialing one
+# connection per SSE hot-path host (and thereby filling `_DNSResolver`) removes
+# that one-off cost.  Warming dials transport only — it issues no business
+# request.  The timeout bounds a single dial; warming runs on a startup daemon
+# thread and can never gate startup or `/healthz`.
+HTTP_WARM_CONNECTIONS = int(os.getenv('HTTP_WARM_CONNECTIONS', '1'))
+HTTP_WARM_TIMEOUT = float(os.getenv('HTTP_WARM_TIMEOUT', '2.0'))
 
 # SSE refresh capacity model — the two calibration inputs behind
 # `stream.refresh_capacity` (BR-STR-16).  Registered here (config.md §1.1 env
@@ -55,10 +71,14 @@ HTTP_DNS_CACHE_TTL = float(os.getenv('HTTP_DNS_CACHE_TTL', '300'))
 #
 # BATCH_MAX_WORKERS: bounded parallelism of one batch phase — both
 # `stock_api._run_batch` and the per-field phase in `stream._refresh_pool`.
-# 16 is aligned with HTTP_POOL_MAX_PER_HOST: a wider fan-out would only queue
-# on the per-host pool.  The upstream tolerated 48 concurrent in the r5
+# 20 is aligned with HTTP_POOL_MAX_PER_HOST (24, so the fan-out never queues
+# on the per-host pool) and is sized by the SSE capacity model: at the
+# quote-driven tick=4, coverage = int(0.8 × 4 × 20 / 0.3) = 213 fetch-calls,
+# so 50 codes × 4 calls/code = 200 fit one C1 refresh (BUG-SSE-DEPTH-01: at
+# 16 workers coverage_codes was 42 < 50, forcing a 2-tick C2 shard and a
+# 12.33 s cold first frame).  The upstream tolerated 48 concurrent in the r5
 # measurement (no throttling observed).
-BATCH_MAX_WORKERS = int(os.getenv('BATCH_MAX_WORKERS', '16'))
+BATCH_MAX_WORKERS = int(os.getenv('BATCH_MAX_WORKERS', '20'))
 # STREAM_PER_FETCH_EST: serial-equivalent seconds one upstream REST call
 # occupies one batch worker.  Recalibrated (r5) to the pool-warmed path:
 # `cache.fetch_json` keep-alive pooling + cached DNS took single-request
@@ -184,6 +204,14 @@ _ANNOUNCEMENT_HEADERS = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.cl
 _BASIC_INFO_BASE_URL = 'https://x-quote.cls.cn/quote/stock/basic'
 _BASIC_INFO_HEADERS = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.cls.cn/stock'}
 
+# Five-level order book REST API (direct access, no CDP / no sign).
+# `field=five` selects the 21-field five-band payload; the same endpoint
+# without it serves volume aggregates.  `secu_code` must be the lowercase
+# exchange-prefixed spelling (canonical_code) — the dotted form returns an
+# empty `data` dict.
+_STOCK_DEPTH_URL = 'https://x-quote.cls.cn/quote/stock/volume'
+_STOCK_DEPTH_HEADERS = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.cls.cn/stock'}
+
 # Stock detail REST API (direct access, no CDP needed)
 _STOCK_DETAIL_BASE_URL = 'https://x-quote.cls.cn/quote/stock/detail'
 _STOCK_DETAIL_HEADERS = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.cls.cn/stock'}
@@ -191,6 +219,33 @@ _STOCK_DETAIL_HEADERS = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.cl
 # Company info REST API (needs in-browser auth via CDP evaluate_fetch)
 _COMPANY_INFO_BASE_URL = 'https://x-quote.cls.cn/quote/stock/company_info'
 _COMPANY_INFO_HEADERS = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.cls.cn/stock'}
+
+# SSE hot-path upstream URLs: the domains a quote/fundflow/timeline subscription
+# refreshes every tick.  `warm_hosts()` derives the transport keys from these
+# constants, so moving an upstream can never leave the warm list stale.
+_SSE_HOT_PATH_URLS = (
+    _BASIC_INFO_BASE_URL, _STOCK_DEPTH_URL, _STOCK_DETAIL_BASE_URL,
+    _FUNDFLOW_BASE_URL, _TIMELINE_BASE_URL,
+)
+
+
+def warm_hosts():
+    """Distinct ``(scheme, host, port)`` of the SSE hot-path upstreams.
+
+    Derived from ``_SSE_HOT_PATH_URLS`` (the URL constants are the single
+    authority), deduped, in a stable order.  Consumed by ``cache.warm_transport``
+    so the pre-warm follows the configured upstreams instead of a host literal.
+    """
+    seen, out = set(), []
+    for url in _SSE_HOT_PATH_URLS:
+        parsed = urlsplit(url)
+        key = (parsed.scheme, parsed.hostname,
+               parsed.port or (443 if parsed.scheme == 'https' else 80))
+        if key not in seen:
+            seen.add(key)
+            out.append(key)
+    return tuple(out)
+
 
 # 同花顺 data center APIs (public, no auth)
 _TENJQKA_HEADERS = {
@@ -248,7 +303,8 @@ def stock_nav_page_names():
 # 'n/a' literals are kept in the matrix for 1:1 SAD reading; cache_policy
 # normalises them to None (BR-CFG-11).
 DOMAIN_MATRIX = {
-    'quote':        ('L1', 1.0, 1.0, 'dedup', 2000),                  # stock/data, basic_info, 实时价
+    'quote':        ('L0', 1.0, 1.0, 'dedup', 2000),                  # stock/data, basic_info, 实时价
+    'depth':        ('L0', 1.0, 1.0, 'dedup', 500),                   # 五档盘口 (与 quote 同拍)
     'fundflow':     ('L1', 1.0, 1.0, 'dedup', 2000),
     'timeline':     ('L1', 1.0, 1.0, 'dedup', 2000),
     'plate':        ('L2', 1.0, 1.0, 'fixed:200', 'n/a'),             # cls/hotplate, cls/plate (URL cache)
@@ -325,14 +381,20 @@ def _trading_tiers(now=None):
     """Return dict of tier base TTLs for the given (or current) trading status.
 
     Tiers (short-line trading priority):
+      L0  最快    个股五档+实时价 (quote, depth) — 上游盘中 3s 一跳的物理下限
       L1  极实时  个股行情 (fundflow, timeline, basic_info)
       L2  实时    板块轮动 (hotplate, plate)
       L3  准实时  新闻快讯 (telegraph, kuaixun, flash)
       L4  参考    静态日更 (f10, margin) — unchanged
+
+    L0 is 4s in-session (≈1.3× the upstream's measured 3.0s tick, so a 4s
+    poll still sees every upstream change while halving the 8s waste).  Off
+    hours it is pinned to the L1 baseline (120s) so a non-trading session never
+    pays extra upstream requests for a market that is not moving.
     """
     if _is_trading_hours(now):
-        return {'L1': 8, 'L2': 12, 'L3': 30, 'L4': 300}
-    return {'L1': 120, 'L2': 120, 'L3': 180, 'L4': 300}
+        return {'L0': 4, 'L1': 8, 'L2': 12, 'L3': 30, 'L4': 300}
+    return {'L0': 120, 'L1': 120, 'L2': 120, 'L3': 180, 'L4': 300}
 
 
 def _resolve_int_factor(spec, base):

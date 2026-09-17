@@ -579,7 +579,13 @@ class BasicInfoSectorCacheTests(unittest.TestCase):
             second = stock_api.fetch_cls_basic_info(self.CODE)
 
         self.assertEqual(second['sector_name'], self.SECTOR)
-        self.assertEqual(calls, [f'{config._BASIC_INFO_BASE_URL}?secu_code={self.CODE}'])
+        # only the fatal quote call and the (always-fresh) depth call remain —
+        # the sector detail call is fully served from its 7-day cache
+        self.assertEqual(calls, [
+            f'{config._BASIC_INFO_BASE_URL}?secu_code={self.CODE}',
+            f'{config._STOCK_DEPTH_URL}?secu_code={self.CODE}&field=five',
+        ])
+        self.assertEqual([c for c in calls if '/detail?' in c], [])
 
     def test_unexpired_entry_is_served_from_cache(self):
         """Within the TTL the entry is returned verbatim (boundary-safe: the
@@ -631,6 +637,117 @@ class BasicInfoSectorCacheTests(unittest.TestCase):
             with self.assertRaises(FetchError):
                 stock_api.fetch_cls_basic_info(self.CODE)
         self.assertEqual(calls, [f'{config._BASIC_INFO_BASE_URL}?secu_code={self.CODE}'])
+
+
+# ── stock_api: five-level order book (depth domain) ────────────────────────
+
+class StockDepthTests(unittest.TestCase):
+    """任务 2b: `fetch_cls_stock_depth` — 21-field payload, honest empty
+    semantics (None, never a fabricated all-zero book) and non-fatal failure."""
+
+    CODE = 'sh600519'
+    INDEX = 'sh000001'
+    BJ = 'bj430047'
+
+    def setUp(self):
+        _reset_stock_state()
+
+    def tearDown(self):
+        _reset_stock_state()
+
+    @staticmethod
+    def _book():
+        """A realistic five-band payload (20 value fields + preclose_px)."""
+        data = {'preclose_px': 1500.0}
+        for level in range(1, 6):
+            data[f'b_px_{level}'] = 1499.0 - level
+            data[f'b_amount_{level}'] = 100 * level
+            data[f's_px_{level}'] = 1501.0 + level
+            data[f's_amount_{level}'] = 200 * level
+        return data
+
+    def test_url_uses_canonical_prefixed_form_and_field_five(self):
+        calls = []
+
+        def _fake(url, headers, ttl, deadline=None):
+            calls.append(url)
+            return {'code': 200, 'data': self._book()}
+
+        with patch.object(stock_api, '_fetch_rest_json', side_effect=_fake):
+            out = stock_api.fetch_cls_stock_depth(self.CODE)
+        self.assertEqual(calls, [
+            f'{config._STOCK_DEPTH_URL}?secu_code={self.CODE}&field=five'])
+        self.assertEqual(out['b_px_1'], 1498.0)
+        self.assertEqual(out['preclose_px'], 1500.0)
+
+    def test_returns_none_for_empty_data_dict(self):
+        """北京所 (`bj*`) / 非法码: upstream returns `data: {}` — no book."""
+        for code in (self.BJ, 'sh999999'):
+            with patch.object(stock_api, '_fetch_rest_json',
+                              return_value={'code': 200, 'data': {}}):
+                self.assertIsNone(stock_api.fetch_cls_stock_depth(code))
+
+    def test_returns_none_for_all_zero_band(self):
+        """指数 (sh000001 / sz399001) have no order book: every band field 0."""
+        zero = {f: 0 for f in stock_api._DEPTH_VALUE_FIELDS}
+        zero['preclose_px'] = 3200.0
+        with patch.object(stock_api, '_fetch_rest_json',
+                          return_value={'code': 200, 'data': zero}):
+            self.assertIsNone(stock_api.fetch_cls_stock_depth(self.INDEX))
+
+    def test_returns_none_when_one_band_field_is_nonzero(self):
+        """The all-zero test must not be over-broad: a single live band means a
+        real book."""
+        data = {f: 0 for f in stock_api._DEPTH_VALUE_FIELDS}
+        data['s_amount_5'] = 1
+        with patch.object(stock_api, '_fetch_rest_json',
+                          return_value={'code': 200, 'data': data}):
+            self.assertEqual(stock_api.fetch_cls_stock_depth(self.CODE), data)
+        # the successful fetch also populates the depth terminal cache, making
+        # DOMAIN_MATRIX['depth']'s pool_max/cache_max live settings
+        self.assertEqual(stock_api.cached_batch('depth', [self.CODE]),
+                         {self.CODE: data})
+        with stock_api._basic_depth_cache_lock:
+            self.assertIn(self.CODE, stock_api._basic_depth_pool)
+
+    def test_transport_failure_is_non_fatal(self):
+        """A depth outage returns None and does not raise a FetchError."""
+        with patch.object(stock_api, '_fetch_rest_json',
+                          side_effect=FetchError('upstream_timeout', url='u')):
+            self.assertIsNone(stock_api.fetch_cls_stock_depth(self.CODE))
+
+    def test_semantic_failure_is_non_fatal(self):
+        with patch.object(stock_api, '_fetch_rest_json',
+                          return_value={'code': 500}):
+            self.assertIsNone(stock_api.fetch_cls_stock_depth(self.CODE))
+
+    def test_depth_failure_does_not_withhold_the_quote(self):
+        """任务 2b: 五档取数失败不得影响 quote 主数据."""
+        def _fake(url, headers, ttl, deadline=None):
+            if '/volume?' in url:
+                raise FetchError('upstream_error', url=url)
+            if '/stock/basic' in url:
+                return {'code': 200, 'data': {'secu_code': self.CODE, 'last_px': 1.0}}
+            return {'code': 200, 'data': {}}
+
+        with patch.object(stock_api, '_fetch_rest_json', side_effect=_fake):
+            out = stock_api.fetch_cls_basic_info(self.CODE)
+        self.assertEqual(out['data']['last_px'], 1.0)   # quote survived
+        self.assertNotIn('depth', out)                 # no fabricated book
+
+    def test_depth_is_attached_to_the_quote_payload(self):
+        book = self._book()
+
+        def _fake(url, headers, ttl, deadline=None):
+            if '/volume?' in url:
+                return {'code': 200, 'data': book}
+            if '/stock/basic' in url:
+                return {'code': 200, 'data': {'secu_code': self.CODE, 'last_px': 1.0}}
+            return {'code': 200, 'data': {}}
+
+        with patch.object(stock_api, '_fetch_rest_json', side_effect=_fake):
+            out = stock_api.fetch_cls_basic_info(self.CODE)
+        self.assertEqual(out['depth'], book)           # additive, same tick
 
 
 # ── stock_api: f10 CDP degradation (A') ────────────────────────────────────

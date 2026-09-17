@@ -27,7 +27,7 @@ class CachePolicyTests(unittest.TestCase):
         for d in config.DOMAIN_MATRIX:
             p = config.cache_policy(d, now=TRADING)
             self.assertEqual(set(p) - {'encoding'}, _FIXED_KEYS)
-            self.assertIn(p['tier'], {'L1', 'L2', 'L3', 'L4'})
+            self.assertIn(p['tier'], {'L0', 'L1', 'L2', 'L3', 'L4'})
             self.assertGreater(p['ttl'], 0)
             if p['pool_refresh'] is not None:
                 self.assertGreaterEqual(p['pool_refresh'], p['ttl'])
@@ -39,12 +39,28 @@ class CachePolicyTests(unittest.TestCase):
 
     def test_ttl_convergence(self):                           # CFG-T3
         cases = {
-            'feed': (30, 180), 'quote': (8, 120), 'announcement': (30, 180),
+            'feed': (30, 180), 'quote': (4, 120), 'announcement': (30, 180),
             'longhu': (300, 300), 'margin': (600, 600),
         }
         for d, (on, off) in cases.items():
             self.assertEqual(config.cache_policy(d, now=TRADING)['ttl'], on)
             self.assertEqual(config.cache_policy(d, now=OFF_HOURS)['ttl'], off)
+
+    def test_l0_is_the_fastest_tier(self):
+        """L0 (quote + depth) is 4s in-session — the upstream's measured 3.0s
+        tick gives a physical floor, 4s is the nearest poll above it — and is
+        pinned to the L1 baseline (120s) off-hours so a closed market pays no
+        extra requests."""
+        self.assertEqual(config.cache_policy('quote', now=TRADING)['tier'], 'L0')
+        self.assertEqual(config.cache_policy('depth', now=TRADING)['tier'], 'L0')
+        self.assertEqual(config.cache_policy('quote', now=TRADING)['ttl'], 4)
+        self.assertEqual(config.cache_policy('depth', now=TRADING)['ttl'], 4)
+        self.assertEqual(config.cache_policy('quote', now=OFF_HOURS)['ttl'], 120)
+        self.assertEqual(config.cache_policy('depth', now=OFF_HOURS)['ttl'], 120)
+        # depth shares quote's cadence but owns its own pool/cache budget
+        self.assertEqual(config.cache_policy('depth', now=TRADING)['cache_max'], 500)
+        self.assertEqual(config.cache_policy('depth', now=TRADING)['pool_max'],
+                         config.MAX_DEDUP_CODES)
 
     def test_policy_values(self):
         self.assertEqual(config.cache_policy('margin', now=TRADING)['pool_refresh'], 1200)
@@ -68,9 +84,9 @@ class CachePolicyTests(unittest.TestCase):
         self.assertFalse(config._is_trading_hours(_ts(2026, 9, 14, 15, 0)))
         self.assertFalse(config._is_trading_hours(_ts(2026, 9, 19, 10, 0)))  # Saturday
         self.assertEqual(config._trading_tiers(_ts(2026, 9, 14, 10, 0)),
-                         {'L1': 8, 'L2': 12, 'L3': 30, 'L4': 300})
+                         {'L0': 4, 'L1': 8, 'L2': 12, 'L3': 30, 'L4': 300})
         self.assertEqual(config._trading_tiers(_ts(2026, 9, 14, 20, 0)),
-                         {'L1': 120, 'L2': 120, 'L3': 180, 'L4': 300})
+                         {'L0': 120, 'L1': 120, 'L2': 120, 'L3': 180, 'L4': 300})
 
     def test_default_clock_equivalent_to_explicit_now(self):
         import time as _time
@@ -90,7 +106,7 @@ class CachePolicyTests(unittest.TestCase):
         p2 = config.cache_policy('quote', now=TRADING)
         self.assertIsNot(p1, p2)
         p1['ttl'] = -1
-        self.assertEqual(p2['ttl'], 8)
+        self.assertEqual(p2['ttl'], 4)
 
     def test_longhu_encoding(self):                           # CFG-T7
         self.assertEqual(config.cache_policy('longhu')['encoding'], 'gbk')
@@ -120,6 +136,16 @@ class CachePolicyTests(unittest.TestCase):
         self.assertEqual(config.PROBE_TIMEOUT, 2)
         self.assertEqual(config.MAX_HEALTH_INFLIGHT, 5)
         self.assertEqual(config.STREAM_PING_INTERVAL, 20)
+        # BUG-SSE-DEPTH-01: the SSE capacity knobs.  At the old 16 workers the
+        # 3-domain × 50-code set fell into C2 (coverage_codes 42 < 50) and the
+        # cold first frame took 12.33s; 20 workers put it back in C1.  Guarded
+        # at the config layer so a future revert is caught independently of the
+        # stream-level capacity test.
+        self.assertEqual(config.BATCH_MAX_WORKERS, 20)
+        self.assertEqual(config.HTTP_POOL_MAX_PER_HOST, 24)
+        self.assertGreaterEqual(config.HTTP_POOL_MAX_PER_HOST,
+                                config.BATCH_MAX_WORKERS)
+        self.assertEqual(config.STREAM_PER_FETCH_EST, 0.3)
 
     def test_no_bare_ttl_literals(self):                      # CFG-T10
         pkg = os.path.dirname(os.path.abspath(config.__file__))
@@ -177,7 +203,7 @@ class TradingHolidayTests(unittest.TestCase):
         self.assertEqual(config.TRADING_HOLIDAYS, frozenset())
         self.assertTrue(config._is_trading_hours(TRADING))
         self.assertEqual(config._trading_tiers(TRADING),
-                         {'L1': 8, 'L2': 12, 'L3': 30, 'L4': 300})
+                         {'L0': 4, 'L1': 8, 'L2': 12, 'L3': 30, 'L4': 300})
 
     def test_parse_holidays_skips_blanks(self):                        # P2
         parsed = config._parse_holidays(' 2026-10-01 , ,2026-10-02 ')
@@ -195,8 +221,25 @@ class TradingHolidayTests(unittest.TestCase):
                                frozenset({date(2026, 9, 14)})):
             self.assertFalse(config._is_trading_hours(TRADING))
             self.assertEqual(config._trading_tiers(TRADING),
-                             {'L1': 120, 'L2': 120, 'L3': 180, 'L4': 300})
+                             {'L0': 120, 'L1': 120, 'L2': 120, 'L3': 180, 'L4': 300})
             self.assertEqual(config.cache_policy('quote', now=TRADING)['ttl'], 120)
+
+
+class WarmHostsTests(unittest.TestCase):
+    """`warm_hosts()` derives the pre-warm transport keys from the URL constants
+    (single authority), deduped and stable."""
+
+    def test_derives_the_sse_hot_path_host(self):
+        self.assertEqual(config.warm_hosts(),
+                         (('https', 'x-quote.cls.cn', 443),))
+
+    def test_follows_the_url_constants(self):
+        with mock.patch.object(config, '_SSE_HOT_PATH_URLS',
+                               ('https://a.example/x', 'https://a.example/y',
+                                'http://b.example/z')):
+            self.assertEqual(config.warm_hosts(),
+                             (('https', 'a.example', 443),
+                              ('http', 'b.example', 80)))
 
 
 class DeprecatedAliasRemovedTests(unittest.TestCase):

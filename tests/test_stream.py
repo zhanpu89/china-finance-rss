@@ -251,9 +251,24 @@ class FieldAndFrameTests(unittest.TestCase):
     def test_build_frame_returns_none_only_without_codes(self):
         self.assertIsNone(_build_frame({}, frozenset(), ('quote',)))
 
-    def test_tick_interval_follows_l1_tier(self):
-        with patch('china_finance_rss.stream._trading_tiers', return_value={'L1': 8, 'L2': 12}):
-            self.assertEqual(tick_interval(), 8)
+    def test_tick_interval_follows_l1_tier_when_no_subscription(self):
+        with patch('china_finance_rss.stream._trading_tiers', return_value={'L0': 4, 'L1': 8, 'L2': 12}):
+            self.assertEqual(tick_interval(), 8)          # no fields ⇒ L1 baseline
+            self.assertEqual(tick_interval([]), 8)
+
+    def test_tick_interval_is_the_fastest_subscribed_domain(self):
+        """任务 1b: a quote subscription pushes at L0 (4s); fundflow/timeline
+        stay on L1 (8s); a mixed set takes the minimum."""
+        with patch('china_finance_rss.stream._trading_tiers',
+                   return_value={'L0': 4, 'L1': 8, 'L2': 12}):
+            self.assertEqual(tick_interval(['quote']), 4)
+            self.assertEqual(tick_interval(['fundflow']), 8)
+            self.assertEqual(tick_interval(['timeline']), 8)
+            self.assertEqual(tick_interval(['fundflow', 'timeline']), 8)
+            self.assertEqual(tick_interval(['quote', 'fundflow']), 4)
+            self.assertEqual(tick_interval(['quote', 'fundflow', 'timeline']), 4)
+            # unknown fields don't crash and don't speed the cadence up
+            self.assertEqual(tick_interval(['nope']), 8)
 
 
 class HttpIntegrationTests(unittest.TestCase):
@@ -355,8 +370,8 @@ class HttpIntegrationTests(unittest.TestCase):
 
     def test_create_reports_refresh_capacity_when_oversubscribed(self):
         """P1-4: a legal 200-code × 3-field subscription must carry a capacity
-        signal in the 201 response (coverage_codes=113 ⇒ lag≈2 ticks, r5
-        warm-path recalibration)."""
+        signal in the 201 response (coverage_codes=106 ⇒ lag=2 ticks, with quote
+        priced as basic + depth)."""
         codes = [f'sh{600000 + i:06d}' for i in range(config.MAX_CODES_PER_SUB)]
         with patch.object(stream_mod, 'tick_interval', return_value=8):
             status, payload = self._http(
@@ -365,8 +380,8 @@ class HttpIntegrationTests(unittest.TestCase):
                             'fields': ['quote', 'fundflow', 'timeline']}))
         self.assertEqual(status, 201)
         data = json.loads(payload)
-        self.assertEqual(data['refresh_capacity_codes'], 113)
-        self.assertEqual(data['refresh_lag_ticks'], -(-200 // 113))
+        self.assertEqual(data['refresh_capacity_codes'], 106)
+        self.assertEqual(data['refresh_lag_ticks'], -(-200 // 106))
         self.assertIn('capacity_warning', data)
 
     def test_create_reports_capacity_without_warning_when_it_fits(self):
@@ -376,7 +391,7 @@ class HttpIntegrationTests(unittest.TestCase):
                 '{"codes":["sh600519"],"fields":["quote"]}')
         self.assertEqual(status, 201)
         data = json.loads(payload)
-        self.assertEqual(data['refresh_capacity_codes'], 341)    # 1 field
+        self.assertEqual(data['refresh_capacity_codes'], 213)   # basic + depth
         self.assertNotIn('capacity_warning', data)
 
     def test_sse_stream_receives_quote_frame(self):
@@ -854,18 +869,19 @@ class ReserveSkipTests(unittest.TestCase):
 class ShardingTests(unittest.TestCase):
     """BR-STR-16..22: whole-pool refresh vs sharded round-robin + cache fill.
 
-    Thresholds come from the r5 warm-path recalibration: per-code cost = 3
-    upstream calls (one per field, all steady-state domains are 1 call/code),
-    per-worker-call 0.3 s at BATCH_MAX_WORKERS=16 ⇒ tick=8 gives coverage=341
-    fetch-calls ⇒ coverage_codes=113 codes.
+    Thresholds come from the r5 warm-path recalibration plus the quote=2
+    (basic + depth) steady-state cost: per-code cost = 4 upstream calls
+    (quote 2 + fundflow 1 + timeline 1), per-worker-call 0.3 s at
+    BATCH_MAX_WORKERS=20 ⇒ tick=8 gives coverage=426 fetch-calls ⇒
+    coverage_codes=106 codes.
     These tests drive `_refresh_pool` with no live group, i.e. the all-fields
-    fallback (`_resolve_refresh_fields(None)`); a one-domain subscription gets
-    coverage_codes=341 instead — see SubscribedFieldRefreshTests.
+    fallback (`_resolve_refresh_fields(None)`); a quote-only subscription gets
+    coverage_codes=213 instead — see SubscribedFieldRefreshTests.
     """
 
-    # coverage=341, coverage_codes=341//3=113 (tick=8, BATCH_MAX_WORKERS=16,
+    # coverage=426, coverage_codes=426//4=106 (tick=8, BATCH_MAX_WORKERS=20,
     # _PER_FETCH_EST=0.3)
-    COVERAGE_CODES = 113
+    COVERAGE_CODES = 106
 
     def setUp(self):
         _groups.clear()
@@ -912,9 +928,9 @@ class ShardingTests(unittest.TestCase):
 
         Regression: the cold-path calibration `3n <= 23` (per-fetch 2.2 s) kept
         the whole refresh ≤ 0.8 × tick but only for ≤7 codes — it could not meet
-        the 50-code × 8 s target.  The r5 warm-path model `3n <= 341` at
-        0.3 s/call and 16 workers keeps the whole refresh ≤ 0.8 × tick and puts
-        113 codes on the C1 branch.
+        the 50-code target.  The r5 warm-path model `4n <= 426` at
+        0.3 s/call and 20 workers keeps the whole refresh ≤ 0.8 × tick and puts
+        106 codes on the C1 branch.
         """
         handlers = {f: (lambda cs, deadline=None: {c: {'v': 1} for c in cs})
                     for f in ('quote', 'fundflow', 'timeline')}
@@ -1006,11 +1022,11 @@ class ShardingTests(unittest.TestCase):
                     cache_ts.clear()
                     cache_ts.update(ts_snapshot)
 
-        # coverage=341 ⇒ |slice|=113; the expired rest contributes nothing
+        # coverage=426 ⇒ |slice|=106; the expired rest contributes nothing
         self.assertEqual(max(seen['slice_size']), self.COVERAGE_CODES)
         self.assertEqual(len(snap), self.COVERAGE_CODES)     # was 300 = 假绿
         self.assertEqual(stream_mod.metrics.snapshot()['stream_refresh_lag_ticks'],
-                         -(-300 // self.COVERAGE_CODES))   # ceil(300/113) == 3
+                         -(-300 // self.COVERAGE_CODES))   # ceil(300/106) == 3
 
         # …but the frame still covers the whole subscription and marks the rest
         frame = _build_frame(snap, frozenset(codes), fields)
@@ -1035,33 +1051,93 @@ class RefreshCapacityCalibrationTests(unittest.TestCase):
         with patch.dict(stream_mod._FIELD_HANDLERS,
                         {'quote': lambda cs: {}, 'fundflow': lambda cs: {},
                          'timeline': lambda cs: {}}, clear=True):
-            self.assertEqual(_fetches_per_code(), 3)   # 1 + 1 + 1
+            self.assertEqual(_fetches_per_code(), 4)   # quote 2 + 1 + 1
         with patch.dict(stream_mod._FIELD_HANDLERS,
                         {'quote': lambda cs: {}}, clear=True):
-            self.assertEqual(_fetches_per_code(), 1)   # warm sector cache ⇒ 1
+            self.assertEqual(_fetches_per_code(), 2)   # basic + depth
         with patch.dict(stream_mod._FIELD_HANDLERS,
                         {'custom': lambda cs: {}}, clear=True):
             self.assertEqual(_fetches_per_code(), 1)   # unknown field ⇒ 1 call
         # explicit field set (the BUG-P6C-06 selector) prices per domain
-        self.assertEqual(_fetches_per_code(['quote', 'fundflow']), 2)
-        self.assertEqual(_fetches_per_code([]), 3)     # empty ⇒ all fields
+        self.assertEqual(_fetches_per_code(['quote', 'fundflow']), 3)
+        self.assertEqual(_fetches_per_code([]), 4)     # empty ⇒ all fields
 
     def test_calibrated_coverage_numbers(self):
         coverage, coverage_codes = refresh_capacity(8)
-        self.assertEqual(coverage, 341)         # int(0.8 × 8 × 16 / 0.3)
-        self.assertEqual(coverage_codes, 113)   # 341 // 3 (all fields)
+        self.assertEqual(coverage, 426)         # int(0.8 × 8 × 20 / 0.3)
+        self.assertEqual(coverage_codes, 106)   # 426 // 4 (quote 2 + 1 + 1)
         coverage, coverage_codes = refresh_capacity(120)   # off-hours L1
-        self.assertEqual(coverage, 5120)        # int(0.8 × 120 × 16 / 0.3)
-        self.assertEqual(coverage_codes, 1706)  # 5120 // 3
+        self.assertEqual(coverage, 6400)        # int(0.8 × 120 × 20 / 0.3)
+        self.assertEqual(coverage_codes, 1600)  # 6400 // 4
+
+    def test_three_domain_50_codes_is_c1_regression_guard(self):
+        """★ BUG-SSE-DEPTH-01 guard: the hard target — 3 domains × 50 codes —
+        must stay in C1 (whole-pool refresh within ONE tick), so the cold first
+        full frame is ≤ 8s.
+
+        Asserted against the live constants (`BATCH_MAX_WORKERS` /
+        `_PER_FETCH_EST` / `_FIELD_FETCH_CALLS`), so any future retune that
+        pushes coverage_codes below 50 fails here rather than in production as a
+        silent 2-tick C2 shard (the exact regression that cost 12.33s).
+        """
+        tick = 4                                   # L0 in-session (quote-driven)
+        fields = ['quote', 'fundflow', 'timeline']
+        fetches = _fetches_per_code(fields)
+        self.assertEqual(fetches, 4)               # basic+depth, fundflow, timeline
+        coverage, coverage_codes = refresh_capacity(tick, fields)
+        self.assertGreaterEqual(coverage_codes, 50)      # ← the guard
+        self.assertLessEqual(50 * fetches, coverage)     # 200 ≤ 213 ⇒ C1
+        modelled = 50 * fetches * stream_mod._PER_FETCH_EST \
+            / stream_mod.BATCH_MAX_WORKERS
+        self.assertLessEqual(modelled, stream_mod._TICK_BUDGET_FRACTION * tick)
+
+    def test_quote_tick_is_l0_and_covers_50_codes_whole(self):
+        """Task 1 + 2: a live quote subscription pushes on the L0 cadence (4s),
+        and 50 quote codes (basic + depth = 2 calls/code) still land in C1 so
+        the whole watchlist refreshes inside one 0.8 × 4 s budget."""
+        with patch('china_finance_rss.stream._trading_tiers',
+                   return_value={'L0': 4, 'L1': 8, 'L2': 12}):
+            tick = tick_interval(['quote'])
+        self.assertEqual(tick, 4)
+        coverage, coverage_codes = refresh_capacity(tick, ['quote'])
+        self.assertEqual(coverage, 213)         # int(0.8 × 4 × 20 / 0.3)
+        self.assertEqual(coverage_codes, 106)   # 213 // 2
+        self.assertGreaterEqual(coverage_codes, 50)          # ≥ 50 hard target
+        modelled = 50 * 2 * stream_mod._PER_FETCH_EST / stream_mod.BATCH_MAX_WORKERS
+        self.assertLessEqual(modelled, stream_mod._TICK_BUDGET_FRACTION * tick)
+
+    def test_three_domain_50_codes_still_within_8s(self):
+        """任务 2 的既有硬指标：quote+depth+fundflow+timeline 50 码刷新周期 ≤8s。
+
+        BUG-SSE-DEPTH-01: with BATCH_MAX_WORKERS=20 the 3-domain cost
+        4 × 50 = 200 fits one C1 whole-pool refresh inside the 0.8 × 4 s
+        budget (coverage=213 ⇒ coverage_codes=53), so the refresh period is
+        one tick (4 s), not the old 2-tick (8 s) C2 shard."""
+        with patch('china_finance_rss.stream._trading_tiers',
+                   return_value={'L0': 4, 'L1': 8, 'L2': 12}):
+            tick = tick_interval(['quote', 'fundflow', 'timeline'])
+        self.assertEqual(tick, 4)               # min(L0=4, L1=8, L1=8)
+        coverage, coverage_codes = refresh_capacity(tick, ['quote', 'fundflow', 'timeline'])
+        self.assertEqual(coverage, 213)
+        self.assertEqual(coverage_codes, 53)    # 213 // 4
+        # C1 (guard test above): 4 × 50 = 200 ≤ 213 ⇒ whole pool in one tick,
+        # so the refresh period meets the ≤ 8s hard target.
+        fetches = _fetches_per_code(['quote', 'fundflow', 'timeline'])
+        self.assertGreaterEqual(coverage_codes, 50)
+        self.assertLessEqual(50 * fetches, coverage)
+        self.assertLessEqual(tick, 8)                   # one C1 tick ≤ 8s
+        # and the 8s cadence (fundflow/timeline only) stays whole-pool
+        cov8, cc8 = refresh_capacity(8, ['fundflow', 'timeline'])
+        self.assertGreaterEqual(cc8, 50)
 
     def test_single_domain_subscription_covers_the_target_load(self):
-        """50 codes × one domain: whole-pool refresh inside 0.8 × tick."""
-        tick = 8
+        """50 codes × quote: whole-pool refresh inside 0.8 × 4 s (L0)."""
+        tick = 4
         coverage, coverage_codes = refresh_capacity(tick, ['quote'])
-        self.assertEqual(coverage, 341)
-        self.assertEqual(coverage_codes, 341)   # 1 call/code ⇒ 341 codes
+        self.assertEqual(coverage, 213)
+        self.assertEqual(coverage_codes, 106)   # basic + depth ⇒ 2 calls/code
         self.assertGreaterEqual(coverage_codes, 50)
-        modelled = 50 * stream_mod._PER_FETCH_EST / stream_mod.BATCH_MAX_WORKERS
+        modelled = 50 * 2 * stream_mod._PER_FETCH_EST / stream_mod.BATCH_MAX_WORKERS
         self.assertLessEqual(modelled, stream_mod._TICK_BUDGET_FRACTION * tick)
 
     def test_single_tick_work_fits_the_budget(self):
@@ -1075,12 +1151,12 @@ class RefreshCapacityCalibrationTests(unittest.TestCase):
         modelled = fetches * coverage_codes * stream_mod._PER_FETCH_EST \
             / stream_mod.BATCH_MAX_WORKERS
         self.assertLessEqual(modelled, budget)
-        # measured (r5 warm path): 139 ms per call, 3 fields/code, 16-wide
+        # measured (r5 warm path): 139 ms per call, 3 fields/code, 20-wide
         measured_per_call = 0.139
         measured = fetches * coverage_codes * measured_per_call \
             / stream_mod.BATCH_MAX_WORKERS
         self.assertLessEqual(measured, budget)
-        # the 8 s hard target: 50 codes × 3 fields must fit one C1 refresh
+        # the hard target: 50 codes × 3 fields must fit one C1 refresh
         self.assertGreaterEqual(coverage_codes, 50)
 
 
@@ -1177,10 +1253,115 @@ class SubscribedFieldRefreshTests(unittest.TestCase):
         with patch.dict(stream_mod._FIELD_HANDLERS,
                         {f: (lambda cs: {})
                          for f in ('quote', 'fundflow', 'timeline')}, clear=True):
-            self.assertEqual(refresh_capacity(8, ['quote']), (341, 341))
+            self.assertEqual(refresh_capacity(8, ['quote']), (426, 213))
             self.assertEqual(refresh_capacity(8, ['quote', 'fundflow']),
-                             (341, 170))
-            self.assertEqual(refresh_capacity(8), (341, 113))  # all 3 fields
+                             (426, 142))
+            self.assertEqual(refresh_capacity(8), (426, 106))  # all 3 fields
+
+
+class QuoteDepthFrameTests(unittest.TestCase):
+    """任务 2c: a `quote` subscription's SSE frame carries the five-level book.
+
+    `depth` is not a separate stream field — it is embedded in the quote
+    payload by the handler, so a quote-only group needs no extra subscription
+    and the frame gains one additive `depth` key (or none when the upstream has
+    no book, never a fabricated all-zero one).
+    """
+
+    def setUp(self):
+        _groups.clear()
+
+    def tearDown(self):
+        _groups.clear()
+
+    @staticmethod
+    def _attach(sid):
+        g = get_group(sid)
+        with g.conns_lock:
+            g.conns.add(_SSEConn())
+        return g
+
+    def test_quote_frame_carries_depth_when_the_handler_provides_it(self):
+        sid, _ = create_group(['sh600519'], ['quote'])
+        self._attach(sid)
+        book = {'b_px_1': 1.0, 's_px_1': 2.0}
+
+        def _handler(cs, deadline=None):
+            return {c: {'last_px': 1.0, 'depth': book} for c in cs}
+
+        with patch.dict(stream_mod._FIELD_HANDLERS, {'quote': _handler}), \
+             patch.object(stream_mod, 'tick_interval', return_value=4):
+            snap = _refresh_pool(['sh600519'])
+        self.assertEqual(snap['sh600519']['quote']['depth'], book)
+
+        frame = json.loads(_build_frame(snap, frozenset(['sh600519']), ('quote',)))
+        self.assertEqual(frame['items']['sh600519']['quote']['depth'], book)
+
+    def test_quote_field_prices_two_upstream_calls(self):
+        """basic + depth ⇒ the capacity model charges 2 calls/code."""
+        self.assertEqual(stream_mod._FIELD_FETCH_CALLS['quote'], 2)
+        self.assertEqual(_fetches_per_code(['quote']), 2)
+
+    def test_missing_depth_is_not_padded_with_fake_bands(self):
+        """A code with no book keeps the key absent (handler returns no depth);
+        the frame's quote row is the real payload, never 0-filled bands."""
+        sid, _ = create_group(['bj430047'], ['quote'])
+        self._attach(sid)
+
+        def _handler(cs, deadline=None):
+            return {c: {'last_px': 1.0} for c in cs}     # no 'depth'
+
+        with patch.dict(stream_mod._FIELD_HANDLERS, {'quote': _handler}), \
+             patch.object(stream_mod, 'tick_interval', return_value=4):
+            snap = _refresh_pool(['bj430047'])
+        self.assertEqual(snap['bj430047']['quote'], {'last_px': 1.0})
+        self.assertNotIn('depth', snap['bj430047']['quote'])
+
+
+class TickFollowsSubscriptionTests(unittest.TestCase):
+    """任务 1b: the scheduler's cadence follows the live subscription's fastest
+    domain, and `push_loop` computes it once per round (`_push_once(t0, tick=…)`).
+    """
+
+    def setUp(self):
+        _groups.clear()
+
+    def tearDown(self):
+        _groups.clear()
+
+    @staticmethod
+    def _attach(sid):
+        g = get_group(sid)
+        with g.conns_lock:
+            g.conns.add(_SSEConn())
+        return g
+
+    def test_tick_reflects_live_fields_then_returns_to_baseline(self):
+        with patch('china_finance_rss.stream._trading_tiers',
+                   return_value={'L0': 4, 'L1': 8, 'L2': 12}):
+            self.assertEqual(tick_interval(_subscribed_fields()), 8)  # none live
+            sid, _ = create_group(['sh600519'], ['quote'])
+            self.assertEqual(tick_interval(_subscribed_fields()), 8)  # zombie
+            self._attach(sid)
+            self.assertEqual(tick_interval(_subscribed_fields()), 4)  # L0
+            destroy_group(sid)
+            self.assertEqual(tick_interval(_subscribed_fields()), 8)  # baseline
+
+    def test_passes_the_round_tick_down_to_refresh(self):
+        """`_push_once` must reuse the passed tick instead of recomputing it, so
+        the C1/C2 threshold and the cadence can never disagree."""
+        sid, _ = create_group(['sh600519'], ['quote'])
+        self._attach(sid)
+        seen = {}
+
+        def _spy(codes, now=None, fields=None, tick=None, deadline=None):
+            seen['tick'] = tick
+            return {}
+
+        with patch.object(stream_mod, '_refresh_pool', side_effect=_spy), \
+             patch.object(stream_mod, 'cached_batch', return_value={}):
+            stream_mod._push_once(t0=time.time(), tick=4)
+        self.assertEqual(seen['tick'], 4)
 
 
 class RefreshLagGaugeTests(unittest.TestCase):
@@ -1229,8 +1410,8 @@ class RefreshLagGaugeTests(unittest.TestCase):
         `_refresh_pool([])`, bypassing it and staying green while the deployed
         gauge never reset).
         """
-        # 200 codes × 3 fields: 3 × 200 = 600 > coverage=341 ⇒ C2
-        # (a quote-only group can no longer shard: 341 > MAX_CODES_PER_SUB=200)
+        # 200 codes × 3 fields: 4 × 200 = 800 > coverage=426 ⇒ C2
+        # (a quote-only group can no longer shard: 213 > MAX_CODES_PER_SUB=200)
         codes = [f'sh{600000 + i:06d}'
                  for i in range(config.MAX_CODES_PER_SUB)]
         sid, _ = create_group(codes, ['quote', 'fundflow', 'timeline'])
@@ -1240,7 +1421,7 @@ class RefreshLagGaugeTests(unittest.TestCase):
              patch.object(stream_mod, 'cached_batch', return_value={}), \
              patch.object(stream_mod, 'tick_interval', return_value=8):
             stream_mod._push_once(t0=time.time())
-            self.assertEqual(self._lag(), 2)        # ceil(200/113): real backlog
+            self.assertEqual(self._lag(), 2)        # ceil(200/106): real backlog
 
             # the pool empties (tester's DELETE of the last subscription)
             self.assertTrue(destroy_group(sid))
@@ -1270,12 +1451,12 @@ class RefreshLagGaugeTests(unittest.TestCase):
         self.assertEqual(self._lag(), 0)
 
     def test_sharded_refresh_reports_ceil_backlog(self):
-        codes = [f'sh{600000 + i:06d}' for i in range(300)]   # > 113 ⇒ C2
+        codes = [f'sh{600000 + i:06d}' for i in range(300)]   # > 106 ⇒ C2
         with patch.dict(stream_mod._FIELD_HANDLERS, self._handlers()), \
              patch.object(stream_mod, 'cached_batch', return_value={}), \
              patch.object(stream_mod, 'tick_interval', return_value=8):
             _refresh_pool(codes)
-        self.assertEqual(self._lag(), -(-300 // 113))    # ceil(300/113) == 3
+        self.assertEqual(self._lag(), -(-300 // 106))    # ceil(300/106) == 3
 
 
 class _LoopStop(BaseException):
@@ -1290,14 +1471,16 @@ class PushLoopWiringTests(unittest.TestCase):
     def test_push_loop_runs_the_single_iteration_body(self):
         calls = []
 
-        def body(t0):
-            calls.append(t0)
+        def body(t0, tick=None):
+            calls.append((t0, tick))
             raise _LoopStop()
 
-        with patch.object(stream_mod, '_push_once', side_effect=body):
+        with patch.object(stream_mod, '_push_once', side_effect=body), \
+             patch.object(stream_mod, 'tick_interval', return_value=4):
             with self.assertRaises(_LoopStop):
                 stream_mod.push_loop()
         self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][1], 4)                 # tick passed down once
 
     def test_error_path_stays_on_the_grid_with_backoff(self):
         """T6 (P2): the exception branch must not degrade into a ~1 s spin
@@ -1306,7 +1489,7 @@ class PushLoopWiringTests(unittest.TestCase):
         calls = []
         sleeps = []
 
-        def body(t0):
+        def body(t0, tick=None):
             calls.append(t0)
             if len(calls) <= 3:
                 raise RuntimeError('boom')
@@ -1324,6 +1507,204 @@ class PushLoopWiringTests(unittest.TestCase):
         self.assertTrue(all(s > 7 for s in sleeps), sleeps)    # never ~1 s
         self.assertTrue(sleeps[0] < sleeps[1] < sleeps[2])     # backoff grows
         self.assertLessEqual(sleeps[2], 32)                    # capped (8 ticks)
+
+
+class _FakeSSEConn:
+    """Minimal `_SSEConn` double whose queue yields the exit sentinel at once."""
+
+    def __init__(self):
+        self.q = _SentinelQueue()
+        self.closed = False
+
+
+class _SentinelQueue:
+    def get(self, timeout=None):
+        return None                    # `_serve_sse` sees the sentinel ⇒ breaks
+
+    def get_nowait(self):
+        raise queue.Empty
+
+    def qsize(self):
+        return 0
+
+    def full(self):
+        return False
+
+
+class IdleWakeTests(unittest.TestCase):
+    """SSE cold-start: an idle push loop is woken immediately by a new
+    subscription / connection, and waking can never produce a back-to-back
+    frame (active rounds keep the hard tick-grid sleep)."""
+
+    def setUp(self):
+        _groups.clear()
+        stream_mod._idle_sleeping = False
+        stream_mod._wake_pending = False
+        stream_mod._last_round_idle = False
+        stream_mod._wake_event.clear()
+
+    def tearDown(self):
+        _groups.clear()
+        stream_mod._idle_sleeping = False
+        stream_mod._wake_pending = False
+        stream_mod._last_round_idle = False
+        stream_mod._wake_event.clear()
+
+    def _drive_one_sleep(self, idle, waits, sleeps):
+        """Run one real `push_loop` round, aborting inside the sleep it picks."""
+        def body(t0, tick=None):
+            stream_mod._last_round_idle = idle
+            return 8.0
+
+        def wait_spy(_timeout):
+            waits.append(_timeout)
+            raise _LoopStop()
+
+        def sleep_spy(seconds):
+            sleeps.append(seconds)
+            raise _LoopStop()
+
+        with patch.object(stream_mod, '_push_once', side_effect=body), \
+             patch.object(stream_mod, 'tick_interval', return_value=8), \
+             patch.object(stream_mod, '_wake_event') as ev, \
+             patch.object(stream_mod.time, 'sleep', side_effect=sleep_spy):
+            ev.wait.side_effect = wait_spy
+            with self.assertRaises(_LoopStop):
+                stream_mod.push_loop()
+
+    def test_idle_round_uses_an_interruptible_wait(self):
+        waits, sleeps = [], []
+        self._drive_one_sleep(idle=True, waits=waits, sleeps=sleeps)
+        self.assertEqual(waits, [8.0])          # event.wait(timeout=delay)
+        self.assertEqual(sleeps, [])            # never a hard sleep when idle
+
+    def test_active_round_uses_a_hard_sleep_never_interruptible(self):
+        """No-burst: a round with live demand keeps the hard grid sleep, so a
+        wake request can never shorten the inter-frame gap below one tick."""
+        waits, sleeps = [], []
+        self._drive_one_sleep(idle=False, waits=waits, sleeps=sleeps)
+        self.assertEqual(sleeps, [8.0])         # hard grid sleep
+        self.assertEqual(waits, [])             # no wake window at all
+
+    def test_wake_request_is_remembered_when_not_idle_sleeping(self):
+        """Lost-wakeup guard: a wake arriving while not idle-sleeping is kept
+        for the next idle wait, but must not interrupt anything now."""
+        with patch.object(stream_mod, '_wake_event') as ev:
+            stream_mod._wake_push_loop()
+        ev.set.assert_not_called()
+        self.assertTrue(stream_mod._wake_pending)
+
+    def test_create_group_wakes_an_idle_loop(self):
+        stream_mod._idle_sleeping = True
+        sid, err = create_group(['sh600519'], ['quote'])
+        self.assertIsNone(err)
+        self.assertTrue(stream_mod._wake_event.is_set())
+        destroy_group(sid)
+
+    def test_new_connection_wakes_an_idle_loop(self):
+        sid, _ = create_group(['sh600519'], ['quote'])
+        handler = StreamHandler.__new__(StreamHandler)
+        handler.send_response = lambda *a, **k: None
+        handler.send_header = lambda *a, **k: None
+        handler.end_headers = lambda *a, **k: None
+        handler.connection = Mock()
+        handler.close_connection = False
+        stream_mod._idle_sleeping = True
+        with patch.object(stream_mod, '_SSEConn', _FakeSSEConn), \
+             patch.object(stream_mod, '_wake_push_loop') as wake:
+            handler._serve_sse(sid)
+        wake.assert_called_once()
+
+    def test_a_new_subscription_refreshes_without_waiting_the_grid(self):
+        """The first round sleeps 8s; a subscription created during that wait
+        must start the next round in far less than the grid."""
+        starts = []
+        first_round = threading.Event()
+
+        def body(t0, tick=None):
+            starts.append(time.monotonic())
+            stream_mod._last_round_idle = True  # no live conns in this test
+            if len(starts) == 1:
+                first_round.set()
+                return 8.0                      # the whole L1 grid
+            raise _LoopStop()
+
+        def run():
+            try:
+                with patch.object(stream_mod, '_push_once', side_effect=body), \
+                     patch.object(stream_mod, 'tick_interval', return_value=8):
+                    stream_mod.push_loop()
+            except _LoopStop:
+                pass
+
+        t = threading.Thread(target=run, daemon=True)
+        t.start()
+        try:
+            self.assertTrue(first_round.wait(2.0))
+            time.sleep(0.05)                    # first round enters its idle wait
+            sid, err = create_group(['sh600519'], ['quote'])
+            self.assertIsNone(err)
+            t.join(timeout=2.0)
+            self.assertFalse(t.is_alive())      # round 2 ran instead of sleeping 8s
+            self.assertGreaterEqual(len(starts), 2)
+            self.assertLess(starts[1] - starts[0], 1.0)   # ≪ the 8s grid
+        finally:
+            stream_mod._wake_event.set()        # release any wait before teardown
+
+
+class ColdFirstRefreshTests(unittest.TestCase):
+    """Optional item: the process's FIRST refresh-bearing round is exempt from
+    degraded/slip (a one-off cold path, not a degradation), while every later
+    overrun is still counted and empty rounds do not consume the exemption."""
+
+    def setUp(self):
+        _groups.clear()
+        stream_mod._first_refresh_done = False
+        stream_mod._last_round_idle = False
+        stream_mod._idle_sleeping = False
+        stream_mod._wake_pending = False
+        stream_mod._wake_event.clear()
+
+    def tearDown(self):
+        _groups.clear()
+        stream_mod._first_refresh_done = False
+        stream_mod._last_round_idle = False
+        stream_mod._idle_sleeping = False
+        stream_mod._wake_pending = False
+        stream_mod._wake_event.clear()
+
+    @staticmethod
+    def _slow(codes, now=None, fields=None, tick=None, deadline=None):
+        time.sleep(0.05)
+        return {}
+
+    @staticmethod
+    def _counts():
+        snap = stream_mod.metrics.snapshot()
+        return (snap['stream_tick_degraded_total'],
+                snap['stream_tick_slip_total'])
+
+    def test_first_refresh_over_budget_is_exempt_but_the_next_is_counted(self):
+        sid, _ = create_group(['sh600519'], ['quote'])
+        g = get_group(sid)
+        with g.conns_lock:
+            g.conns.add(_SSEConn())
+        with patch.object(stream_mod, '_refresh_pool', side_effect=self._slow), \
+             patch.object(stream_mod, 'cached_batch', return_value={}), \
+             patch.object(stream_mod, 'tick_interval', return_value=0.02):
+            before = self._counts()
+            stream_mod._push_once(t0=time.time(), tick=0.02)   # cold first
+            after_first = self._counts()
+            stream_mod._push_once(t0=time.time(), tick=0.02)   # warm next
+            after_second = self._counts()
+        self.assertEqual(after_first, before)                   # exempt
+        self.assertEqual(after_second[0], after_first[0] + 1)   # degraded counted
+        self.assertEqual(after_second[1], after_first[1] + 1)   # slip counted
+
+    def test_empty_rounds_do_not_consume_the_exemption(self):
+        with patch.object(stream_mod, 'tick_interval', return_value=0.02):
+            stream_mod._push_once(t0=time.time(), tick=0.02)    # no live demand
+        self.assertFalse(stream_mod._first_refresh_done)
 
 
 class TickThrottleTests(unittest.TestCase):
@@ -1744,7 +2125,7 @@ class CursorRotationTests(unittest.TestCase):
     ceil(n/|slice|) ticks, and they wrap exactly after a full cycle."""
 
     N = 200
-    STEP = 113           # coverage_codes for tick=8: int(0.8*8*16/0.3)//3
+    STEP = 106           # coverage_codes for tick=8: int(0.8*8*20/0.3)//4
 
     def setUp(self):
         _groups.clear()
@@ -1768,7 +2149,7 @@ class CursorRotationTests(unittest.TestCase):
 
         handlers = {f: (lambda cs, deadline=None: {c: {'v': 1} for c in cs})
                     for f in ('quote', 'fundflow', 'timeline')}
-        cycle = self.N // _gcd(self.STEP, self.N)   # 200/gcd(113,200) = 200
+        cycle = self.N // _gcd(self.STEP, self.N)   # 200/gcd(106,200) = 100
         ticks = cycle + 1                           # full cycle, plus 1 to wrap
         with patch.dict(stream_mod._FIELD_HANDLERS, handlers), \
              patch.object(stream_mod, 'cached_batch', return_value={}), \
@@ -1783,7 +2164,7 @@ class CursorRotationTests(unittest.TestCase):
             self.assertEqual(sl, self._rotated((i * self.STEP) % self.N))
         # a full cycle wraps exactly: the next tick repeats the 1st slice
         self.assertEqual(captured[cycle], captured[0])
-        # ceil(200/113) = 2 ticks hand out every code at least once
+        # ceil(200/106) = 2 ticks hand out every code at least once
         covered = set()
         for sl in captured[:_n_ceil(self.N, self.STEP)]:
             covered.update(sl)
@@ -1920,7 +2301,7 @@ class LastKnownCarryForwardTests(unittest.TestCase):
         self.assertEqual(data['items']['sz000001']['quote'], {'name': 'y'})
 
     def test_scheduled_tick_carries_last_known_across_c2_ticks(self):
-        # 200 codes × 3 fields: 600 > coverage=341 ⇒ C2 rotation (113/tick)
+        # 200 codes × 3 fields: 800 > coverage=426 ⇒ C2 rotation (106/tick)
         fields = ('quote', 'fundflow', 'timeline')
         codes = [f'sh{600000 + i:06d}'
                  for i in range(config.MAX_CODES_PER_SUB)]
@@ -1942,7 +2323,7 @@ class LastKnownCarryForwardTests(unittest.TestCase):
 
         f1 = json.loads(_build_frame(snaps[0], frozenset(codes), fields))
         f2 = json.loads(_build_frame(snaps[1], frozenset(codes), fields))
-        self.assertEqual(f1['missing_count'], 200 - 113)     # coverage_codes=113
+        self.assertEqual(f1['missing_count'], 200 - 106)    # coverage_codes=106
         self.assertLess(f2['missing_count'], f1['missing_count'])
         self.assertGreater(f2['stale_count'], 0)
         # a code missing on tick 1 is refreshed on tick 2; one missing on tick 2

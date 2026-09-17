@@ -912,6 +912,75 @@ class PooledTransportErrorTests(_CacheTestCase):
         self.assertEqual(ctx.exception.kind, 'upstream_error')
 
 
+class WarmTransportTests(_CacheTestCase):
+    """cache.warm_transport: process-start transport pre-warm (DNS + pooled
+    connection).  Best-effort: failures are silent and no business request is
+    ever issued — only the transport handshake."""
+
+    KEY = ('http', 'warm-host', 80)
+
+    def test_warm_dials_and_retains_a_pooled_connection(self):
+        pool = cache_mod._ConnectionPool(max_per_host=4, idle_ttl=60)
+        made = []
+
+        def factory(key, timeout):
+            conn = _FakeConnection()
+            made.append(conn)
+            return conn
+
+        with mock.patch.object(cache_mod, '_pool', pool), \
+                mock.patch.object(cache_mod, '_open_connection',
+                                  side_effect=factory):
+            warmed = cache_mod.warm_transport(hosts=[self.KEY], count=1)
+        self.assertEqual(warmed, 1)
+        self.assertEqual(len(made), 1)
+        self.assertEqual(pool._live[self.KEY], 1)
+        self.assertEqual(pool.stats['new'], 1)
+        self.assertEqual(len(pool._idle[self.KEY]), 1)     # retained for reuse
+
+    def test_warm_dial_failure_is_silent_and_releases_the_slot(self):
+        pool = cache_mod._ConnectionPool(max_per_host=4, idle_ttl=60)
+
+        def boom(key, timeout):
+            raise ConnectionRefusedError('nope')
+
+        with mock.patch.object(cache_mod, '_pool', pool), \
+                mock.patch.object(cache_mod, '_open_connection', side_effect=boom):
+            warmed = cache_mod.warm_transport(hosts=[self.KEY], count=1)
+        self.assertEqual(warmed, 0)                        # never raises
+        self.assertEqual(pool._live.get(self.KEY, 0), 0)   # reserved slot freed
+
+    def test_warm_issues_no_business_request(self):
+        pool = cache_mod._ConnectionPool(max_per_host=4, idle_ttl=60)
+        with mock.patch.object(cache_mod, '_pool', pool), \
+                mock.patch.object(cache_mod, '_open_connection',
+                                  return_value=_FakeConnection()), \
+                mock.patch.object(cache_mod, 'urlopen',
+                                  side_effect=AssertionError('no request')):
+            cache_mod.warm_transport(hosts=[self.KEY], count=1)
+        self.assertEqual(pool._live[self.KEY], 1)          # reached without urlopen
+
+    def test_defaults_hosts_and_count_come_from_config(self):
+        pool = cache_mod._ConnectionPool(max_per_host=4, idle_ttl=60)
+        with mock.patch.object(cache_mod, '_pool', pool), \
+                mock.patch.object(cache_mod, 'HTTP_WARM_CONNECTIONS', 1), \
+                mock.patch.object(cache_mod, '_open_connection',
+                                  side_effect=lambda k, t: _FakeConnection()):
+            warmed = cache_mod.warm_transport()        # hosts/count defaulted
+        self.assertEqual(warmed, 1)
+        self.assertEqual(list(pool._live), [cache_mod.warm_hosts()[0]])
+
+    def test_a_second_warm_reuses_instead_of_redialing(self):
+        pool = cache_mod._ConnectionPool(max_per_host=4, idle_ttl=60)
+        with mock.patch.object(cache_mod, '_pool', pool), \
+                mock.patch.object(cache_mod, '_open_connection',
+                                  side_effect=lambda k, t: _FakeConnection()):
+            self.assertEqual(
+                cache_mod.warm_transport(hosts=[self.KEY], count=1), 1)
+            self.assertEqual(
+                cache_mod.warm_transport(hosts=[self.KEY], count=1), 0)
+
+
 class DnsResolverTests(unittest.TestCase):
     @staticmethod
     def _infos(host, port):

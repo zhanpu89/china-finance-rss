@@ -30,6 +30,7 @@ from .config import (
     _ANNOUNCEMENT_BASE_URL, _ANNOUNCEMENT_HEADERS, _BASIC_INFO_BASE_URL,
     _BASIC_INFO_HEADERS, _F10_EXPECTED_KEYS, _FUNDFLOW_BASE_URL,
     _FUNDFLOW_HEADERS, _STOCK_DETAIL_BASE_URL, _STOCK_DETAIL_HEADERS,
+    _STOCK_DEPTH_URL, _STOCK_DEPTH_HEADERS,
     _TIMELINE_BASE_URL, _TIMELINE_HEADERS, cache_policy, canonical_code,
     stock_nav_page_names,
 )
@@ -48,9 +49,10 @@ def _stock_nav_pages():
 
 # Bounded parallelism for batch fetches. Public alias (no underscore) is the
 # one stream.py reads to size the refresh coverage window (INV-1b / AR-1).
-# Env-registered in config (default 16, aligned with HTTP_POOL_MAX_PER_HOST) so
-# the SSE capacity model is retunable without a code change; the module-level
-# name is kept so stream.py (and tests) read it exactly as before.
+# Env-registered in config (default 20, aligned with HTTP_POOL_MAX_PER_HOST=24
+# so the fan-out never queues on the per-host pool) so the SSE capacity model
+# is retunable without a code change; the module-level name is kept so stream.py
+# (and tests) read it exactly as before.
 BATCH_MAX_WORKERS = config.BATCH_MAX_WORKERS
 _BATCH_MAX_WORKERS = BATCH_MAX_WORKERS
 
@@ -120,6 +122,11 @@ _basic_info_cache = OrderedDict()
 _basic_info_cache_ts = {}
 _basic_info_cache_lock = threading.Lock()
 
+_basic_depth_pool = {}
+_basic_depth_cache = OrderedDict()
+_basic_depth_cache_ts = {}
+_basic_depth_cache_lock = threading.Lock()
+
 _announcement_pool = {}
 _announcement_cache = OrderedDict()
 _announcement_cache_ts = {}
@@ -129,6 +136,7 @@ _announcement_cache_lock = threading.Lock()
 # it has no dedup pool and no terminal cache (URL cache only, §10#4).
 _DOMAIN_STORES = {
     'quote':        (_basic_info_pool,   _basic_info_cache,   _basic_info_cache_ts,   _basic_info_cache_lock),
+    'depth':        (_basic_depth_pool,  _basic_depth_cache,  _basic_depth_cache_ts,  _basic_depth_cache_lock),
     'fundflow':     (_fundflow_pool,     _fundflow_cache,     _fundflow_cache_ts,     _fundflow_cache_lock),
     'timeline':     (_timeline_pool,     _timeline_cache,     _timeline_cache_ts,     _timeline_cache_lock),
     'f10':          (_f10_pool,          _f10_cache,          _f10_cache_ts,          _f10_cache_lock),
@@ -864,13 +872,19 @@ def fetch_cls_stock_detail(stock_code, deadline=None, ttl=None):
 
 
 def fetch_cls_basic_info(stock_code, deadline=None, ttl=None):
-    """Fetch basic info with sector_name.
+    """Fetch basic info with sector_name and the five-level order book.
 
-    Two-phase:
+    Three-phase:
       1) REST basic_info API for pricing data (fatal)
       2) REST stock detail API for sector (non-fatal, best effort; served from
          the 7-day `sector`-policy cache once the code's industry is known)
-    Returns dict with secu_code + price data (+ sector_name).
+      3) REST volume API for the five-level order book (non-fatal, best
+         effort; attached as ``depth``)
+
+    Returns dict with secu_code + price data (+ sector_name, + depth).
+    Every non-fatal phase is best-effort: their failure never withholds the
+    phase-1 quote, and a missing depth is written as ``None`` — never a
+    fabricated all-zero order book.
     """
     domain = 'quote'
     ttl = cache_policy(domain)['ttl'] if ttl is None else ttl
@@ -908,11 +922,101 @@ def fetch_cls_basic_info(stock_code, deadline=None, ttl=None):
         if not isinstance(result.get('data'), dict):
             result['data'] = {}
         result['sector_name'] = sector
+    # Phase 3: five-level order book (non-fatal, additive).  `fetch_cls_stock_depth`
+    # never raises and returns None for bj*/index/empty payloads, so a depth
+    # outage can never withhold the quote.  Attached here (not in
+    # `handle_cls_basic_infos`) so it rides the same `quote` terminal-cache
+    # entry: a quote cache hit already carries its depth, no extra upstream call.
+    if result is not None:
+        depth = fetch_cls_stock_depth(stock_code, deadline=deadline, ttl=ttl)
+        if depth is not None:
+            result['depth'] = depth
     if result is not None:
         return result
     if err is not None:
         raise err
     return None
+
+
+# The 20 five-band value fields.  Used to tell a real order book from the
+# all-zero payload an index (sh000001 / sz399001) returns.
+_DEPTH_VALUE_FIELDS = tuple(
+    f'{side}_{kind}_{level}'
+    for side in ('b', 's')
+    for kind in ('px', 'amount')
+    for level in range(1, 6)
+)
+
+
+def fetch_cls_stock_depth(stock_code, deadline=None, ttl=None):
+    """Fetch the five-level order book (五档盘口) for ``stock_code``, or None.
+
+    Source: ``GET /quote/stock/volume?secu_code=<code>&field=five`` — a plain
+    REST endpoint (no sign, no WS, no Chrome).  ``secu_code`` is the lowercase
+    exchange-prefixed canonical spelling; the dotted form returns an empty
+    payload.
+
+    **Empty-value semantics (never fabricate data):**
+
+      * empty ``data`` dict (``bj*`` Beijing codes, unknown/invalid codes) →
+        ``None``
+      * every five-level price/amount field is ``0`` (indexes such as
+        ``sh000001`` / ``sz399001`` have no order book) → ``None``
+      * otherwise the ``data`` dict: 20 band fields (``b_px_1..5``,
+        ``b_amount_1..5``, ``s_px_1..5``, ``s_amount_1..5``) + ``preclose_px``
+
+    This is the ``depth`` domain's code-level fetcher, so it shares the
+    module-wide ``fetch_*(code, deadline=None, ttl=None)`` signature and goes
+    through the single ``_fetch_rest_json`` funnel (URL cache / negative cache
+    / single-flight / pool).  Unlike the fatal price fetchers it never raises
+    for a semantic (``code != 200``) response: depth is *augmenting* data, so
+    the honest answer is ``None`` — a failure here must never take down the
+    ``quote`` payload it accompanies.
+    """
+    domain = 'depth'
+    url = f'{_STOCK_DEPTH_URL}?secu_code={stock_code}&field=five'
+    ttl = cache_policy(domain)['ttl'] if ttl is None else ttl
+    metrics.incr('upstream_fetch_total', key=domain)                  # BR-SA-28
+    try:
+        raw = _fetch_rest_json(url, _STOCK_DEPTH_HEADERS, ttl, deadline)
+    except FetchError:
+        # Transport/JSON failure.  Non-fatal: no data, no raise (the caller
+        # keeps the quote payload).  `_fetch_rest_json` already counted it.
+        return None
+    if raw.get('code') != 200:
+        metrics.incr('upstream_fail_total', key='upstream_error')     # semantic failure
+        return None
+    data = raw.get('data')
+    if not isinstance(data, dict) or not data:
+        return None                                                   # bj* / unknown code
+    if all(not data.get(f) for f in _DEPTH_VALUE_FIELDS):
+        return None                                                   # index: no order book
+    _depth_store(stock_code, data)
+    return data
+
+
+def _depth_store(code, data, now=None):
+    """Record a fetched order book in the `depth` domain's pool + terminal cache.
+
+    `fetch_cls_stock_depth` is called from inside `fetch_cls_basic_info`, not
+    through `_process_chunk`, so it owns its own pool-touch + cache-write using
+    the `depth` policy (the single authority for its caps).  Keeping the terminal
+    cache live is what makes `DOMAIN_MATRIX['depth']`'s pool_max/cache_max real
+    settings rather than dead ones (P2-9), and gives `cached_batch('depth', …)`
+    a genuine read path for a future depth-only consumer.
+    """
+    policy = cache_policy('depth')
+    now = time() if now is None else now
+    pool_max = policy['pool_max']
+    with _basic_depth_cache_lock:
+        _basic_depth_pool[code] = now
+        if pool_max is not None and len(_basic_depth_pool) > pool_max:
+            victims = sorted(_basic_depth_pool, key=_basic_depth_pool.get)
+            for victim in victims[:len(_basic_depth_pool) - pool_max]:
+                del _basic_depth_pool[victim]
+    _cache_store(_basic_depth_cache, _basic_depth_cache_ts,
+                 _basic_depth_cache_lock, code, data, policy['cache_max'],
+                 'depth', now)
 
 
 def _raise_cdp_unavailable():

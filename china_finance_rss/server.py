@@ -48,7 +48,8 @@ from .config import (
 )
 from .cache import (fetch_json, feed_cache_get, feed_cache_put,
                     _feed_fetch_locks, _feed_fetch_locks_lock,
-                    build_batch_response, _fill_missing, FetchError)
+                    build_batch_response, _fill_missing, FetchError,
+                    warm_transport)
 from .utils import (
     generate_rss, generate_error_rss, generate_opml, count_rss_items,
     parse_cls_items, parse_jin10_items, parse_wallstreetcn_items,
@@ -1501,6 +1502,11 @@ def main():
 
     from .utils import warm_jin10_headers
     threading.Thread(target=warm_jin10_headers, daemon=True).start()
+    # Pre-warm the upstream transport (DNS + one pooled connection per SSE
+    # hot-path host) so the first real refresh of a cold process is not fully
+    # cold.  Daemon thread: it never delays startup or /healthz, and
+    # `warm_transport` is total/best-effort, so a dead upstream is silent.
+    threading.Thread(target=warm_transport, daemon=True).start()
     threading.Thread(target=init_cdp, daemon=True).start()
     threading.Thread(target=_cdp_memory_watchdog, daemon=True).start()
     threading.Thread(target=_fundflow_prefetch_loop, daemon=True).start()

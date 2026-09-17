@@ -18,8 +18,9 @@ from urllib.request import Request
 
 from . import metrics
 from .config import (HTTP_DNS_CACHE_TTL, HTTP_POOL_IDLE_TTL,
-                     HTTP_POOL_MAX_PER_HOST, NEG_TTL, PROBE_TIMEOUT,
-                     REQUEST_TIMEOUT, cache_policy)
+                     HTTP_POOL_MAX_PER_HOST, HTTP_WARM_CONNECTIONS,
+                     HTTP_WARM_TIMEOUT, NEG_TTL, PROBE_TIMEOUT,
+                     REQUEST_TIMEOUT, cache_policy, warm_hosts)
 
 log = logging.getLogger('cache')
 
@@ -645,6 +646,44 @@ def urlopen(req, timeout=None):
                 current, status,
                 http.client.responses.get(status, ''), resp_headers, None)
         return _PooledResponse(body, status, resp_headers)
+
+
+def warm_transport(hosts=None, count=None, timeout=None):
+    """Pre-warm DNS + pooled connections for the upstream hot path.
+
+    Total, best-effort function: it never raises and never performs a business
+    request — it only dials the transport (which fills ``_DNSResolver`` and
+    leaves the socket in ``_pool`` for the first real refresh to reuse), so
+    warming adds no upstream data load.  A dial failure for one host is
+    swallowed and the next host is tried; each attempt is bounded by
+    ``timeout``.  Returns the number of fresh connections left in the pool.
+
+    Called from a startup daemon thread (``server.main``), so it can never gate
+    startup or ``/healthz``; the caller does not need to wait for the result.
+    """
+    try:
+        hosts = tuple(hosts) if hosts else warm_hosts()
+    except Exception:                       # defensive: never let warming raise
+        return 0
+    if count is None:
+        count = HTTP_WARM_CONNECTIONS
+    count = max(0, int(count))
+    if timeout is None:
+        timeout = HTTP_WARM_TIMEOUT
+    warmed = 0
+    for key in hosts:
+        for _ in range(count):
+            try:
+                conn, reused, ephemeral = _pool.acquire(key, timeout)
+            except Exception:               # dial failed ⇒ silent, next host
+                break
+            _pool.release(key, conn, ephemeral=ephemeral)
+            if reused:
+                break                       # host already had a warm connection
+            if ephemeral:
+                break                       # pool full ⇒ retrying adds nothing
+            warmed += 1
+    return warmed
 
 
 def fetch_json(url, headers=None, ttl=None, encoding='utf-8', deadline=None):
