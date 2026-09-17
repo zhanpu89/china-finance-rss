@@ -83,12 +83,18 @@
         "edit": {
           "*": "deny",
           "china_finance_rss/**": "allow",
+          "Dockerfile": "allow",
+          "docker-compose.yml": "allow",
+          "doc/deploy/**": "allow",
           "tests/**": "allow"
         },
         "write": {
           "*": "deny",
           "china_finance_rss/**": "allow",
-          "tests/**": "allow"
+          "tests/**": "allow",
+          "Dockerfile": "allow",
+          "docker-compose.yml": "allow",
+          "doc/deploy/**": "allow"
         },
         "bash": {
           "python -m py_compile": "allow",
