@@ -20,7 +20,7 @@ COPY requirements.txt ./
 COPY china_finance_rss/ china_finance_rss/
 RUN pip install --no-cache-dir -r requirements.txt
 
-ENV PORT=8053 PYTHONUNBUFFERED=1 MAX_WORKERS=10
+ENV PORT=8053 PYTHONUNBUFFERED=1 MAX_WORKERS=20
 EXPOSE 8053 8054
 
 CMD ["python", "-m", "china_finance_rss.server"]

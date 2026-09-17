@@ -26,7 +26,10 @@ services:
                                       # （压测：100并发 503≈0%，15s 超时边界更宽松）
       - MAX_INFLIGHT=60               # = 2× MAX_WORKERS
       # ── CDP 浏览器池（内存充裕）────────────────────────────
-      - CDP_STOCK_PAGES=5             # 总内存 8GB 分区：本服务 3GB + 其他应用 5GB；5 tab ≈ 250-500MB，留足 Python 堆栈余量
+      - CDP_STOCK_PAGES=5             # 总内存 8GB 分区：本服务 3GB + 其他应用 5GB；口径见 SAD §4.3：
+                                      # 每页 PSS 典型 60MB / RSS 172MB，另加固定基线 250MB(PSS，含
+                                      # Omnibox webui ≈91MB)；5 stock + 2 常驻(finance/quotation) =
+                                      # 7 内容页 ⇒ 典型 ≈670MB / 保守 ≈1300MB，留足 Python 堆栈余量
       - CDP_RESTART_INTERVAL=7200
       # ── HTTP 压缩 ──────────────────────────────────────────
       - GZIP_MIN_BYTES=1024
