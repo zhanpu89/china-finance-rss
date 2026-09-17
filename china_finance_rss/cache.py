@@ -124,8 +124,26 @@ def _sweep_expired(d):
     return len(expired)
 
 
-def _cache_fresh(entry):
-    return bool(entry) and time.time() < entry.get('expires_at', 0)
+def _cache_fresh(entry, refresh_epoch=None):
+    """Fresh while within its TTL and, for a scheduled refresh, recent enough.
+
+    ``refresh_epoch`` (absolute epoch seconds) is the start of the scheduled
+    refresh round that is reading.  A refresh writes its entry δ s *after* that
+    round started, so at the next round (``t0 + tick``) the entry's age is only
+    ``tick − δ`` — shorter than a TTL equal to the tick — and the round would be
+    served from cache with no upstream request, silently degrading a nominal 4 s
+    quote cadence to an effective 8 s (every other tick skipped).
+
+    Requiring ``write_time >= refresh_epoch`` removes that phase coupling
+    deterministically: an entry carried over from an earlier round can never be
+    reused, while an entry written *during* this round (a concurrent REST
+    refresh, or a single-flight leader this round) still is.  ``None`` — the
+    default, and every non-stream caller — keeps the plain TTL semantics
+    ``urlopen``-observable behaviour unchanged.
+    """
+    if not entry or time.time() >= entry.get('expires_at', 0):
+        return False
+    return refresh_epoch is None or entry.get('time', 0) >= refresh_epoch
 
 
 def _cache_put(d, key, value, ttl=None, metric_key='url'):
@@ -686,7 +704,8 @@ def warm_transport(hosts=None, count=None, timeout=None):
     return warmed
 
 
-def fetch_json(url, headers=None, ttl=None, encoding='utf-8', deadline=None):
+def fetch_json(url, headers=None, ttl=None, encoding='utf-8', deadline=None,
+               refresh_epoch=None):
     """Fetch a URL through the four-segment cache protocol (cache.md §2.1).
 
     Segments: ① positive cache hit → return; ② un-expired negative gate →
@@ -701,16 +720,25 @@ def fetch_json(url, headers=None, ttl=None, encoding='utf-8', deadline=None):
     instant, and an elapsed deadline with nothing cached raises
     ``FetchError('upstream_timeout')`` without any network IO.
 
+    ``refresh_epoch`` (6th, keyword) is the scheduled refresh round's start
+    instant; a positive entry written *before* it is not a hit (see
+    :func:`_cache_fresh`).  The scheduled refresh path passes it so the domain
+    that sets the tick is genuinely re-fetched every tick instead of being
+    served by the entry the previous tick wrote δ s into its round.  ``None``
+    (every REST / prefetch caller) keeps plain TTL semantics, and the write TTL
+    is always the full domain TTL, so REST remains protected across the window.
+
     The elapsed-deadline gate sits **after** segment ① (P1-5): a fresh cached
     body costs zero network and zero latency, so the caller's exhausted batch
     budget must never reject data we already hold — otherwise the cache can
-    never save the slow batch it exists to absorb.
+    never save the slow batch it exists to absorb.  The epoch floor applies to
+    segments ①/③/④ alike, so a "not recent enough" entry never resolves as a hit.
     """
     # ── segment 1: positive cache ──────────────────────────────────────────
     hit_stats = None
     with _cache_lock:
         entry = cache.get(url)
-        if _cache_fresh(entry):
+        if _cache_fresh(entry, refresh_epoch):
             cache.move_to_end(url)                                  # BR-CACHE-10
             entry['last_access'] = time.time()
             hit_stats = _record_hit_locked()
@@ -738,7 +766,7 @@ def fetch_json(url, headers=None, ttl=None, encoding='utf-8', deadline=None):
     hit_stats = None
     with _cache_lock:
         entry = cache.get(url)                                      # double-check
-        if _cache_fresh(entry):
+        if _cache_fresh(entry, refresh_epoch):
             cache.move_to_end(url)
             entry['last_access'] = time.time()
             hit_stats = _record_hit_locked()
@@ -794,7 +822,7 @@ def fetch_json(url, headers=None, ttl=None, encoding='utf-8', deadline=None):
     hit_stats = None
     with _cache_lock:
         entry = cache.get(url)
-        if _cache_fresh(entry):
+        if _cache_fresh(entry, refresh_epoch):
             cache.move_to_end(url)
             entry['last_access'] = time.time()
             hit_stats = _record_hit_locked()

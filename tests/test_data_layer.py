@@ -1437,5 +1437,91 @@ class LastDataEvictionTests(unittest.TestCase):
         self.assertEqual(set(page._key_last_seen), set(page._last_data))
 
 
+# ── Scheduled-refresh freshness floor (quote 相位耦合修复) ──────────────────
+
+class RefreshEpochTerminalCacheTests(unittest.TestCase):
+    """The scheduled refresh must not be served by the previous tick's caches.
+
+    The previous round wrote its terminal-cache entry δ s after that round
+    started, so at this round the entry is only ``tick − δ`` old — inside a TTL
+    equal to the tick.  Passing the round start as ``refresh_epoch`` makes the
+    terminal-cache read (step ③ of `_process_chunk`) and the URL-cache read
+    agree that only data fetched this round counts.
+    """
+
+    def setUp(self):
+        _reset_stock_state()
+
+    def tearDown(self):
+        _reset_stock_state()
+
+    @staticmethod
+    def _store(entry):
+        return OrderedDict({'sh600519': entry}), {'sh600519': time.time()}
+
+    def _fetcher(self, calls):
+        def fetch(code, deadline=None, ttl=None, refresh_epoch=None):
+            calls.append((code, refresh_epoch))
+            return {'v': 'new'}
+        return fetch
+
+    def test_pre_epoch_entry_forces_a_refetch(self):
+        now = time.time()
+        cache, cache_ts = self._store({'v': 'old'})
+        cache_ts['sh600519'] = now                  # TTL not elapsed
+        calls = []
+        results, errors = stock_api._process_chunk(
+            ['sh600519'], 'quote', config.cache_policy('quote'),
+            self._fetcher(calls),
+            pool=None, cache=cache, cache_ts=cache_ts,
+            lock=threading.Lock(), refresh_epoch=now + 1)
+
+        self.assertEqual(results['sh600519'], {'v': 'new'})   # not 'old'
+        self.assertEqual(calls, [('sh600519', now + 1)])      # epoch forwarded
+        self.assertEqual(errors, {})
+
+    def test_without_epoch_the_terminal_cache_still_hits(self):
+        """REST / prefetch: the plain TTL hit is unchanged."""
+        cache, cache_ts = self._store({'v': 'old'})
+        calls = []
+        results, errors = stock_api._process_chunk(
+            ['sh600519'], 'quote', config.cache_policy('quote'),
+            self._fetcher(calls),
+            pool=None, cache=cache, cache_ts=cache_ts,
+            lock=threading.Lock())
+
+        self.assertEqual(results['sh600519'], {'v': 'old'})
+        self.assertEqual(calls, [])
+        self.assertEqual(errors, {})
+
+    def test_an_entry_written_this_round_is_reused(self):
+        now = time.time()
+        cache, cache_ts = self._store({'v': 'this-round'})
+        cache_ts['sh600519'] = now + 1              # written after round start
+        calls = []
+        results, _errors = stock_api._process_chunk(
+            ['sh600519'], 'quote', config.cache_policy('quote'),
+            self._fetcher(calls),
+            pool=None, cache=cache, cache_ts=cache_ts,
+            lock=threading.Lock(), refresh_epoch=now)
+
+        self.assertEqual(results['sh600519'], {'v': 'this-round'})
+        self.assertEqual(calls, [])
+
+    def test_legacy_fetcher_without_the_keyword_still_fetches(self):
+        """The epoch is an additive hint: a pre-epoch fetcher is unaffected."""
+        calls = []
+
+        def legacy(code, deadline=None, ttl=None):
+            calls.append(code)
+            return {'v': 'legacy'}
+
+        results, errors = stock_api._run_batch(legacy, ['sh600519'],
+                                               refresh_epoch=time.time())
+        self.assertEqual(results, {'sh600519': {'v': 'legacy'}})
+        self.assertEqual(errors, {})
+        self.assertEqual(calls, ['sh600519'])       # called exactly once
+
+
 if __name__ == '__main__':
     unittest.main()

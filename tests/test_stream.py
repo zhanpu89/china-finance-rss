@@ -567,6 +567,91 @@ class SSEQueueDropTests(unittest.TestCase):
             '最新价')
 
 
+class FrameDedupTests(unittest.TestCase):
+    """BUG-冷启动-01: an unchanged snapshot is not re-sent.
+
+    The tick grid pins round *starts*; frames leave at the round *end*, so a
+    3.5 s cold round followed by a 0.1 s warm round put two frames 0.6 s apart
+    even though the second was a byte-identical cache hit (`ts` aside).  The
+    duplicate is now dropped at the send layer, so a sub-tick gap only survives
+    a real data change.  A brand-new connection is exempt: it has received
+    nothing yet, so it is force-fed the current frame instead of waiting.
+    """
+
+    def setUp(self):
+        _groups.clear()
+        _reset_frame_accounting()
+
+    def tearDown(self):
+        _groups.clear()
+        _reset_frame_accounting()
+
+    @staticmethod
+    def _add_conn(sid):
+        g = get_group(sid)
+        conn = _SSEConn()
+        with g.conns_lock:
+            g.conns.add(conn)
+        return conn
+
+    @staticmethod
+    def _payloads(conn):
+        return [json.loads(f.payload) for f in list(conn.q.queue)
+                if isinstance(f, _Frame)]
+
+    @staticmethod
+    def _content(payload):
+        """Frame content without the build-time `ts` (the dedup basis)."""
+        return {k: v for k, v in payload.items() if k != 'ts'}
+
+    def test_unchanged_snapshot_is_not_sent_twice(self):
+        """① identical snapshot ⇒ no second frame; `last_push_ts` untouched."""
+        sid, _ = create_group(['sh600519'], ['quote'])
+        conn = self._add_conn(sid)
+        snap = {'sh600519': {'quote': {'name': 'x'}}}
+        _broadcast(snap)
+        g = get_group(sid)
+        g.last_push_ts = 0.0                    # prove dedup skips the metric
+        _broadcast(snap)                        # same content in the same tick
+        self.assertEqual(len(self._payloads(conn)), 1)
+        self.assertEqual(g.last_push_ts, 0.0)   # only a real send refreshes it
+
+    def test_changed_snapshot_is_sent(self):
+        """② content change ⇒ a new frame goes out normally."""
+        sid, _ = create_group(['sh600519'], ['quote'])
+        conn = self._add_conn(sid)
+        _broadcast({'sh600519': {'quote': {'name': 'x'}}})
+        _broadcast({'sh600519': {'quote': {'name': 'y'}}})
+        payloads = self._payloads(conn)
+        self.assertEqual(len(payloads), 2)
+        self.assertEqual(
+            payloads[1]['items']['sh600519']['quote']['name'], 'y')
+
+    def test_new_connection_gets_first_frame_even_when_unchanged(self):
+        """③ a connection that never received a frame is not left waiting."""
+        sid, _ = create_group(['sh600519'], ['quote'])
+        first = self._add_conn(sid)
+        snap = {'sh600519': {'quote': {'name': 'x'}}}
+        _broadcast(snap)
+        late = self._add_conn(sid)              # registered after the frame
+        _broadcast(snap)                        # content unchanged
+        self.assertEqual(len(self._payloads(first)), 1)   # not re-sent
+        self.assertEqual(len(self._payloads(late)), 1)    # never starved
+
+    def test_no_two_consecutive_frames_are_identical(self):
+        """④ after dedup no stream ever carries two identical frames in a row."""
+        sid, _ = create_group(['sh600519'], ['quote'])
+        conn = self._add_conn(sid)
+        a = {'sh600519': {'quote': {'name': 'x'}}}
+        b = {'sh600519': {'quote': {'name': 'y'}}}
+        for snap in (a, a, b, b, a):
+            _broadcast(snap)
+        frames = [self._content(p) for p in self._payloads(conn)]
+        self.assertEqual(len(frames), 3)        # a, b, a — duplicates dropped
+        for prev, nxt in zip(frames, frames[1:]):
+            self.assertNotEqual(prev, nxt)      # BUG-冷启动-01 guarantee
+
+
 class ReadJsonBodyGuardTests(unittest.TestCase):
     """P2-5: _read_json_body rejects bad Content-Length before reading body."""
 
@@ -1533,8 +1618,9 @@ class _SentinelQueue:
 
 class IdleWakeTests(unittest.TestCase):
     """SSE cold-start: an idle push loop is woken immediately by a new
-    subscription / connection, and waking can never produce a back-to-back
-    frame (active rounds keep the hard tick-grid sleep)."""
+    subscription / connection, and waking can never put two round *starts*
+    back-to-back (active rounds keep the hard tick-grid sleep; a woken
+    empty-demand round emits no frame at all — BUG-冷启动-01)."""
 
     def setUp(self):
         _groups.clear()
@@ -1580,7 +1666,7 @@ class IdleWakeTests(unittest.TestCase):
 
     def test_active_round_uses_a_hard_sleep_never_interruptible(self):
         """No-burst: a round with live demand keeps the hard grid sleep, so a
-        wake request can never shorten the inter-frame gap below one tick."""
+        wake request can never shorten the round-start spacing below one tick."""
         waits, sleeps = [], []
         self._drive_one_sleep(idle=False, waits=waits, sleeps=sleeps)
         self.assertEqual(sleeps, [8.0])         # hard grid sleep
@@ -1711,7 +1797,16 @@ class TickThrottleTests(unittest.TestCase):
     """BUG-P6C-01 root cause 4 + BUG-P6C-06: round starts are pinned to the
     integer grid ``t0 + k×tick``.  The old `0.25×tick` floor re-ran 2 s after
     an over-tick round (the "2 s back-to-back duplicate frame") behind a
-    12–17 s stall; on the grid the interval is never shorter than one tick."""
+    12–17 s stall; on the grid the *round-start* spacing is never shorter than
+    one tick.
+
+    ★ BUG-冷启动-01: the ``starts`` lists below are round **starts**, so the
+    assertions are the true invariant (round start → round start ≥ 1 tick).
+    Frames are emitted at the round **end**, so their arrival spacing is
+    ``tick − dur_k + dur_{k+1}`` and can dip below a tick in a cold→warm
+    transition; that is not asserted here.  The old test text claimed an
+    inter-*frame* floor of one tick, which the measured 0.535–0.623 s cold
+    first gap (tick=4) falsified."""
 
     def test_within_budget_sleeps_to_the_next_grid_point(self):
         # duration 3 s ≤ 0.8×8 ⇒ sleep to t0 + tick (BR-STR-27): 5 s
@@ -1744,7 +1839,12 @@ class TickThrottleTests(unittest.TestCase):
                                    msg=f'elapsed={elapsed} off the tick grid')
 
     def test_simulated_target_load_stays_on_the_8s_grid(self):
-        """<20-code steady state: every inter-frame gap ≈ tick (acceptance)."""
+        """<20-code steady state: round starts land on the 8 s grid.
+
+        NB: `starts` records round **starts** (not frame arrivals) — the real
+        BUG-冷启动-01 invariant.  Frame arrival spacing is derived later from
+        these starts + the refresh durations and is not bounded by this test.
+        """
         tick = 8
         starts, t = [], 0.0
         for duration in (5.5, 5.4, 5.6, 0.2, 5.5, 5.5):    # refresh cost jitter
@@ -1754,14 +1854,23 @@ class TickThrottleTests(unittest.TestCase):
         self.assertTrue(all(tick * 0.8 <= g <= tick * 1.2 for g in gaps), gaps)
 
     def test_simulated_overrun_is_bounded_never_bursty(self):
-        """200-code degradation: gaps may double, but never collapse < tick."""
+        """200-code degradation: round-start gaps may double, never < tick.
+
+        `starts` are round starts, so `g >= tick` is the grid invariant —
+        **not** a promise about frame arrival spacing (a frame leaves at the
+        round end, so a cold→warm duration swing can still put two *frames*
+        less than a tick apart; `_broadcast` dedup drops the unchanged ones).
+        """
         tick = 8
         starts, t = [], 0.0
         for duration in (9.0, 15.0, 7.0, 12.0, 9.5):
             starts.append(t)
             t += duration + _tick_sleep_seconds(t, tick, t + duration)
         gaps = [b - a for a, b in zip(starts, starts[1:])]
-        self.assertTrue(all(g >= tick for g in gaps), gaps)      # no burst
+        # the true invariant: every round START lands on the integer grid…
+        self.assertTrue(all(abs(s / tick - round(s / tick)) < 1e-9
+                            for s in starts), starts)
+        self.assertTrue(all(g >= tick for g in gaps), gaps)      # ⇒ starts ≥ 1 tick
         self.assertTrue(all(g <= 2 * tick for g in gaps), gaps)  # bounded slip
 
 
@@ -2397,4 +2506,92 @@ class BroadcastGhostReserveTests(unittest.TestCase):
         res.assert_not_called()
         build.assert_not_called()
         self.assertEqual(conn.q.qsize(), 0)
+
+
+class RefreshEpochStreamTests(unittest.TestCase):
+    """修复 quote 相位耦合: the domain that sets the tick is refreshed每拍.
+
+    At L0 a domain's cache TTL equals the tick (4 s), and a round writes its
+    entry δ s *after* the round start, so the next round would find a
+    ``tick − δ``-old entry and skip the upstream call — an effective 8 s cadence
+    for a nominal 4 s one.  `_refresh_pool` hands the round start to the domain
+    that sets the tick as its ``refresh_epoch``; a slower domain (TTL > tick)
+    keeps its TTL interleave so its upstream load does not double.
+    """
+
+    TIERS = {'L0': 4, 'L1': 8, 'L2': 12, 'L3': 30, 'L4': 300}
+
+    def setUp(self):
+        _groups.clear()
+        with _stock_api()._prefetch_cursor_lock:
+            _stock_api()._prefetch_cursor.pop('stream_refresh', None)
+
+    def tearDown(self):
+        _groups.clear()
+        with _stock_api()._prefetch_cursor_lock:
+            _stock_api()._prefetch_cursor.pop('stream_refresh', None)
+
+    @staticmethod
+    def _capture():
+        seen = {}
+
+        def mk(name):
+            def _h(cs, deadline=None, refresh_epoch=None):
+                seen[name] = refresh_epoch
+                return {c: {'v': name} for c in cs}
+            return _h
+
+        return seen, {f: mk(f) for f in ('quote', 'fundflow', 'timeline')}
+
+    def test_quote_at_l0_gets_the_round_start_as_its_floor(self):
+        seen, handlers = self._capture()
+        t0 = time.time()
+        with patch.dict(stream_mod._FIELD_HANDLERS, handlers), \
+             patch.object(config, '_trading_tiers', return_value=self.TIERS), \
+             patch.object(stream_mod, 'tick_interval', return_value=4):
+            _refresh_pool(['sh600519'], t0, ['quote'])
+        self.assertEqual(seen['quote'], t0)
+
+    def test_a_domain_with_a_longer_ttl_keeps_its_interleave(self):
+        seen, handlers = self._capture()
+        with patch.dict(stream_mod._FIELD_HANDLERS, handlers), \
+             patch.object(config, '_trading_tiers', return_value=self.TIERS), \
+             patch.object(stream_mod, 'tick_interval', return_value=4):
+            _refresh_pool(['sh600519'], time.time(),
+                          ['quote', 'fundflow', 'timeline'])
+        self.assertIsNotNone(seen['quote'])     # 4 ≤ 4 ⇒ refreshed every tick
+        self.assertIsNone(seen['fundflow'])     # 8 > 4 ⇒ cached on odd ticks
+        self.assertIsNone(seen['timeline'])
+
+    def test_direct_call_falls_back_to_wall_clock_for_the_floor(self):
+        seen, handlers = self._capture()
+        with patch.dict(stream_mod._FIELD_HANDLERS, handlers), \
+             patch.object(config, '_trading_tiers', return_value=self.TIERS), \
+             patch.object(stream_mod, 'tick_interval', return_value=4):
+            _refresh_pool(['sh600519'])
+        self.assertIsNotNone(seen['quote'])
+
+    def test_legacy_handler_without_the_keyword_is_still_called(self):
+        """The floor is an additive hint: a pre-epoch handler is unaffected."""
+        called = []
+
+        def legacy(cs, deadline=None):
+            called.append(list(cs))
+            return {c: {'v': 1} for c in cs}
+
+        with patch.dict(stream_mod._FIELD_HANDLERS, {'quote': legacy},
+                        clear=True), \
+             patch.object(config, '_trading_tiers', return_value=self.TIERS), \
+             patch.object(stream_mod, 'tick_interval', return_value=4):
+            snap = _refresh_pool(['sh600519'])
+        self.assertEqual(called, [['sh600519']])
+        self.assertEqual(snap['sh600519']['quote'], {'v': 1})
+
+    def test_every_production_handler_accepts_the_refresh_floor(self):
+        """Guard: the tolerant call must never silently drop the floor in prod."""
+        import inspect
+        for field, handler in stream_mod._FIELD_HANDLERS.items():
+            self.assertIn('refresh_epoch',
+                          inspect.signature(handler).parameters,
+                          f'{field} handler must accept refresh_epoch')
 

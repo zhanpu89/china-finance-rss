@@ -389,9 +389,29 @@ class ProbeEscalationTests(_CacheTestCase):
 class DeadlineTests(_CacheTestCase):
     def test_signature_fifth_param_is_deadline(self):         # S1-5 frozen interface
         import inspect
-        self.assertEqual(
-            list(inspect.signature(cache_mod.fetch_json).parameters),
-            ['url', 'headers', 'ttl', 'encoding', 'deadline'])
+        params = list(inspect.signature(cache_mod.fetch_json).parameters)
+        # The original five-parameter positional prefix is frozen (S1-5): a
+        # parameter may be appended (only-add, never-move), but ``deadline``
+        # must stay the 5th positional parameter.
+        self.assertEqual(params[:5],
+                         ['url', 'headers', 'ttl', 'encoding', 'deadline'])
+
+    def test_signature_sixth_param_is_refresh_epoch_keyword(self):
+        """``refresh_epoch`` is the additive 6th parameter, defaulting to None.
+
+        It is a purely additive keyword hint (scheduled-refresh freshness
+        floor): every pre-existing caller that omits it keeps the exact old
+        call shape, so the frozen 5-positional prefix stays intact.
+        """
+        import inspect
+        sig = inspect.signature(cache_mod.fetch_json)
+        params = list(sig.parameters)
+        self.assertGreaterEqual(len(params), 6)
+        self.assertEqual(params[5], 'refresh_epoch')
+        self.assertIsNone(sig.parameters['refresh_epoch'].default)
+        # Backward compatible: the new parameter binds by keyword and the
+        # pre-existing five-positional-prefix call form still binds too.
+        sig.bind_partial(refresh_epoch=None)
 
     def test_elapsed_deadline_raises_without_network(self):    # S1-5
         called = {'n': 0}
@@ -1037,6 +1057,87 @@ class DnsResolverTests(unittest.TestCase):
                                   return_value=sentinel) as fallback:
             self.assertIs(resolver.connect(('h', 443), 5, None), sentinel)
         fallback.assert_called_once()
+
+
+# ── Scheduled-refresh freshness floor (quote 相位耦合修复) ──────────────────
+
+class RefreshEpochCacheTests(_CacheTestCase):
+    """A 4 s quote TTL must not be defeated by its own round phase.
+
+    A scheduled refresh writes the URL-cache entry δ s *after* the round start,
+    so at the next round (``t0 + tick``) the entry is only ``tick − δ`` old —
+    inside a TTL equal to the tick — and used to be returned with no upstream
+    request, halving the effective cadence to 8 s.  ``refresh_epoch`` = the
+    round start makes the read deterministic: an entry written before the round
+    can never hit, while one written during the round (a concurrent REST call or
+    a single-flight leader) still does.
+    """
+
+    def _fetch_with(self, url, ttl, refresh_epoch=None, body='body'):
+        calls = []
+
+        def fake_urlopen(req, timeout=None):
+            calls.append(req.full_url)
+            return _FakeResponse(body.encode())
+
+        with mock.patch.object(cache_mod, 'urlopen', side_effect=fake_urlopen):
+            out = cache_mod.fetch_json(url, ttl=ttl,
+                                       refresh_epoch=refresh_epoch)
+        return out, calls
+
+    def test_the_phase_coupling_is_defeated_by_the_epoch(self):
+        url = 'http://t/quote'
+        ttl = 4
+        t0 = time.time()
+        # Round k wrote its entry 0.5 s into the round, so at t0 + tick it is
+        # only 3.5 s old — inside the 4 s TTL ...
+        cache_mod.cache[url] = {
+            'data': 'round-k', 'time': t0 + 0.5, 'last_access': t0 + 0.5,
+            'expires_at': t0 + 0.5 + ttl}
+        # ... the legacy (epoch-less) read is therefore a HIT — the bug ...
+        out, calls = self._fetch_with(url, ttl)
+        self.assertEqual(out, 'round-k')
+        self.assertEqual(calls, [])
+        # ... while the scheduled round (epoch = its own start) ignores it.
+        out, calls = self._fetch_with(url, ttl, refresh_epoch=t0 + ttl,
+                                      body='round-k+1')
+        self.assertEqual(out, 'round-k+1')
+        self.assertEqual(calls, [url])
+
+    def test_an_entry_written_during_this_round_is_still_reused(self):
+        """A concurrent REST refresh / leader this round wrote fresher data."""
+        url = 'http://t/quote-same-round'
+        t0 = time.time()
+        cache_mod.cache[url] = {
+            'data': 'this-round', 'time': t0 + 1.0, 'last_access': t0 + 1.0,
+            'expires_at': t0 + 100}
+        out, calls = self._fetch_with(url, 60, refresh_epoch=t0)
+        self.assertEqual(out, 'this-round')
+        self.assertEqual(calls, [])
+
+    def test_rest_path_without_epoch_keeps_plain_ttl(self):
+        """Acceptance #3: a same-window REST repeat is still served by cache."""
+        url = 'http://t/rest-repeat'
+        t0 = time.time()
+        cache_mod.cache[url] = {
+            'data': 'rest', 'time': t0, 'last_access': t0,
+            'expires_at': t0 + 4}
+        for _ in range(2):
+            out, calls = self._fetch_with(url, 4)
+            self.assertEqual(out, 'rest')
+            self.assertEqual(calls, [])
+
+    def test_cache_fresh_epoch_boundary(self):
+        now = time.time()
+        entry = {'data': 'x', 'time': now, 'expires_at': now + 10}
+        self.assertTrue(cache_mod._cache_fresh(entry))              # no floor
+        self.assertTrue(cache_mod._cache_fresh(entry, now))
+        self.assertTrue(cache_mod._cache_fresh(entry, now - 0.001))
+        self.assertFalse(cache_mod._cache_fresh(entry, now + 0.001))
+        # an expired entry is stale regardless of the floor
+        expired = {'data': 'x', 'time': now, 'expires_at': now - 1}
+        self.assertFalse(cache_mod._cache_fresh(expired, now - 100))
+        self.assertFalse(cache_mod._cache_fresh(None, now - 100))
 
 
 if __name__ == '__main__':
