@@ -49,6 +49,6 @@
   - 工具技能/规则 → `self-evolve`（`.opencode/skills/**`、`.opencode/rules/**`）
   - **`opencode.json` 仅用户可改**（治理档，不授予任何 agent——防止 agent 自我提权）
   - `explore`/`general` 恒为只读（防逃逸越权）
-- **编排层可直接做的事（不必派 subagent）**：git 全套、`.opencode/scripts/*.sh` 门禁、`python -m py_compile`/`python -m unittest` 自验、`docker compose *`（构建/部署/日志/exec）、`curl` 冒烟，以及上述契约/运维文件的编辑。
+- **编排层可直接做的事（不必派 subagent）**：git 全套、`.opencode/scripts/*.sh` 门禁、`python -m py_compile`/`python -m unittest` 自验、`docker compose *`（构建/部署/日志/exec）、`curl` 冒烟，以及上述契约/运维文件的编辑。**验证按变更范围选（不搞一刀切）**：业务代码（`china_finance_rss/**`、`tests/**`）才跑 `python -m py_compile`+`python -m unittest`；仅工具/配置（`opencode.json`、`.opencode/**`）改用 `bash .opencode/scripts/check-opencode.sh`；纯文档不跑测试；统一入口 `bash .opencode/scripts/check-changed.sh`。
 - **强度建议**：纯 Python 标准库 + unittest，单仓小项目——绝大多数任务走 🟡增量/🟢标准即可；只有跨模块（server+stream+数据层联调）或安全相关才上 🔴全量。
-- **已知踩坑**：① 源站接口带复杂签名（cls_sign_params），改参数必须保持签名一致，否则 401/数据为空；② CDP 依赖 Chrome，宿主无 Chrome 时 CDP 端点属预期失败，不要当 bug 修；③ 端口冲突（docker 占 8053/8054）时验证用 PORT/STREAM_PORT 环境变量换端口，别改 docker-compose 里已确认的配置；④ 压测/盲审报告落盘 doc/review、doc/tester，不落根目录。
+- **已知踩坑**：① 源站接口带复杂签名（cls_sign_params），改参数必须保持签名一致，否则 401/数据为空；② CDP 依赖 Chrome，宿主无 Chrome 时 CDP 端点属预期失败，不要当 bug 修；③ 端口冲突（docker 占 8053/8054）时验证用 PORT/STREAM_PORT 环境变量换端口，别改 docker-compose 里已确认的配置；④ 压测/盲审报告落盘 doc/review、doc/tester，不落根目录。⑤ 只改 `.opencode/**`、`opencode.json`（工具）或纯文档时**不要跑业务全量 `unittest`**（与业务无关，纯浪费）——按 `check-changed.sh` 的范围规则选验证。

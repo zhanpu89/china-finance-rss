@@ -95,6 +95,7 @@ REF_FILES=(
   ".opencode/scripts/check-arch.sh"
   ".opencode/scripts/check-arch-compliance.sh"
   ".opencode/scripts/check-audit.sh"
+  ".opencode/scripts/check-changed.sh"
   ".opencode/scripts/check-code.sh"
   ".opencode/scripts/check-detailed.sh"
   ".opencode/scripts/check-drift.sh"

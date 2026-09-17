@@ -9,10 +9,16 @@ Keep this project small.
   files.
 - Prefer the Python standard library.
 
-Before handoff:
+Before handoff, run only the checks that match what changed — never the
+business suite for tooling/doc-only edits:
 
-```bash
-python -m unittest discover -s tests -v
-python -m py_compile china_finance_rss/*.py tests/test_server.py
-git diff --check
-```
+| Changed paths | Run |
+| --- | --- |
+| `china_finance_rss/**`, `tests/**` | `python -m py_compile china_finance_rss/*.py tests/*.py` then `python -m unittest discover -s tests -v` |
+| `opencode.json`, `.opencode/**` | `bash .opencode/scripts/check-opencode.sh` |
+| docs only (`*.md`, `doc/**`) | nothing extra |
+| anything | `git diff --check` |
+
+`bash .opencode/scripts/check-changed.sh [base]` applies the right set from the
+diff automatically (base defaults to `HEAD`; pass `HEAD~1` once changes are
+committed).
