@@ -33,12 +33,14 @@ All require `?code=` with stock symbols (e.g. `?code=sh600519` or `?code=sh60051
 
 | Endpoint | Description | CDP |
 | --- | --- | --- |
-| `/stock/data` | Stock detail + related sectors (REST + evaluate_fetch) | No |
+| `/stock/data` | Stock detail: labels, sectors, event/up-reason (REST) | No |
 | `/stock/fundflow` | Capital flow (主力/超大/大/中/小单净流入) | No |
 | `/stock/timeline` | Intraday price timeline | No |
 | `/stock/f10` | Company fundamentals & financials | Yes |
-| `/stock/basic_info` | Real-time quote + sector name (申万一级行业) | No |
+| `/stock/basic_info` | Real-time quote + **order book (五档, `depth`)** + sector name (申万一级行业) | No |
 | `/stock/announcement` | Company announcements | No |
+
+Codes accept `sh`/`sz`/**`bj`** (北交所) equally; dotted forms (`600519.SH`, `430047.BJ`) are normalized at ingress.
 
 ## JSON Market APIs
 
@@ -67,12 +69,19 @@ http://localhost:8053/healthz?check=1
 | `PUBLIC_BASE_URL` | auto | Public URL for RSS self-links & OPML |
 | `CDP_URL` | `http://localhost:9222` | Chrome DevTools URL |
 | `MAX_WORKERS` | `20` | Max concurrent request threads |
+| `BATCH_MAX_WORKERS` | `20` | Per-batch upstream fan-out (keep ≤ `HTTP_POOL_MAX_PER_HOST`) |
+| `STREAM_PER_FETCH_EST` | `0.3` | Per-fetch seconds used by the SSE refresh-capacity model |
+| `HTTP_POOL_MAX_PER_HOST` | `24` | Keep-alive connections kept per upstream host |
+| `HTTP_POOL_IDLE_TTL` | `60` | Idle keep-alive connection eviction (s) |
+| `HTTP_DNS_CACHE_TTL` | `300` | In-process DNS cache TTL (s); `0` disables |
+| `HTTP_WARM_CONNECTIONS` | `1` | Connections pre-warmed per upstream host at startup |
+| `HTTP_WARM_TIMEOUT` | `2.0` | Warm-up dial timeout (s); failures are silent |
 | `LISTEN_BACKLOG` | `128` | TCP accept backlog; keep ≥ `MAX_INFLIGHT` and ≥ `MAX_STREAM_CONNS` |
 | `STREAM_HOST` | `127.0.0.1` | SSE listen addr; set `0.0.0.0` for cross-host/container access (no-auth mgmt surface) |
 | `CDP_RESTART_THROTTLE` | `15` | Full Chrome restart throttle (s); guards the `full_chrome_restart` lock (×2 = no re-restart within 30s) |
 | `STREAM_GROUP_IDLE_TTL` | `300` | Idle zombie subscription-group reaper (s); a group with no live connection is destroyed after this — clients must re-POST `/stream/subscriptions` after a long disconnect |
 
-> Cache TTL is **per data-domain and trading-hours aware** (`config.cache_policy`, single source of truth) — it is no longer a single env var. Examples: RSS/`news_url` 30s (trading) / 180s (off-hours), `quote` 8s / 120s, `plate` 12s / 120s, `f10`/`longhu` 300s, `margin` 600s, `sector` 7d. Upstream failures are rate-limited by a negative cache (5s) plus an escalating probe budget (2→4→5s).
+> Cache TTL is **per data-domain and trading-hours aware** (`config.cache_policy`, single source of truth) — it is no longer a single env var. Examples: `quote`/`depth` **4s** (trading) / 120s (off-hours), RSS/`news_url` 30s / 180s, `fundflow`/`timeline` 8s / 120s, `plate` 12s / 120s, `f10`/`longhu` 300s, `margin` 600s, `sector` 7d. Upstream failures are rate-limited by a negative cache (5s) plus an escalating probe budget (2→4→5s). Upstream HTTP is pooled with keep-alive + in-process DNS caching.
 
 Do not commit `.env` files, cookies, tokens, private keys, Chrome profiles, or HAR captures.
 
@@ -97,7 +106,7 @@ Then start the bridge — CDP endpoints activate automatically.
 The bridge uses Chrome DevTools Protocol for two page types:
 
 - **Heartbeat pages** (`/finance/market`, `/quotation/market`): persistent tabs with a background thread polling collected data every 10s.
-- **Navigation pages** (14 stock pages + 1 F10 page): on-demand navigation to stock codes, serialized via per-page fair locks.
+- **Navigation pages** (`CDP_STOCK_PAGES` stock pages, default 3 / 2C2G profile 4, plus 1 F10 page): on-demand navigation to stock codes, serialized via per-page fair locks.
 
 The interceptor JS hooks `fetch`, `XHR`, and `WebSocket` to capture JSON API responses into `window.__cdp_api`.
 

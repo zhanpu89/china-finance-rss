@@ -136,6 +136,9 @@ Base URL: `http://localhost:8053`
 
 所有个股端点返回 `application/json; charset=utf-8`。接受 `?code=` 查询参数，支持批量查询（逗号分隔，上限 50 只）。**批量时以 `code` 为顶层键**（`{"sh600519": {...}, "sz000001": {...}}`）；单只查询时同样返回 `{"code": data}` 包裹。
 
+> **支持的市场**：`sh`（沪）、`sz`（深）、**`bj`（北交所）**三类同等可用（价格/涨跌/五档）。代码内部统一为小写前缀形（`sh600519`/`bj430047`）；点号形（`600519.SH`/`430047.BJ`）在入口自动归一为同一标的。上游对北交所使用另一套线路格式，服务端已代为转换，接入方无需感知。
+
+
 > **数值单位约定（全章适用）**：`change` / `tr` / `amp` / `change_3` / `change_5` / `change_1y` 等带「率/比/幅」语义的字段均为**小数**，不是百分比数值——`change: -0.0116` 表示 **-1.16%**，`tr: 0.0021` 表示 **0.21%**。换算公式：百分比 = 小数值 × 100。
 
 ---
@@ -230,10 +233,11 @@ Base URL: `http://localhost:8053`
 
 ### `GET /stock/basic_info`
 
-**个股基本信息** — 实时行情 + 行业归属（两阶段 REST：行情致命 + 行业非致命，命中 7 天 `sector` 缓存则跳过）。
+**个股实时行情 + 五档盘口 + 行业归属** — 三阶段 REST（行情与五档致命、行业非致命；命中 7 天 `sector` 缓存则跳过行业取数）。
 
 - **CDP**: 否（纯 REST）
-- **顶层键**：`{"<code>": {"code": 200, "msg": "", "data": {...}, "sector_name": "..."}}`
+- **顶层键**：`{"<code>": {"code": 200, "msg": "", "data": {...}, "depth": {...}, "sector_name": "..."}}`
+  - `depth`（**五档盘口**）：仅当上游确有盘口时出现；北交所首日/指数/取数失败时**不出现该键**（不会返回全 0 假档）
 
 **`data` 内字段**：
 
@@ -264,6 +268,18 @@ Base URL: `http://localhost:8053`
 | `unlisted` | boolean | 是否未上市 |
 | `trade_time` / `eoeId` / `market_enum` / `note` / `financing` | — | 内部扩展字段（常数/可空，忽略即可） |
 | **`sector_name`**（顶层） | string/null | 申万一级行业名（如 `食品饮料行业`）；取数失败时缺省 |
+
+**`depth` 内字段（五档盘口，21 个）**：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `b_px_1` … `b_px_5` | number | 买一 ~ 买五**委托价** |
+| `b_amount_1` … `b_amount_5` | number | 买一 ~ 买五**委托量（手）** |
+| `s_px_1` … `s_px_5` | number | 卖一 ~ 卖五委托价 |
+| `s_amount_1` … `s_amount_5` | number | 卖一 ~ 卖五委托量（手） |
+| `preclose_px` | number | 昨收（上市首日为**发行价**，涨跌幅请以 `data.change` 为准，不要自算） |
+
+> `depth` 与 `data` 同拍（同为 4s 级刷新）；`depth` 取数失败不影响 `data` 本体，客户端应视其为可选增强。
 
 ---
 
@@ -508,8 +524,8 @@ Base URL: `http://localhost:8053`
 | `sid` | string | 订阅组 ID |
 | `codes` | array | 归一后的代码（排序） |
 | `fields` | array | 生效字段集 |
-| `refresh_capacity_codes` | number | 单 tick 可全量刷新的码数上限（容量提示，附加键） |
-| `refresh_lag_ticks` | number | 仅当码数超容量时：每码刷新周期（tick） |
+| `refresh_capacity_codes` | number | 单 tick 可全量刷新的码数上限（容量提示，附加键）。盘中典型值：**仅订 `quote` ≈106 码 / 三域（quote+fundflow+timeline）≈53 码**；非盘中显著更高。低于该值 ⇒ 单 tick 全量刷新（`lag=0`） |
+| `refresh_lag_ticks` | number | 仅当码数超容量时：每码刷新周期（tick 数） |
 | `capacity_warning` | string | 仅当超容量时：容量告警文案 |
 
 - **错误 `400`**: `JSON body must be an object` / `codes must be a list` / `codes required` / `invalid stock code: X` / `unknown field: X` / `too many codes (max 200)` / `too many groups (max 200)` / `pool would exceed 2000 codes` / `subscription frames would exceed <B>-byte stream frame budget`
@@ -545,12 +561,16 @@ Base URL: `http://localhost:8053`
 | `ts` | number | 帧构建时间（毫秒） |
 | `codes_total` | number | 该组订阅码数 |
 | `fields` | array | 该组字段集 |
-| `items` | object | **覆盖全部订阅码**；无数据的字段为 `null` |
+| `items` | object | **覆盖全部订阅码**；无数据的字段为 `null`。`items[<code>].quote` 内可能含 **`depth`（五档）**，见 §2 `/stock/basic_info` |
 | `missing` | array | 本 tick 无任何数据的码（排序） |
 | `missing_count` | number | `len(missing)` |
 | `stale` | array | 沿用上一 tick 值的码；仅非空时出现 |
 | `stale_count` | number | `len(stale)`；仅随 `stale` 出现 |
 | `errors` | object | 码 → 上游错误枚举（`upstream_timeout`/`upstream_error`/`cdp_unavailable`）；仅非空时出现 |
+
+> **推送节拍**：`quote` 域盘中 **4s**（因只订行情时 tick 取最短域 TTL）；若组内还订了 `fundflow`/`timeline`（8s），**tick 仍为 4s**，慢域隔拍命中缓存并以 `stale` 标出。内容与上一帧完全相同的帧**不会重复下发**（去重），因此行情不动时帧可能稀疏——**保活由 `ping` 承担，不要用"多久没收到 quote"判断断线**。
+>
+> **新连接**：中途接入的客户端会**立即补发一帧**（即使内容未变），无需等到下一次数据变化。
 
 - `event: ping` — 保活（`STREAM_PING_INTERVAL`，默认 20s）
 
@@ -568,7 +588,8 @@ Base URL: `http://localhost:8053`
 
 | 数据域 | 端点示例 | 缓存 TTL（盘中 / 非盘中） | 数据特征 |
 |--------|---------|--------------------------|----------|
-| `quote`（L1） | `/stock/data` `/stock/basic_info` | **8s** / 120s | 实时行情 |
+| `quote`（**L0**） | `/stock/basic_info`（行情）/ `/stock/data`（详情） | **4s** / 120s | 实时行情 |
+| `depth`（**L0**） | `/stock/basic_info` 的 `depth`（五档） | **4s** / 120s | 五档盘口 |
 | `fundflow`（L1） | `/stock/fundflow` | **8s** / 120s | 资金流向 |
 | `timeline`（L1） | `/stock/timeline` | **8s** / 120s | 分时 |
 | `plate`（L2） | `/cls/hotplate` `/finance/market` | **12s** / 120s | 板块轮动 |
@@ -578,6 +599,8 @@ Base URL: `http://localhost:8053`
 | `margin`（L4） | `/market/margin` | 600s | 两融 |
 | `f10`（L4） | `/stock/f10` | 300s | 财务概要 |
 | `sector`（L4） | `/stock/basic_info` 行业名 | 7 天 | 行业归属 |
+
+> **L0 说明**：行情与五档为最快档（盘中 4s，对齐 A 股 Level-1 的 3s 快照节奏）；上游实测每 3 秒更新一次，故 4s 已接近可取的最快值。
 
 **交易时段判定**：A 股连续竞价时段内走「盘中」列；收盘后走「非盘中」列（TTL 放宽，减少对外部源的无效轮询）。
 
@@ -595,7 +618,7 @@ Base URL: `http://localhost:8053`
 
 **唯一的例外**是**跨公网长链路 + 高并发读**的终态聚合场景：若你的下游需要抗瞬间尖峰且能容忍 ≤2s 陈旧，可以在**边缘聚合层**（不是上游专用缓存）做一层极短 TTL（1~2s）的**兜底缓存**，用于吸收网络抖动——但这只是工程冗余，不是数据一致性的必要项。
 
-> ⚠️ 一个反模式：对 `/stock/data` 这种**盘中 TTL 仅 8s** 的域，接入方若自己做 60s 缓存并展示为「实时」，会系统性展示过期行情。要么信任服务端 TTL 直接透传，要么把你的缓存 TTL 设得比服务端更短（如 ≤5s）。
+> ⚠️ 一个反模式：对 `/stock/basic_info` 这种**盘中 TTL 仅 4s** 的域，接入方若自己做 60s 缓存并展示为「实时」，会系统性展示过期行情。要么信任服务端 TTL 直接透传，要么把你的缓存 TTL 设得比服务端更短（如 ≤3s）。
 
 ## 6.3 轮询节奏（REST 接入）
 
@@ -603,7 +626,8 @@ Base URL: `http://localhost:8053`
 
 | 目标 | 推荐轮询周期 | 原因 |
 |------|-------------|------|
-| 个股行情 / 分时 / 资金流 | ≥8s | L1 盘中 TTL=8s |
+| 个股行情（含五档） | ≥4s | L0 盘中 TTL=4s（上游本身 3s 一跳） |
+| 分时 / 资金流 | ≥8s | L1 盘中 TTL=8s |
 | 板块 | ≥12s | L2 盘中 TTL=12s |
 | 快讯 RSS | ≥30s 或 ETag/Last-Modified 感知 | L3 盘中 TTL=30s |
 | 龙虎榜 / 两融 / F10 | ≥300s~600s | L4 日更级 |
@@ -624,7 +648,7 @@ Base URL: `http://localhost:8053`
 
 ### 帧消费协议
 
-- `event: quote` — **全量快照帧**：`items` 覆盖组内全部订阅码（Tick=2s，L1），无数据字段为 `null`；`missing`/`stale`/`errors` 三个可选键做差异提示（详见 §5）。
+- `event: quote` — **全量快照帧**：`items` 覆盖组内全部订阅码，无数据字段为 `null`；行情含 `depth` 五档；`missing`/`stale`/`errors` 三个可选键做差异提示（详见 §5）。盘中节拍 **4s**（`quote`）/ 8s（`fundflow`/`timeline`，隔拍命中缓存并标 `stale`）；**内容未变的帧不会重复下发**。
 - `event: ping` — 保活帧，默认 20s 一次。**客户端 socket 读超时建议 ≥40s（2× ping 间隔）**，避免正常静默被误判断线。
 
 ### 三个必须知道的语义（坑）
@@ -662,7 +686,16 @@ Base URL: `http://localhost:8053`
 
 ### 错误响应
 
-所有 JSON 端点在出错时返回 `{"error": "错误描述"}`，HTTP 状态码 400 或 200（取决于端点）。例如 `?code` 参数缺失时：
+所有 JSON 端点在出错时返回 `{"error": "错误描述"}`。**状态码语义（钉死）**：
+
+| 状态码 | 适用 |
+|--------|------|
+| `200` | 正常**以及业务降级**（上游失败 / CDP 不可用 ⇒ `200` + error 客体或逐码 `null` + `_errors`） |
+| `400` | 请求参数错误（缺参 / 非法码 / `market` 不在枚举内 / body 非 list 等） |
+| `404` | 未知路径 / 订阅组已回收 |
+| `503` | **仅**连接准入拒绝（主/流端口负载过高）与 `/healthz` 降级 |
+
+例如 `?code` 参数缺失时：
 
 ```json
 {
@@ -683,8 +716,9 @@ Base URL: `http://localhost:8053`
 ### 缓存
 
 - RSS 源: 缓存 180s（交易时段降为 30s），带 ±20% 抖动防雪崩
-- REST JSON API: 统一走 `cache.fetch_json`（`cache.py`）：按数据域 TTL 缓存（`config.cache_policy` 单一权威，如 `quote` 盘中 8s / 非盘中 120s）+ 负缓存（失败后 5s 内快速失败，探测预算阶梯 2→4→5s）+ 单飞（single-flight，避免并发重复回源）
+- REST JSON API: 统一走 `cache.fetch_json`（`cache.py`）：按数据域 TTL 缓存（`config.cache_policy` 单一权威，如 `quote`/`depth` 盘中 **4s** / 非盘中 120s，`fundflow`/`timeline` 8s）+ 负缓存（失败后 5s 内快速失败，探测预算阶梯 2→4→5s）+ 单飞（single-flight，避免并发重复回源）；上游连接经 keep-alive 连接池复用
 - 失败语义: 业务降级（上游失败/CDP 不可用）恒以 **HTTP 200 + 结构化 `error` 客体**返回；HTTP 503 仅用于连接准入拒绝与 `/healthz` 降级
+- 压缩: 客户端带 `Accept-Encoding: gzip` 时，≥1KB 响应自动 gzip（并发 `Vary: Accept-Encoding`；`gzip;q=0` 尊重客户端拒绝）
 
 ### 并发
 
