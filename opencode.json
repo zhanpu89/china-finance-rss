@@ -83,18 +83,12 @@
         "edit": {
           "*": "deny",
           "china_finance_rss/**": "allow",
-          "Dockerfile": "allow",
-          "docker-compose.yml": "allow",
-          "doc/deploy/**": "allow",
           "tests/**": "allow"
         },
         "write": {
           "*": "deny",
           "china_finance_rss/**": "allow",
-          "tests/**": "allow",
-          "Dockerfile": "allow",
-          "docker-compose.yml": "allow",
-          "doc/deploy/**": "allow"
+          "tests/**": "allow"
         },
         "bash": {
           "python -m py_compile": "allow",
@@ -153,15 +147,37 @@
           "*": "deny",
           "_MEMORY_CACHE.md": "allow",
           ".opencode/project/**": "allow",
+          ".opencode/scripts/**": "allow",
           "doc/review/**": "allow",
-          "doc/tester/**": "allow"
+          "doc/tester/**": "allow",
+          "API.md": "allow",
+          "README.md": "allow",
+          "AGENTS.md": "allow",
+          "Dockerfile": "allow",
+          "docker-compose.yml": "allow",
+          "doc/deploy/**": "allow",
+          "scripts/**": "allow",
+          ".github/**": "allow",
+          "requirements.txt": "allow",
+          ".gitignore": "allow"
         },
         "write": {
           "*": "deny",
           "_MEMORY_CACHE.md": "allow",
           ".opencode/project/**": "allow",
+          ".opencode/scripts/**": "allow",
           "doc/review/**": "allow",
-          "doc/tester/**": "allow"
+          "doc/tester/**": "allow",
+          "API.md": "allow",
+          "README.md": "allow",
+          "AGENTS.md": "allow",
+          "Dockerfile": "allow",
+          "docker-compose.yml": "allow",
+          "doc/deploy/**": "allow",
+          "scripts/**": "allow",
+          ".github/**": "allow",
+          "requirements.txt": "allow",
+          ".gitignore": "allow"
         },
         "bash": {
           "git status": "allow",
@@ -185,10 +201,15 @@
           "git show *": "allow",
           "git rebase *": "allow",
           "git cherry-pick *": "allow",
-          ".opencode/scripts/check-*.sh": "allow",
-          ".opencode/scripts/mirror-log.sh": "allow",
-          ".opencode/scripts/project-init.sh": "allow",
-          ".opencode/scripts/log-*.sh": "allow",
+          "python -m py_compile": "allow",
+          "python -m unittest": "allow",
+          "docker compose *": "allow",
+          "docker stats *": "allow",
+          "docker ps *": "allow",
+          "docker logs *": "allow",
+          "docker inspect *": "allow",
+          "docker exec *": "allow",
+          ".opencode/scripts/*.sh": "allow",
           "curl *": "allow",
           "*": "deny"
         },
