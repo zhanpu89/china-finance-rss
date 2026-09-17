@@ -1,7 +1,7 @@
 {
   "project": "china-finance-rss",
-  "version": "1.5",
-  "generatedAt": "2026-09-16",
+  "version": "1.6",
+  "generatedAt": "2026-09-17",
   "primaryLanguage": "python",
   "moduleRoot": "china_finance_rss",
   "totalComponents": 9,
@@ -13,7 +13,7 @@
       "concurrency": "threading + concurrent.futures.ThreadPoolExecutor",
       "cache": "自研内存缓存 (cache.py: URL 缓存 / 负缓存 / 端点缓存 / feed 缓存)",
       "push": "SSE (text/event-stream, 全量快照帧)：ts + 全码在位的 items（缺数据为 null）+ codes_total/fields/missing/missing_count + 条件 errors/stale/stale_count；同组帧对象共享同一引用；响应 Connection: close",
-      "cdp": "Chrome DevTools Protocol (cdp_engine.py, websocket 为可选延迟导入)",
+      "cdp": "Chrome DevTools Protocol (cdp_engine.py, websocket 为可选延迟导入)；页面数 CDP_STOCK_PAGES **env 驱动**（2C2G 部署档位=4，+2 常驻=6 内容页，另有 2 个 webui renderer）",
       "test": "unittest (python -m unittest discover -s tests -v)"
     },
     "database": {
@@ -30,7 +30,7 @@
       "messageQueue": "none",
       "searchEngine": "none",
       "monitoring": "自研 metrics.py + logging (标准库，无监控依赖)",
-      "deployment": "Docker + docker-compose; 入口 python -m china_finance_rss.server; 端口 8053(主) / 8054(流)"
+      "deployment": "Docker + docker-compose; 入口 python -m china_finance_rss.server; 端口 8053(主) / 8054(流)；内存总账口径：Chrome ≈ 250MB(PSS) 基线 + N×每页（典型 60 / 保守 150 MB），**跨进程求和必须用 PSS/Pss_Anon，禁止用 RSS**（虚高 ~3.2×）；容器 mem_limit 1.5g，2C2G 档位 N=6 内容页（详见 SAD §4.3 / §9.6）"
     }
   },
   "runtimeDependencies": [],

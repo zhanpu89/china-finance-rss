@@ -930,5 +930,58 @@ class GzipResponseTests(unittest.TestCase):
         self.assertEqual(clen, len(gzip.compress(body.encode(), _cfg.GZIP_COMPRESSLEVEL)))
         self.assertEqual(h.wfile.getvalue(), b'', 'HEAD 不应写 body')
 
+    def test_q0_gzip_is_refused(self):
+        """RFC 9110: gzip;q=0 明确拒绝 ⇒ 不得压缩。"""
+        body = '{"x": "' + 'a' * 5000 + '"}'
+        h = self._fake_handler('gzip;q=0')
+        h._send_text(200, 'application/json', body)
+        _, clen, cenc, _ = self._captured(h)
+        self.assertIsNone(cenc, 'gzip;q=0 应回退原文')
+        self.assertEqual(clen, len(body.encode()))
+        self.assertEqual(h.wfile.getvalue().decode(), body)
+
+    def test_uppercase_gzip_token_is_accepted(self):
+        """content-coding token 大小写不敏感：GZIP 应压缩。"""
+        body = '{"x": "' + 'a' * 5000 + '"}'
+        h = self._fake_handler('GZIP')
+        h._send_text(200, 'application/json', body)
+        _, _, cenc, _ = self._captured(h)
+        self.assertEqual(cenc, 'gzip')
+
+    def test_wildcard_accepts_gzip(self):
+        """``*`` 表示接受任意编码 ⇒ 压缩。"""
+        body = '{"x": "' + 'a' * 5000 + '"}'
+        h = self._fake_handler('*')
+        h._send_text(200, 'application/json', body)
+        _, _, cenc, _ = self._captured(h)
+        self.assertEqual(cenc, 'gzip')
+
+    def test_wildcard_q0_is_refused(self):
+        """``*;q=0`` 拒绝一切编码 ⇒ 不压缩。"""
+        body = '{"x": "' + 'a' * 5000 + '"}'
+        h = self._fake_handler('*;q=0')
+        h._send_text(200, 'application/json', body)
+        _, clen, cenc, _ = self._captured(h)
+        self.assertIsNone(cenc)
+        self.assertEqual(clen, len(body.encode()))
+
+    def test_identity_is_not_gzip(self):
+        body = '{"x": "' + 'a' * 5000 + '"}'
+        h = self._fake_handler('identity')
+        h._send_text(200, 'application/json', body)
+        _, _, cenc, _ = self._captured(h)
+        self.assertIsNone(cenc)
+
+    def test_vary_accept_encoding_sent_for_uncacheable_gzip(self):
+        """cache=False 路径（/、/healthz、_send_error）被 gzip 时仍须发 Vary。"""
+        body = '{"x": "' + 'a' * 5000 + '"}'
+        h = self._fake_handler('gzip')
+        h._send_text(200, 'text/html; charset=utf-8', body, cache=False)
+        _, _, cenc, vary = self._captured(h)
+        self.assertEqual(cenc, 'gzip')
+        self.assertIn('Accept-Encoding', vary or '',
+                      'gzip 响应即使不可缓存也须 Vary: Accept-Encoding')
+
+
 if __name__ == '__main__':
     unittest.main()

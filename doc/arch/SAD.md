@@ -1,9 +1,9 @@
 # 短线交易财经数据服务 — 高效/准确/稳定优化专项架构建档（SAD）
 
-> **文档编号** SAD-2026-P6C-01 · **版本** v1.5 · **状态** 待复审
-> **日期** 2026-09-16 · **产出** system-architect
+> **文档编号** SAD-2026-P6C-01 · **版本** v1.6 · **状态** 待复审
+> **日期** 2026-09-17 · **产出** system-architect
 > **上游输入** PRD `doc/prd/perf-stability-optimization.md`（v0.4，30 AC / R1-R20）
-> **修订依据**（v1.1）review-expert `doc/review/perf-stability-optimization_架构评审_专家版.md`（REV-ARCH-20260915-001，❌ 阻断：P0×1 + P1×7 + P2×8；Q1/Q2/Q3 裁决）；（v1.2）复审「❌ 仍阻断」但机制层（P0×1 + P1×7）已全部合格、Q1/Q2/Q3 逐字落地——仅收口 **P1-N1（coverage 单位）** ＋ **P1-N2（`_Frame.refs` 收口）** 与 7 项 P2。逐项落地见 §9；（v1.3）基础层三模块详设评审 review-expert `doc/review/基础层三模块_详细设计评审_专家版.md`（REV-DES-20260915-001，✅ 通过 P0×0/P1×1/P2×8）——落地 P3b 评审的 SAD 侧动作：3 项内部矛盾更正 + 6 项裁决 + D-1~D-7 偏差回填 + 2 项 SAD↔代码不一致更正，逐项见 §9.3；（v1.4）**P7b 契约同步**——以**代码为准**回写实现的最新行为（帧契约、订阅字段容量模型、单帧余量准入、探预算阶梯、deadline 贯通、`canonical_code` 归一化权威、CDP/观测口径），并登记 1 项与 PRD AC-A5 冲突的**待裁决**漂移，逐项见 **§9.4**；（v1.5）**裁决落地收尾同步**——编排层对 3 处契约冲突的裁决已同步 PRD（`perf-stability-optimization.md` v0.5），本轮以**代码为准**把 SAD 侧结论回写：① **N1 关闭**（业务端点降级维持 **200 + error 客体**，`server._json_payload_has_data` 已删除、`_send_json_shape` 恒 200，`http_503_total` 计数点 4→3）；② **AC-S3 模式 B 探测预算阶梯封顶 5s**（`2→4→5`，`cache._PROBE_BUDGET_CAP=5.0`；P95 口径重标为**高密度 ≤5s / 低密度 ≤10s**）；③ **`_LOCAL_BUDGET` 不入冷却账本**的 v1.4 反转**正式确认**（反转 REV-DES-15 裁决②）。逐项见 **§9.5**
+> **修订依据**（v1.1）review-expert `doc/review/perf-stability-optimization_架构评审_专家版.md`（REV-ARCH-20260915-001，❌ 阻断：P0×1 + P1×7 + P2×8；Q1/Q2/Q3 裁决）；（v1.2）复审「❌ 仍阻断」但机制层（P0×1 + P1×7）已全部合格、Q1/Q2/Q3 逐字落地——仅收口 **P1-N1（coverage 单位）** ＋ **P1-N2（`_Frame.refs` 收口）** 与 7 项 P2。逐项落地见 §9；（v1.3）基础层三模块详设评审 review-expert `doc/review/基础层三模块_详细设计评审_专家版.md`（REV-DES-20260915-001，✅ 通过 P0×0/P1×1/P2×8）——落地 P3b 评审的 SAD 侧动作：3 项内部矛盾更正 + 6 项裁决 + D-1~D-7 偏差回填 + 2 项 SAD↔代码不一致更正，逐项见 §9.3；（v1.4）**P7b 契约同步**——以**代码为准**回写实现的最新行为（帧契约、订阅字段容量模型、单帧余量准入、探预算阶梯、deadline 贯通、`canonical_code` 归一化权威、CDP/观测口径），并登记 1 项与 PRD AC-A5 冲突的**待裁决**漂移，逐项见 **§9.4**；（v1.5）**裁决落地收尾同步**——编排层对 3 处契约冲突的裁决已同步 PRD（`perf-stability-optimization.md` v0.5），本轮以**代码为准**把 SAD 侧结论回写：① **N1 关闭**（业务端点降级维持 **200 + error 客体**，`server._json_payload_has_data` 已删除、`_send_json_shape` 恒 200，`http_503_total` 计数点 4→3）；② **AC-S3 模式 B 探测预算阶梯封顶 5s**（`2→4→5`，`cache._PROBE_BUDGET_CAP=5.0`；P95 口径重标为**高密度 ≤5s / 低密度 ≤10s**）；③ **`_LOCAL_BUDGET` 不入冷却账本**的 v1.4 反转**正式确认**（反转 REV-DES-15 裁决②）。逐项见 **§9.5**；（v1.6）**P2-4 内存口径统一**——按容器内实测把 CDP 页面内存从单一「150MB+/页」拆为**明示双重口径**（RSS vs PSS），登记**固定基线 250MB(PSS)** 与 `CDP_STOCK_PAGES` **env 驱动**（2C2G 档位 = 4，+2 常驻 = **6 内容页**），逐项见 **§9.6**
 > **硬约束** Python 3 标准库零依赖 · 无前端 · 无外部存储 · 不改技术栈
 > **定位** 优化专项架构（非新建系统）：只做**架构级改造与契约收口**，不新增业务功能、不改路由与 API 签名
 > **端锁定** 🟠 STABLE（仅**新增**下划线保留键与观测字段；`feeds[].status` 属**改既有字段取值**，须编排层批准，见 §7.1 Q2）。**v1.4 新增两项边界（须编排层登记）**：① SSE 帧**只增**元数据（`codes_total`/`fields`/`missing`/`missing_count`/`errors`/`stale`/`stale_count`）属 🟠 STABLE 的"只增"；② **JSON 单体/面板/工具端点业务降级维持 200**（v1.5 N1 裁决关闭）——这不是"状态码变更"，而是**保持旧版本契约**，与 PRD AC-A5 逐格一致；真实 503 仅**连接准入拒绝**（主/流端口）与 **`/healthz` degraded**（健康端点自身语义，**不构成"业务端点可 503"的先例**）（§2.4 / §7.1 N1）
@@ -101,7 +101,7 @@ push_loop()                                          [stream.py:246]  每 L1 tic
 | R17 | `STREAM_PING_INTERVAL=20`、socket 30s、部分窗口写死在代码 | 关键 IO 参数未 env 化 | 实现级 | S7 |
 | R18 | CDP 页面取数无防御访问：`_fill_missing(r, data, ...)` 假定 `data` 为 dict；`handle_finance_timeline` 返回 `.get('timeline')` 可为 `None`（非 error 客体） | **外部数据边界无防御契约**（与 R1 同源） | 架构级（契约） | S1/S4 |
 | R19 | `_cdp_memory_watchdog` 每 7200s **无条件**重启 Chrome（含交易时段）→ 15s 节流 + 45s 启动窗口内 CDP 端点全空，且外部不可观测 | **降级窗口无策略、无可见性** | 架构级（策略+观测） | S10/S4 |
-| R20 | `CDP_STOCK_PAGES` 默认 3 + 2 常驻页，每页 150MB+ | 参数化已具备，缺内存总账联动 | 实现级 | S9 |
+| R20 | `CDP_STOCK_PAGES` 默认 3 + 2 常驻页，每页 150MB+（**RSS 口径**；v1.6 校准：**PSS 口径 ≈60MB/页、固定基线 250MB(PSS)**，见 §4.3 / §9.6） | 参数化已具备，缺内存总账联动 | 实现级 | S9 |
 
 **归类小结**：架构级 15 项（R1/R2/R4/R5/R6/R7/R8/R9/R11/R12/R13/R14/R15/R16/R18/R19 中除 R3/R10/R17/R20 外）、实现级 4 项（R3/R10/R17/R20）。**M7 必做项全部落在架构级**——这决定了 task-decomposer 的拆分方式：先落 §2 的 6 个机制，再落逐 handler 的适配。
 
@@ -799,12 +799,12 @@ MAX_GROUPS=200 **不参与**内存护栏（它界的是每 tick 帧构建次数/
 | 负缓存（URL 级） | 与 URL 键同域（≤2000），4 键 `until`/`kind`/`fail_count`/`first_at` | **门禁过期失效；条目保留作失败历史**（仅"成功"或"满额淘汰最早 `until`"时清除）；`first_at` **不被后续失败刷新**（连续失败段起点，`≥_HISTORY_AGE=600s` 即老化 ⇒ 本次用全预算探测） | 新增（v1.4 补 `first_at`） |
 | 码级冷却账 `_fail_ledger` | `(domain, code)` ≤ `_FAIL_LEDGER_MAX = 5 域 × 2000 = 10000`，条目 **4 元** `[fail_count, cooldown_until, kind, last_fail_ts]`，冷却 120s | 过期即清（**老化扫描限流 `_FAIL_LEDGER_PRUNE_INTERVAL=5s`**）；超硬上界按 `dict` 插入序前端弹出（O(1)，不再全表 `sorted`）；`_COOLDOWN_PUBLISH_INTERVAL=5s` 限流 `code_cooldown_list` 重建 | 新增（P1-5；v1.4 更正条目形状 + 补上界/节流） |
 | 流侧 last-known 结转 `_last_known` | `code → {field: 非空值}`，**每 tick 按存活码池剪枝** ⇒ ≤ `MAX_DEDUP_CODES`（2000） | 码离开存活池即回收；全字段为空则删该码条目；无活跃组时整表清空 | 新增（v1.4，P1-4 帧完整性） |
-| CDP 页面 | `CDP_STOCK_PAGES`(默认3) + 2 常驻 | 固定，不随流量增长 | 不变 |
+| CDP 页面 | `CDP_STOCK_PAGES`（**env 驱动；2C2G 部署档位 = 4**，见 `docker-compose.yml` / `doc/deploy/docker-compose.aliyun-2c2g.yml`）+ 2 常驻 = **6 内容页**（另有 2 个 webui renderer） | 固定，不随流量增长 | 不变（v1.6：基线由"默认 3"更正为 **env 驱动**、页面数更正为 **6 内容页**，见 §9.6） |
 | 后台线程 | 4 prefetch + push + stream + watchdog + warm + init ≈ 9（+CDP 心跳 5） | — | 不变 |
 | **healthz 专用执行器线程** | **5（懒创建）** | 信号量准入失败 → stale 快照 | 新增，计入 AC-S9「基线+20」 |
 | healthz 在飞 check | `MAX_HEALTH_INFLIGHT=5` 批 × <=`len(ROUTES)=5` 源 = **≤25 在飞**；执行器队列 ≤20 | 返回上次快照 + `stale:true`（准入位由 `_HealthBatch` 在该批 future 全部结束后释放，**恰好一次**） | 新增（修 P1-3 / P1-1） |
 | 批处理并发 | `_BATCH_MAX_WORKERS = 8`/请求 | — | 不变 |
-| 进程内存 | AC-S9：≤ 基线×1.5，2C2G 参考 ≤1.2GB | 指标告警 | 新增总账 |
+| 进程内存 | AC-S9：≤ 基线×1.5，2C2G 参考 ≤1.2GB；容器 `mem_limit 1.5g`（**v1.6 内存总账改为 PSS 口径**，Chrome 跨进程求和禁止用 RSS，见下） | 指标告警 | 新增总账 |
 
 **池上限与"跨组活跃码"的自洽（修 P1-1 / P1-N1，替换原"500→200"推导）**：
 ```
@@ -818,7 +818,26 @@ MAX_CODES_PER_SUB=200 只是**单组**上限，MAX_DEDUP_CODES=2000 才是**活�
 ⇒ 数据内存不再由池上限承担：改由终点缓存独立 cache_max（上表）守住。
 ```
 
-**内存分项估算（进程内，2C2G）**：URL 20MB + feed 30MB + L1 端点数据缓存（**3 域** quote/fundflow/timeline × 2000 × ~8KB ≈ 48MB；修 P2-N5，原"4 域≈64MB"失实）+ f10/announcement ≈11MB + sector 0.2MB + **`_last_known` ≤2000 码 × 3 字段（引用同一批 dict/数值对象，≈1MB 保守计，v1.4）** + SSE 队列 ≤128MB + 解释器/栈 ≈30MB ≈ **268MB**；Chrome 独立进程 ≈5 页×150MB ≈ 750MB（见 ADR-012）。合计 ≈1.01GB < 1.2GB 参考线，**余量薄**——故 `STREAM_QUEUE_BYTES_BUDGET=128MB`、**单帧余量准入（⇒ 满配组 ≤8）** 与 `MAX_GROUPS=200` 是必需而非可选。
+**内存分项估算（进程内，2C2G）**：URL 20MB + feed 30MB + L1 端点数据缓存（**3 域** quote/fundflow/timeline × 2000 × ~8KB ≈ 48MB；修 P2-N5，原"4 域≈64MB"失实）+ f10/announcement ≈11MB + sector 0.2MB + **`_last_known` ≤2000 码 × 3 字段（引用同一批 dict/数值对象，≈1MB 保守计，v1.4）** + SSE 队列 ≤128MB + 解释器/栈 ≈30MB ≈ **268MB**（**上界：SSE 队列按满配 128MB 计**；空闲态实测远低于此）。
+
+**Chrome 内存总账（v1.6 统一口径，修 P2-4）**：
+
+> **记账口径（唯一权威表述）**：`Chrome 总内存 ≈ 固定基线 250MB(PSS) + N × 每页`。**跨进程求和必须用 PSS（或 `Pss_Anon`），禁止用 RSS 相加**——每个 chromium 进程都映射约 110–190MB 共享代码页，RSS 在每个进程各记一份，跨进程求和会**虚高约 3.2×**（容器内实测：SUM RSS 2209MiB vs 实际 cgroup 687.5MiB）。**两份文档此前的表面冲突即源于此**：SAD 原「每页 150MB+」是 **RSS 口径**（实测 161–196MB、均值 172，吻合），`doc/deploy/*.yml` 注释的「50-100MB/tab」是 **PSS 份额化口径**（实测 49–83MB、均值 59.5，吻合）——**两者都没写错，冲突的是度量口径**。
+
+| 项 | 口径 | 实测（容器内） | 规划取值 |
+|----|------|---------------|---------|
+| 每页（内容页） | RSS（单进程常驻集） | 161–196MB，均值 **172MB** | — |
+| 每页（内容页） | **PSS（份额化）** | 49–83MB，均值 **59.5MB** | **典型 60MB / 保守 150MB** |
+| 每页 | **`Pss_Anon`（私有匿名）** | 37.5–48.8MB，均值 **43MB** | — |
+| **固定基线**（browser-main + GPU + network + storage + zygote + Omnibox webui renderer） | PSS | ≈ **250MB**（其中 webui renderer ≈ **91MB**——**纯浏览器内部 UI，任何「N×每页」模型都覆盖不到，必须单列**） | **250MB** |
+| 页面配置 | — | `CDP_STOCK_PAGES=4`（compose 默认）+ 2 常驻 = **6 内容页**（另有 2 个 webui renderer） | 同左 |
+
+**按新口径的总账结论（2C2G / `mem_limit 1.5g`）**：
+- **典型（资源满配）**：Chrome = 250 + 6×60 ≈ **610MB**；+ 进程内 268MB（上界）≈ **878MB** ⇒ 对 `1.5g` 余量 ≈0.6GB。
+- **保守规划上界**：Chrome = 250 + 6×150 = **1150MB**；+ 进程内 268MB ≈ **1418MB** ⇒ **贴近 `1.5g`，余量薄**——与 SAD 原结论一致。**（口径说明：保守上界 1418MB 已超过 §4.3 资源上界表的「2C2G 参考 ≤1.2GB」典型参考线，故该参考线只适用于**典型口径**；硬约束以容器 `mem_limit 1.5g` 为准。）**
+- **实测稳态**：容器 `MemUsage 545.5 MiB`（cgroup 原始 **687.5 MiB**；**峰值 769.8 MiB = 51%**）⇒ 对 `1.5g` 实测余量 **≈0.8–1.0GB**，**稳态充足**（实测总量低于"典型规划值"是因为空闲态下缓存/队列未满、无活跃抓取）；但**按保守上界规划余量偏薄**，故 `STREAM_QUEUE_BYTES_BUDGET=128MB`、**单帧余量准入（⇒ 满配组 ≤8）** 与 `MAX_GROUPS=200` 仍是必需而非可选。
+
+**⚠️ 测量局限（如实登记，不得当作活跃态结论）**：上述实测为**空闲/复用态**（容器 CPU ≈1%，池页停在同标的，JS 堆仅 11–13MB）——**活跃抓取时单页会更高**；峰值样本仅覆盖约 **5 分钟**，**未跨 `CDP_RESTART_INTERVAL=7200s` 长周期**；且 **renderer ≠ tab**（webui renderer 是浏览器内部 UI，非订阅内容页，两套命名不可混算）。
 
 ---
 
@@ -910,7 +929,7 @@ MAX_CODES_PER_SUB=200 只是**单组**上限，MAX_DEDUP_CODES=2000 才是**活�
 **选项**：A 盘中照常重启（45s 无数据窗口无法消除，AC-S4 目标需放宽）；B 交易时段跳过、非交易时段照常（内存回收延后到盘后）；C 盘中不重启、仅靠 nav 阈值触发（`_MAX_PAGE_NAV_BEFORE_RECONNECT=30` 已有自愈路径）。
 **决策**：B（PRD §5 #5 倾向项）；同时把窗口状态机（`idle/restarting/unavailable`）暴露到 `/healthz` 并在 metrics 记录窗口时长。
 **理由**：C 依赖导航量，低流量下永不触发（这正是 watchdog 存在的理由，见其 docstring）；B 在"内存回收"与"盘中连续性"之间选后者——短线盘中 45s 无数据是不可接受的产品缺陷，而 7200s 周期内延后到收盘后回收，内存前提（AC-S9 ≤基线×1.5）仍成立（盘后 CDP 心跳降至 60s，负载低）。
-**影响**：`_cdp_memory_watchdog`（**位于 `server.py:881`，非 cdp_engine.py**，修 P2-2）增加 `_is_trading_hours()` 判断（顺延，不累积）；cdp_engine 只保留窗口状态机与页面数联动；页面数仍由 `CDP_STOCK_PAGES` 控制（默认 3，与内存总账联动）。**AC**：S4/S9/S10/R19/R20。
+**影响**：`_cdp_memory_watchdog`（**位于 `server.py:881`，非 cdp_engine.py**，修 P2-2）增加 `_is_trading_hours()` 判断（顺延，不累积）；cdp_engine 只保留窗口状态机与页面数联动；页面数仍由 `CDP_STOCK_PAGES` 控制（**env 驱动；2C2G 档位 = 4，+2 常驻 = 6 内容页**，与内存总账联动；v1.6 统一为 PSS 口径，见 §4.3 / §9.6）。**AC**：S4/S9/S10/R19/R20。
 
 ### ADR-013 SSE 队列字节计费：distinct 帧 × 深度（低可逆，修 P0-1）
 **背景**：P0-1——§2.2「每次入队累加 `len(frame)`」与 §4.2「同组共享同一引用」互斥；按前者计费，100 连接 × 14MB = 计 1.4GB，预算按构造必超、每 tick 无条件丢帧，AC-E5/A2 落空；而 `MAX_GROUPS` 界不住跨组帧内存，此预算是唯一护栏。
@@ -1023,7 +1042,7 @@ MAX_CODES_PER_SUB=200 只是**单组**上限，MAX_DEDUP_CODES=2000 才是**活�
 | AR-2 | 命中率 ≥90% 仅为 SAD 设计目标，PRD 未列为验收项 | 中 | 纳入 `/healthz` `cache_hit_ratio` 观测项（**非 AC**）；P6c 作为主指标之一；<84% 时走 PRD 修订 |
 | AR-3 | 负缓存半开探测的"恢复感知延迟"与探测误判 | 中 | ADR-003 论证：`NEG_TTL=5s`（守 PRD ≤5s）、探测预算 `_probe_budget` **阶梯 2→4→5 封顶**（**v1.5：`_PROBE_BUDGET_CAP=5.0`**；v1.4 起不再是恒定 2s）+ `_HISTORY_AGE=600s` 老化；`negative_cache_size`/`fail_count` 可观测；`NEG_TTL`/`PROBE_TIMEOUT` env 可调（`_HISTORY_AGE` / `_PROBE_BUDGET_CAP` 不可，见 AR-13） |
 | AR-4 | `_run_batch` 返回值改 `(results, errors)` 是**内部签名破坏性变更** | 中 | 全仓 grep 调用点 + 存量用例回归；errors 缺失时组装点容忍空 dict。**v1.4 边界澄清**：该二元组只存在于**管道层内部**，对外的 handler 签名与响应形状未变（§2.4 职责边界） |
-| AR-5 | Chrome ≈750MB + 进程内 ≈268MB 在 2C2G 上余量薄 | 中 | `MAX_GROUPS`(CPU) / 队列字节预算(内存) / CDP 页面数三者联动；`cache_max` 独立 LRU；AC-S9 24h 采样 |
+| AR-5 | Chrome 按 **PSS 口径**：典型 `250+6×60≈`**610MB** / 保守 `250+6×150=`**1150MB**（+ 进程内 ≈268MB 上界）在 2C2G 上**保守规划余量薄**（v1.6 统一口径 / P2-4，见 §4.3） | 中 | `MAX_GROUPS`(CPU) / 队列字节预算(内存) / CDP 页面数三者联动；`cache_max` 独立 LRU；AC-S9 24h 采样 |
 | AR-6 | **TTL / prefetch 间隔收紧导致上游请求量上升**（修 P2-N3 + P3b 评审校正**幻影数据**）：① feed 300s→30s（盘中）⇒ 5 源请求量 ×10；② prefetch 有效间隔（现状代码 = `max(常量, tier 基值)`）→ 目标（`cache_policy(d)['pool_refresh']`），逐域：**fundflow `max(25, L1=8)=25`→8（×3.1）、timeline `max(30,8)=30`→8（×3.8）、announcement `max(60, L4=300)=300`→30（**×10**，且 tier **L4→L3**）、f10 `max(60, L4=300)=300`→300（**无变化**）**；**`basic_info 120→8（×15）` 为幻影，已删除**——无 basic_info prefetch loop，`_BASIC_INFO_POOL_REFRESH` 是**死常量**（无任何 import/引用，随常量删除） | 中 | 上游为行情/新闻站，量级可承受；URL 缓存同域 L3 限流；负缓存挡故障期；**新增每域 fetch 计数 `upstream_fetch_total{domain}` 入 metrics**（Q3⑤），P6c 以该计数核对"上游负载增幅 ≤ 可接受阈值"。**v1.4 方向的抵消项**：§2.2 R-6 改为**按订阅字段刷新**（ADR-015）后，SSE 侧的上游成本只与"实际被订阅的域"成正比——quote-only 组从 3×降到 1×，故上表的 ×3.1/×3.8 只对**三域全订**的组成立；单域组反而**下降**。P6c 应按 `upstream_fetch_total{domain}` 的**实测**分摊核对，不要用"订阅组数 × 3 域"外推 |
 | AR-7 | `stream._refresh_pool` 若漏过滤 `_` 前缀键，会把 `_errors` 当股票塞进帧 | 中 | 列为详设必测项（契约陷阱点）；`_refresh_pool` 加单测断言 |
 | AR-8 | 池上限升到 `MAX_DEDUP_CODES=2000` + `cache_max` 独立后，端点数据缓存内存需实测 | 中 | `cache_max` 独立 LRU + `cache_entries` 指标；§4.3 估算 ≈268MB（L1 为 3 域 + `_last_known`）；AC-S9 采样 |
@@ -1110,7 +1129,7 @@ MAX_CODES_PER_SUB=200 只是**单组**上限，MAX_DEDUP_CODES=2000 才是**活�
 | S6 | ✅ | §2.3 D-6 码级冷却 120s（**4 元条目**），批量与 prefetch 共用（P1-5 已修）；**v1.4：仅"真实上游失败"入账——本地预算耗尽（`_LOCAL_BUDGET`）不计（ADR-014 v1.4 反转）** |
 | S7 | ✅ | §2.3 D-3 超时矩阵（31s→5s；**v1.4 补阶梯探测、follower 等待余量、端到端 `deadline`**） |
 | S8 | ✅ | §2.6 专用执行器 + **有界准入**（stale 可达可测，P1-3 已修）+ **`_HealthBatch` 准入位恰好释放一次、在飞 ≤25**（v1.4） |
-| S9 | ✅ | §4.3 资源上界表 + 进程内存 ≈268MB（L1=3 域 + `_last_known`，修 P2-N5/v1.4） |
+| S9 | ✅ | §4.3 资源上界表 + 进程内存 ≈268MB（L1=3 域 + `_last_known`，修 P2-N5/v1.4）；**v1.6 内存总账统一为 PSS 口径**（Chrome = 基线 250MB + `N×60`（典型）/ `N×150`（保守）MB，N=6 内容页；**RSS 禁止跨进程求和**，§9.6） |
 | S10 | ✅ | §2.6 计分板（**冷却清单**可枚举、healthz 精确 schema，P2-6 已补）；**v1.4 补：`http_503_total` 计数点、`snapshot()` 零值恒定发布、`code_cooldown_list` 发布节流；v1.5 该计数点由四收敛为三** |
 | S11 | ✅ | **不改动 + 断言依据**（§3.1）：`_register_conn` 重连 + `push_loop` 下一 tick 全量快照 + `STREAM_GROUP_IDLE_TTL=300s` |
 
@@ -1120,7 +1139,7 @@ MAX_CODES_PER_SUB=200 只是**单组**上限，MAX_DEDUP_CODES=2000 才是**活�
 
 ## 9. 修订摘要
 
-> ⚠️ **§9.1-§9.3 是历史修订记录**（分别落地 REV-ARCH / 二轮复审 / P3b 详设评审的 SAD 侧动作），其中若干**数字口径已被后续实测或裁决推翻**（最典型：`coverage≈170` / `coverage_codes≈56` / "恒定 2s 探测" / "探测阶梯升到 10s" / "降级 503" / "`_LOCAL_BUDGET` 反转未确认"）。**§9.4（v1.4，P7b 契约同步）与 §9.5（v1.5，裁决落地收尾同步）是最新且唯一的现行口径**；两者冲突时以 **§9.5 为准**（§9.5 覆盖 §9.4 的三处表述：§2.4 降级状态码、§2.3 探测阶梯封顶、ADR-014 反转的"已确认"状态）。
+> ⚠️ **§9.1-§9.3 是历史修订记录**（分别落地 REV-ARCH / 二轮复审 / P3b 详设评审的 SAD 侧动作），其中若干**数字口径已被后续实测或裁决推翻**（最典型：`coverage≈170` / `coverage_codes≈56` / "恒定 2s 探测" / "探测阶梯升到 10s" / "降级 503" / "`_LOCAL_BUDGET` 反转未确认"）。**§9.4（v1.4，P7b 契约同步）、§9.5（v1.5，裁决落地收尾同步）与 §9.6（v1.6，P2-4 内存口径统一）是最新且唯一的现行口径**；三者冲突时以**编号最大者为准**（§9.5 覆盖 §9.4 的三处表述：§2.4 降级状态码、§2.3 探测阶梯封顶、ADR-014 反转的"已确认"状态；§9.6 覆盖 §4.3 / R20 / ADR-012 / AR-5 / S9 的**内存口径**）。
 
 ### 9.1 v1.1（依据 REV-ARCH-20260915-001）
 
@@ -1328,5 +1347,48 @@ AR-6 校正后（供 P6c 校准）：`fundflow max(25,8)=25→8（×3.1）` · `
 
 ---
 
-*SAD v1.5 完 · 供 review-expert 复审（复核 §9.5 裁决落地收尾同步的准确性，尤以 §2.4 降级状态码恒 200、§2.3 D-1 探测阶梯封顶 5s 与 AR-12 关闭为重点）与 task-decomposer 承接（`stream.md` / `server.md` / `cache.md` 的 P7b 侧已各自同步；`API.md` 待同步 `/stock/basic_info` CDP 标注）*
+### 9.6 v1.6（P2-4 内存口径统一：以容器内实测统一 CDP 页面内存记账）
+
+> **性质**：本轮**不是设计轮**，也**未改任何机制**。只解决 **P2-4**（代码审查 `doc/review/最新代码审查_r1.md`）：SAD `R20`/`§4.3` 的「每页 150MB+」与 `doc/deploy/*.yml` 注释的「50-100MB/tab」表面冲突。**结论：两份文档都没写错，冲突的是度量口径**。范围严格限定为 `doc/arch/SAD.md` + `doc/arch/tech-stack.json` 版本号/规则条目；**未改 `doc/deploy/*.yml`（无写权限，编排层另行处理）、未改代码、未改详设/PRD**。
+
+**一、口径统一的实测依据（容器内实测）**
+
+| 口径 | 每页实测 | 与哪份文档吻合 |
+|------|---------|---------------|
+| **RSS**（单进程常驻集） | 161–196MB（均值 **172**） | SAD 原「150MB+」 ✓ |
+| **PSS**（份额化后） | 49–83MB（均值 **59.5**） | `doc/deploy/*.yml`「50-100MB/tab」 ✓ |
+| **`Pss_Anon`**（私有匿名） | 37.5–48.8MB（均值 **43**） | — |
+
+- **差异根源**：每个 chromium 进程都映射约 110–190MB 共享代码页，RSS 在每个进程各记一份 ⇒ **跨进程求和用 RSS 会虚高约 3.2×**（实测 SUM RSS 2209MiB vs 容器实际 cgroup 687.5MiB）。
+- **固定基线 ≈250MB（PSS）**：browser-main + GPU + network + storage + zygote + 约 **91MB 的 Omnibox webui 渲染进程**（纯浏览器内部 UI，任何「N×每页」模型都覆盖不到）。
+- **容器实测**：`MemUsage 545.5 MiB / 1.5 GiB`；cgroup 原始 **687.5 MiB**；**峰值 769.8 MiB（51%）**。
+- **页面配置**：`CDP_STOCK_PAGES=4`（compose 默认）+ 2 常驻 = **6 个内容页**（另有 2 个 webui renderer）。
+
+**二、新口径表述（唯一权威，落在 §4.3）**
+
+> `Chrome 总内存 ≈ 250MB(PSS) 基线 + N × 每页`；**典型** `250 + N×60MB`、**保守规划** `250 + N×150MB`；**跨进程求和必须用 PSS/`Pss_Anon`，禁止用 RSS**（虚高 ~3.2×）。
+
+**三、SAD 落点**
+
+| 落点 | 改动 |
+|------|------|
+| **§4.3 内存总账** | 新增「Chrome 内存总账（v1.6 统一口径）」段：记账口径 + 实测表 + 基线 250MB + 典型/保守公式 + **RSS≠PSS** 声明 + 测量局限 |
+| **§4.3 资源上界表** | `CDP 页面` 行：`CDP_STOCK_PAGES`(默认3) → **env 驱动；2C2G 部署档位 = 4**（+2 常驻 = **6 内容页**）；`进程内存` 行补口径注 |
+| **§1.2 R20** | 「每页 150MB+」标注为 **RSS 口径**，并指向 §4.3 的 PSS 校准 |
+| **ADR-012 影响** | 页面数默认口径 `3` → **env 驱动（2C2G=4，6 内容页）** |
+| **§7.2 AR-5 / §8 S9** | 同步新口径（Chrome 典型 **610MB** / 保守 **1150MB**；进程内 268MB 为上界） |
+
+**四、判定（对 `mem_limit 1.5g`）**：**实测稳态余量充足（≈0.8–1.0GB）**，但**按保守上界（Chrome 1150MB + 进程内 268MB ≈ 1418MB）规划余量偏薄**——**与 SAD 原「余量薄」结论一致**（保守上界超过「2C2G 参考 ≤1.2GB」的典型参考线，该线仅适用**典型口径**，硬约束以 `mem_limit 1.5g` 为准），不改变任何既有内存护栏（`STREAM_QUEUE_BYTES_BUDGET` / 单帧余量准入 / `MAX_GROUPS`）的必要性。
+
+**五、测量局限（如实登记）**：① 实测为**空闲/复用态**（容器 CPU ≈1%，池页停在同标的，JS 堆仅 11–13MB），**活跃抓取时单页会更高**；② 峰值样本仅覆盖约 **5 分钟**，**未跨 `CDP_RESTART_INTERVAL=7200s` 长周期**；③ **renderer ≠ tab**（webui renderer 为浏览器内部 UI，与订阅内容页两套命名不可混算）。**「保守规划余量薄」的结论在活跃态只会更保守成立。**
+
+**六、tech-stack.json 动作**：`version: 1.5 → 1.6`；`infrastructure.deployment` 与 `backend.cdp` 补**内存记账口径注**（PSS/RSS + 页面数 env 驱动），供 code-developer / `check-arch-compliance.sh` 对齐。`allowlist`/`layerIsolation`/`fileStructure`/`namingRules`/`importRestrictions` 均不变。
+
+**七、本轮遗留（交编排层）**：**`doc/deploy/*.yml` 注释**建议补一行口径说明（「50-100MB/tab 为 **PSS 份额化**口径；RSS 口径见 SAD §4.3」），以消除跨文档表面冲突——**本 agent 无该目录写权限，由编排层处理**。
+
+**本轮版本**：SAD v1.5 → **v1.6**；`doc/arch/tech-stack.json` 同步 `version: 1.6`。**约束保持**：Python 3 标准库零依赖、`layerIsolation`、文件结构（扁平包 + 唯一新增 `metrics.py`）均未放宽。**未改代码、未改详设、未改 PRD、未改 `doc/deploy/*.yml`。**
+
+---
+
+*SAD v1.6 完 · 供 review-expert 复审（复核 §9.6 内存口径统一的准确性，尤以 §4.3 的 **PSS/RSS 双口径**、固定基线 250MB、`CDP_STOCK_PAGES` env 驱动 / 6 内容页为重点）与 task-decomposer 承接（`stream.md` / `server.md` / `cache.md` 的 P7b 侧已各自同步；`API.md` 待同步 `/stock/basic_info` CDP 标注）*
 
