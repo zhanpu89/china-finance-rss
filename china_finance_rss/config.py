@@ -37,6 +37,38 @@ LISTEN_BACKLOG = int(os.getenv('LISTEN_BACKLOG', '128'))
 NEG_TTL = int(os.getenv('NEG_TTL', '5'))
 PROBE_TIMEOUT = int(os.getenv('PROBE_TIMEOUT', '2'))
 
+# Upstream HTTP transport (cache.fetch_json — the sole HTTP egress).  A
+# kept-alive connection removes the per-request TCP+TLS handshake and the DNS
+# lookup (measured 340ms/request → 48ms reused on the 2C2G node).  These bound
+# the per-host pool, evict idle sockets, and cache name→address lookups.
+# HTTP_POOL_MAX_PER_HOST is per (scheme, host, port); excess concurrent
+# requests use short-lived connections rather than blocking.
+HTTP_POOL_MAX_PER_HOST = int(os.getenv('HTTP_POOL_MAX_PER_HOST', '16'))
+HTTP_POOL_IDLE_TTL = float(os.getenv('HTTP_POOL_IDLE_TTL', '60'))
+HTTP_DNS_CACHE_TTL = float(os.getenv('HTTP_DNS_CACHE_TTL', '300'))
+
+# SSE refresh capacity model — the two calibration inputs behind
+# `stream.refresh_capacity` (BR-STR-16).  Registered here (config.md §1.1 env
+# 注册中心) so the model can be retuned per deployment without a code change;
+# `stock_api`/`stream` read them once at import and keep their module-level
+# names (`BATCH_MAX_WORKERS` / `_PER_FETCH_EST`) unchanged.
+#
+# BATCH_MAX_WORKERS: bounded parallelism of one batch phase — both
+# `stock_api._run_batch` and the per-field phase in `stream._refresh_pool`.
+# 16 is aligned with HTTP_POOL_MAX_PER_HOST: a wider fan-out would only queue
+# on the per-host pool.  The upstream tolerated 48 concurrent in the r5
+# measurement (no throttling observed).
+BATCH_MAX_WORKERS = int(os.getenv('BATCH_MAX_WORKERS', '16'))
+# STREAM_PER_FETCH_EST: serial-equivalent seconds one upstream REST call
+# occupies one batch worker.  Recalibrated (r5) to the pool-warmed path:
+# `cache.fetch_json` keep-alive pooling + cached DNS took single-request
+# latency to 139 ms p50 / 167 ms max (from 340 ms), so 0.3 leaves ≈2.2×
+# headroom for concurrency queueing, upstream jitter and a cold first call.
+# The previous 2.2 priced the pre-pooling cold path and over-estimated the
+# per-call cost ≈16×, capping SSE coverage so 50 codes could not refresh
+# within one 8 s tick.
+STREAM_PER_FETCH_EST = float(os.getenv('STREAM_PER_FETCH_EST', '0.3'))
+
 # Stream push (SSE) limits — 2C2G budget: 100 conns, 2000 dedup codes
 MAX_STREAM_CONNS = int(os.getenv('MAX_STREAM_CONNS', '100'))
 MAX_CODES_PER_SUB = int(os.getenv('MAX_CODES_PER_SUB', '200'))

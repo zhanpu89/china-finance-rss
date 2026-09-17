@@ -233,7 +233,8 @@ class FieldAndFrameTests(unittest.TestCase):
     def test_build_frame_covers_every_subscribed_code(self):
         """S2-1: a true full snapshot — absent codes appear with null fields and
         are listed in `missing`, never silently omitted (the old frame dropped
-        them entirely, so a C2 tick looked complete while covering ~7/200)."""
+        them entirely, so a C2 tick looked complete while covering only the
+        sharded slice)."""
         from china_finance_rss.stream import SubscriptionGroup
         _groups.clear()
         g = SubscriptionGroup('sid_x', {'sh600519', 'sz000001'}, ['quote'])
@@ -354,7 +355,8 @@ class HttpIntegrationTests(unittest.TestCase):
 
     def test_create_reports_refresh_capacity_when_oversubscribed(self):
         """P1-4: a legal 200-code × 3-field subscription must carry a capacity
-        signal in the 201 response (coverage_codes=7 ⇒ lag≈29 ticks)."""
+        signal in the 201 response (coverage_codes=113 ⇒ lag≈2 ticks, r5
+        warm-path recalibration)."""
         codes = [f'sh{600000 + i:06d}' for i in range(config.MAX_CODES_PER_SUB)]
         with patch.object(stream_mod, 'tick_interval', return_value=8):
             status, payload = self._http(
@@ -363,8 +365,8 @@ class HttpIntegrationTests(unittest.TestCase):
                             'fields': ['quote', 'fundflow', 'timeline']}))
         self.assertEqual(status, 201)
         data = json.loads(payload)
-        self.assertEqual(data['refresh_capacity_codes'], 7)
-        self.assertEqual(data['refresh_lag_ticks'], -(-200 // 7))
+        self.assertEqual(data['refresh_capacity_codes'], 113)
+        self.assertEqual(data['refresh_lag_ticks'], -(-200 // 113))
         self.assertIn('capacity_warning', data)
 
     def test_create_reports_capacity_without_warning_when_it_fits(self):
@@ -374,7 +376,7 @@ class HttpIntegrationTests(unittest.TestCase):
                 '{"codes":["sh600519"],"fields":["quote"]}')
         self.assertEqual(status, 201)
         data = json.loads(payload)
-        self.assertEqual(data['refresh_capacity_codes'], 23)     # 1 field
+        self.assertEqual(data['refresh_capacity_codes'], 341)    # 1 field
         self.assertNotIn('capacity_warning', data)
 
     def test_sse_stream_receives_quote_frame(self):
@@ -852,16 +854,18 @@ class ReserveSkipTests(unittest.TestCase):
 class ShardingTests(unittest.TestCase):
     """BR-STR-16..22: whole-pool refresh vs sharded round-robin + cache fill.
 
-    Thresholds come from the P6C-06 recalibration: per-code cost = 3 upstream
-    calls (one per field, all steady-state domains are 1 call/code), per-call
-    2.2 s ⇒ tick=8 gives coverage=23 fetch-calls ⇒ coverage_codes=7 codes.
+    Thresholds come from the r5 warm-path recalibration: per-code cost = 3
+    upstream calls (one per field, all steady-state domains are 1 call/code),
+    per-worker-call 0.3 s at BATCH_MAX_WORKERS=16 ⇒ tick=8 gives coverage=341
+    fetch-calls ⇒ coverage_codes=113 codes.
     These tests drive `_refresh_pool` with no live group, i.e. the all-fields
     fallback (`_resolve_refresh_fields(None)`); a one-domain subscription gets
-    coverage_codes=23 instead — see SubscribedFieldRefreshTests.
+    coverage_codes=341 instead — see SubscribedFieldRefreshTests.
     """
 
-    # coverage=23, coverage_codes=23//3=7 (tick=8, BATCH_MAX_WORKERS=8)
-    COVERAGE_CODES = 7
+    # coverage=341, coverage_codes=341//3=113 (tick=8, BATCH_MAX_WORKERS=16,
+    # _PER_FETCH_EST=0.3)
+    COVERAGE_CODES = 113
 
     def setUp(self):
         _groups.clear()
@@ -906,11 +910,11 @@ class ShardingTests(unittest.TestCase):
     def test_c1_boundary_is_the_calibrated_threshold(self):
         """C1 holds up to coverage_codes codes; one code more shards (P6C-06).
 
-        Regression: the old `3n <= 170` (per-fetch 0.3, field-agnostic) pushed
-        the boundary to 56 codes ⇒ a ≈29 s full refresh was accepted as one
-        tick's work; the interim `4n <= 51` (per-fetch 1.0, quote priced at 2
-        calls) still accepted ≈14 s.  `3n <= 23` at 2.2 s/call keeps the whole
-        refresh ≤ 0.8 × tick.
+        Regression: the cold-path calibration `3n <= 23` (per-fetch 2.2 s) kept
+        the whole refresh ≤ 0.8 × tick but only for ≤7 codes — it could not meet
+        the 50-code × 8 s target.  The r5 warm-path model `3n <= 341` at
+        0.3 s/call and 16 workers keeps the whole refresh ≤ 0.8 × tick and puts
+        113 codes on the C1 branch.
         """
         handlers = {f: (lambda cs, deadline=None: {c: {'v': 1} for c in cs})
                     for f in ('quote', 'fundflow', 'timeline')}
@@ -1002,11 +1006,11 @@ class ShardingTests(unittest.TestCase):
                     cache_ts.clear()
                     cache_ts.update(ts_snapshot)
 
-        # coverage=23 ⇒ |slice|=7; the expired rest contributes nothing
+        # coverage=341 ⇒ |slice|=113; the expired rest contributes nothing
         self.assertEqual(max(seen['slice_size']), self.COVERAGE_CODES)
         self.assertEqual(len(snap), self.COVERAGE_CODES)     # was 300 = 假绿
         self.assertEqual(stream_mod.metrics.snapshot()['stream_refresh_lag_ticks'],
-                         -(-300 // self.COVERAGE_CODES))   # ceil(300/7) == 43
+                         -(-300 // self.COVERAGE_CODES))   # ceil(300/113) == 3
 
         # …but the frame still covers the whole subscription and marks the rest
         frame = _build_frame(snap, frozenset(codes), fields)
@@ -1021,10 +1025,11 @@ class ShardingTests(unittest.TestCase):
 
 
 class RefreshCapacityCalibrationTests(unittest.TestCase):
-    """BUG-P6C-01/P6C-06: the capacity model must price the *real* upstream cost
-    (2.2 s per worker-call, one call/code/domain in steady state) so one tick's
-    work fits the 0.8×tick budget at any group size — spill-over is sharded,
-    never硬刷.  The target load (<20 codes, one domain) must land in C1."""
+    """BUG-P6C-01/06 + r5: the capacity model must price the *real* upstream
+    cost (0.3 s per worker-call on the pool-warmed path, one call/code/domain
+    in steady state) so one tick's work fits the 0.8×tick budget at any group
+    size — spill-over is sharded, never硬刷.  The 8 s hard target (50 codes ×
+    1 or 3 domains) must land in C1."""
 
     def test_coverage_uses_field_aware_call_counts(self):
         with patch.dict(stream_mod._FIELD_HANDLERS,
@@ -1043,24 +1048,25 @@ class RefreshCapacityCalibrationTests(unittest.TestCase):
 
     def test_calibrated_coverage_numbers(self):
         coverage, coverage_codes = refresh_capacity(8)
-        self.assertEqual(coverage, 23)          # int(0.8 × 8 × 8 / 2.2)
-        self.assertEqual(coverage_codes, 7)     # 23 // 3 (all fields)
+        self.assertEqual(coverage, 341)         # int(0.8 × 8 × 16 / 0.3)
+        self.assertEqual(coverage_codes, 113)   # 341 // 3 (all fields)
         coverage, coverage_codes = refresh_capacity(120)   # off-hours L1
-        self.assertEqual(coverage, 349)         # int(0.8 × 120 × 8 / 2.2)
-        self.assertEqual(coverage_codes, 116)   # 349 // 3
+        self.assertEqual(coverage, 5120)        # int(0.8 × 120 × 16 / 0.3)
+        self.assertEqual(coverage_codes, 1706)  # 5120 // 3
 
     def test_single_domain_subscription_covers_the_target_load(self):
-        """<20 codes × one domain: whole-pool refresh inside 0.8 × tick."""
+        """50 codes × one domain: whole-pool refresh inside 0.8 × tick."""
         tick = 8
         coverage, coverage_codes = refresh_capacity(tick, ['quote'])
-        self.assertEqual(coverage, 23)
-        self.assertEqual(coverage_codes, 23)    # 1 call/code ⇒ 23 codes
-        self.assertGreaterEqual(coverage_codes, 20)
-        modelled = 20 * stream_mod._PER_FETCH_EST / stream_mod.BATCH_MAX_WORKERS
+        self.assertEqual(coverage, 341)
+        self.assertEqual(coverage_codes, 341)   # 1 call/code ⇒ 341 codes
+        self.assertGreaterEqual(coverage_codes, 50)
+        modelled = 50 * stream_mod._PER_FETCH_EST / stream_mod.BATCH_MAX_WORKERS
         self.assertLessEqual(modelled, stream_mod._TICK_BUDGET_FRACTION * tick)
 
     def test_single_tick_work_fits_the_budget(self):
-        """Both the model and the deployment measurement fit 0.8 × tick."""
+        """Both the model and the warm-path measurement fit 0.8 × tick, and the
+        50-code × 3-field target lands in C1 (whole-pool refresh)."""
         tick = 8
         coverage, coverage_codes = refresh_capacity(tick)
         budget = stream_mod._TICK_BUDGET_FRACTION * tick
@@ -1069,11 +1075,13 @@ class RefreshCapacityCalibrationTests(unittest.TestCase):
         modelled = fetches * coverage_codes * stream_mod._PER_FETCH_EST \
             / stream_mod.BATCH_MAX_WORKERS
         self.assertLessEqual(modelled, budget)
-        # measured: 20 codes × 3 fields cold = 10.5 s ⇒ ≈0.5 s/code
-        measured_per_code = 10.5 / 20
-        self.assertLessEqual(measured_per_code * coverage_codes, budget)
-        # the old field-agnostic 0.3 accepted 56 codes (~29 s measured)
-        self.assertLessEqual(coverage_codes, 16)
+        # measured (r5 warm path): 139 ms per call, 3 fields/code, 16-wide
+        measured_per_call = 0.139
+        measured = fetches * coverage_codes * measured_per_call \
+            / stream_mod.BATCH_MAX_WORKERS
+        self.assertLessEqual(measured, budget)
+        # the 8 s hard target: 50 codes × 3 fields must fit one C1 refresh
+        self.assertGreaterEqual(coverage_codes, 50)
 
 
 class SubscribedFieldRefreshTests(unittest.TestCase):
@@ -1169,9 +1177,10 @@ class SubscribedFieldRefreshTests(unittest.TestCase):
         with patch.dict(stream_mod._FIELD_HANDLERS,
                         {f: (lambda cs: {})
                          for f in ('quote', 'fundflow', 'timeline')}, clear=True):
-            self.assertEqual(refresh_capacity(8, ['quote']), (23, 23))
-            self.assertEqual(refresh_capacity(8, ['quote', 'fundflow']), (23, 11))
-            self.assertEqual(refresh_capacity(8), (23, 7))    # all 3 fields
+            self.assertEqual(refresh_capacity(8, ['quote']), (341, 341))
+            self.assertEqual(refresh_capacity(8, ['quote', 'fundflow']),
+                             (341, 170))
+            self.assertEqual(refresh_capacity(8), (341, 113))  # all 3 fields
 
 
 class RefreshLagGaugeTests(unittest.TestCase):
@@ -1220,15 +1229,18 @@ class RefreshLagGaugeTests(unittest.TestCase):
         `_refresh_pool([])`, bypassing it and staying green while the deployed
         gauge never reset).
         """
-        codes = [f'sh{600000 + i:06d}' for i in range(30)]   # 30 > 23 ⇒ C2
-        sid, _ = create_group(codes, ['quote'])
+        # 200 codes × 3 fields: 3 × 200 = 600 > coverage=341 ⇒ C2
+        # (a quote-only group can no longer shard: 341 > MAX_CODES_PER_SUB=200)
+        codes = [f'sh{600000 + i:06d}'
+                 for i in range(config.MAX_CODES_PER_SUB)]
+        sid, _ = create_group(codes, ['quote', 'fundflow', 'timeline'])
         self._attach(sid)
 
         with patch.dict(stream_mod._FIELD_HANDLERS, self._handlers()), \
              patch.object(stream_mod, 'cached_batch', return_value={}), \
              patch.object(stream_mod, 'tick_interval', return_value=8):
             stream_mod._push_once(t0=time.time())
-            self.assertEqual(self._lag(), 2)        # ceil(30/23): real backlog
+            self.assertEqual(self._lag(), 2)        # ceil(200/113): real backlog
 
             # the pool empties (tester's DELETE of the last subscription)
             self.assertTrue(destroy_group(sid))
@@ -1258,12 +1270,12 @@ class RefreshLagGaugeTests(unittest.TestCase):
         self.assertEqual(self._lag(), 0)
 
     def test_sharded_refresh_reports_ceil_backlog(self):
-        codes = [f'sh{600000 + i:06d}' for i in range(30)]
+        codes = [f'sh{600000 + i:06d}' for i in range(300)]   # > 113 ⇒ C2
         with patch.dict(stream_mod._FIELD_HANDLERS, self._handlers()), \
              patch.object(stream_mod, 'cached_batch', return_value={}), \
              patch.object(stream_mod, 'tick_interval', return_value=8):
             _refresh_pool(codes)
-        self.assertEqual(self._lag(), -(-30 // 7))       # ceil(30/7) == 5
+        self.assertEqual(self._lag(), -(-300 // 113))    # ceil(300/113) == 3
 
 
 class _LoopStop(BaseException):
@@ -1732,7 +1744,7 @@ class CursorRotationTests(unittest.TestCase):
     ceil(n/|slice|) ticks, and they wrap exactly after a full cycle."""
 
     N = 200
-    STEP = 7             # coverage_codes for tick=8: int(0.8*8*8/2.2)//3
+    STEP = 113           # coverage_codes for tick=8: int(0.8*8*16/0.3)//3
 
     def setUp(self):
         _groups.clear()
@@ -1756,7 +1768,7 @@ class CursorRotationTests(unittest.TestCase):
 
         handlers = {f: (lambda cs, deadline=None: {c: {'v': 1} for c in cs})
                     for f in ('quote', 'fundflow', 'timeline')}
-        cycle = self.N // _gcd(self.STEP, self.N)   # 200/gcd(7,200) = 200
+        cycle = self.N // _gcd(self.STEP, self.N)   # 200/gcd(113,200) = 200
         ticks = cycle + 1                           # full cycle, plus 1 to wrap
         with patch.dict(stream_mod._FIELD_HANDLERS, handlers), \
              patch.object(stream_mod, 'cached_batch', return_value={}), \
@@ -1771,7 +1783,7 @@ class CursorRotationTests(unittest.TestCase):
             self.assertEqual(sl, self._rotated((i * self.STEP) % self.N))
         # a full cycle wraps exactly: the next tick repeats the 1st slice
         self.assertEqual(captured[cycle], captured[0])
-        # ceil(200/7) = 29 ticks hand out every code at least once
+        # ceil(200/113) = 2 ticks hand out every code at least once
         covered = set()
         for sl in captured[:_n_ceil(self.N, self.STEP)]:
             covered.update(sl)
@@ -1908,15 +1920,18 @@ class LastKnownCarryForwardTests(unittest.TestCase):
         self.assertEqual(data['items']['sz000001']['quote'], {'name': 'y'})
 
     def test_scheduled_tick_carries_last_known_across_c2_ticks(self):
-        codes = [f'sh{600000 + i:06d}' for i in range(30)]   # > 23 ⇒ C2
-        sid, _ = create_group(codes, ['quote'])
+        # 200 codes × 3 fields: 600 > coverage=341 ⇒ C2 rotation (113/tick)
+        fields = ('quote', 'fundflow', 'timeline')
+        codes = [f'sh{600000 + i:06d}'
+                 for i in range(config.MAX_CODES_PER_SUB)]
+        sid, _ = create_group(codes, list(fields))
         g = get_group(sid)
         with g.conns_lock:
             g.conns.add(_SSEConn())
 
         snaps = []
-        handlers = {'quote': (lambda cs, deadline=None:
-                              {c: {'v': 1} for c in cs})}
+        handlers = {f: (lambda cs, deadline=None:
+                        {c: {'v': 1} for c in cs}) for f in fields}
         with patch.dict(stream_mod._FIELD_HANDLERS, handlers), \
              patch.object(stream_mod, 'cached_batch', return_value={}), \
              patch.object(stream_mod, '_broadcast',
@@ -1925,9 +1940,9 @@ class LastKnownCarryForwardTests(unittest.TestCase):
             stream_mod._push_once(t0=time.time())
             stream_mod._push_once(t0=time.time())
 
-        f1 = json.loads(_build_frame(snaps[0], frozenset(codes), ('quote',)))
-        f2 = json.loads(_build_frame(snaps[1], frozenset(codes), ('quote',)))
-        self.assertEqual(f1['missing_count'], 30 - 23)       # coverage_codes=23
+        f1 = json.loads(_build_frame(snaps[0], frozenset(codes), fields))
+        f2 = json.loads(_build_frame(snaps[1], frozenset(codes), fields))
+        self.assertEqual(f1['missing_count'], 200 - 113)     # coverage_codes=113
         self.assertLess(f2['missing_count'], f1['missing_count'])
         self.assertGreater(f2['stale_count'], 0)
         # a code missing on tick 1 is refreshed on tick 2; one missing on tick 2

@@ -46,8 +46,11 @@ services:
     mem_limit: 3g                     # 8GB 总内存，给 OS 留 2GB（文件页缓存 + CDP 子进程）
     mem_reservation: 256M
     dns:
-      - 8.8.8.8
+      # 国内解析器优先：223.5.5.5 实测 14ms；原首选 8.8.8.8 为 170ms 且
+      # 5.5% 概率触发 ~4s 重试（保留为最后兜底，勿置首）。
       - 223.5.5.5
+      - 223.6.6.6
+      - 8.8.8.8
     logging:
       driver: json-file
       options:

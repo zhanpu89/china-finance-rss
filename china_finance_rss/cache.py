@@ -5,6 +5,7 @@ Layer-0 pure cache/contract layer: imports only stdlib + ``config`` + ``metrics`
 It never imports ``server`` / ``stream`` / ``stock_api`` / ``market_api``.
 """
 
+import http.client
 import logging
 import random
 import socket
@@ -12,10 +13,13 @@ import threading
 import time
 import urllib.error
 from collections import OrderedDict
-from urllib.request import Request, urlopen
+from urllib.parse import urljoin, urlsplit
+from urllib.request import Request
 
 from . import metrics
-from .config import NEG_TTL, PROBE_TIMEOUT, REQUEST_TIMEOUT, cache_policy
+from .config import (HTTP_DNS_CACHE_TTL, HTTP_POOL_IDLE_TTL,
+                     HTTP_POOL_MAX_PER_HOST, NEG_TTL, PROBE_TIMEOUT,
+                     REQUEST_TIMEOUT, cache_policy)
 
 log = logging.getLogger('cache')
 
@@ -249,6 +253,398 @@ def _clear_negative(url):
         size = len(_negative)
     if removed is not None:
         metrics.set_gauge('negative_cache_size', size)              # S1-4: lock released
+
+
+# ── HTTP transport: per-host keep-alive pool + process DNS cache ───────────
+# `fetch_json` is the project's only HTTP egress.  `urllib.request.urlopen`
+# opens a fresh TCP+TLS connection *and* re-resolves the host on every call:
+# measured on the 2C2G node one upstream request cost ~340ms, of which ~176ms
+# was DNS (with a 5.5% chance of a ~4s resolver retry) and ~78ms was the
+# TCP+TLS handshake.  Both disappear once the connection is kept alive, so the
+# transport below reuses one connection per (scheme, host, port) across
+# requests while preserving `urlopen`'s observable contract: a read()able body
+# on success, `HTTPError` on 4xx/5xx, `URLError` on transport failure, and
+# redirect following.  DNS results are additionally cached (2b), which only
+# affects how a *new* connection's address is found — TLS still dials the
+# hostname, so SNI / certificate hostname verification are unchanged.
+
+_MAX_REDIRECTS = 5
+_REDIRECT_CODES = frozenset({301, 302, 303, 307, 308})
+
+# Once a kept-alive connection is reused the server may already have closed it
+# (idle timeout / restart).  These errors mean "this socket is stale", not
+# "the upstream is down", so they are safe to retry exactly once on a fresh
+# connection.  Retrying only on the *reused* attempt keeps a genuinely failing
+# upstream from doubling its budget.
+_STALE_CONNECTION_ERRORS = (
+    http.client.RemoteDisconnected,
+    http.client.BadStatusLine,
+    http.client.CannotSendRequest,
+    http.client.CannotSendHeader,
+    ConnectionResetError,
+    BrokenPipeError,
+)
+
+
+def _close_quietly(closeable):
+    try:
+        closeable.close()
+    except Exception:
+        pass
+
+
+class _DNSResolver:
+    """Process-wide TTL cache over ``socket.getaddrinfo`` (2b).
+
+    The host is still dialled by *name* (TLS needs the name for SNI and
+    certificate verification); only the name→address step is cached.  Lookups
+    that fail are never cached, and a cached address that refuses to connect is
+    re-resolved once before giving up, so a re-addressed upstream recovers
+    without waiting for the TTL.  ``ttl <= 0`` disables caching entirely.
+    """
+
+    _MAX_ENTRIES = 256
+
+    def __init__(self, ttl):
+        self._ttl = float(ttl)
+        self._lock = threading.Lock()
+        self._cache = {}                       # (host, port) -> (expires_at, infos)
+
+    def resolve(self, host, port, force=False):
+        """Return the cached/tuple ``getaddrinfo`` result for (host, port)."""
+        key = (host, port)
+        now = time.time()
+        if self._ttl > 0 and not force:
+            with self._lock:
+                entry = self._cache.get(key)
+                if entry is not None and now < entry[0]:
+                    return entry[1]
+        infos = tuple(socket.getaddrinfo(host, port, type=socket.SOCK_STREAM))
+        if infos and self._ttl > 0:
+            with self._lock:
+                self._cache[key] = (now + self._ttl, infos)
+                if len(self._cache) > self._MAX_ENTRIES:
+                    for stale_key in [k for k, (exp, _) in self._cache.items()
+                                      if now >= exp]:
+                        del self._cache[stale_key]
+                    while len(self._cache) > self._MAX_ENTRIES:
+                        self._cache.pop(next(iter(self._cache)))
+        return infos
+
+    def connect(self, address, timeout, source_address):
+        """``socket.create_connection``-compatible connect using the cache."""
+        host, port = address
+        try:
+            infos = self.resolve(host, port)
+        except OSError:
+            # Resolver unavailable ⇒ stdlib path (it raises the gaierror).
+            return socket.create_connection(address, timeout, source_address)
+        if not infos:
+            return socket.create_connection(address, timeout, source_address)
+        last_error = None
+        for force in (False, True):
+            if force:
+                try:
+                    infos = self.resolve(host, port, force=True)
+                except OSError:
+                    break
+                if not infos:
+                    break
+            for family, socktype, proto, _canon, sockaddr in infos:
+                sock = None
+                try:
+                    sock = socket.socket(family, socktype, proto)
+                    default_timeout = getattr(
+                        socket, '_GLOBAL_DEFAULT_TIMEOUT', None)
+                    if timeout is not None and timeout is not default_timeout:
+                        sock.settimeout(timeout)
+                    if source_address:
+                        sock.bind(source_address)
+                    sock.connect(sockaddr)
+                    return sock
+                except OSError as exc:
+                    last_error = exc
+                    if sock is not None:
+                        _close_quietly(sock)
+        if last_error is not None:
+            raise last_error
+        return socket.create_connection(address, timeout, source_address)
+
+
+class _CachedDNSConnection:
+    """Mixin: dial through :class:`_DNSResolver` (SNI stays on the hostname)."""
+
+    def _create_connection(self, address, timeout=None, source_address=None,
+                           all_errors=False):
+        return _resolver.connect(address, timeout, source_address)
+
+
+class _PooledHTTPConnection(_CachedDNSConnection, http.client.HTTPConnection):
+    pass
+
+
+class _PooledHTTPSConnection(_CachedDNSConnection, http.client.HTTPSConnection):
+    pass
+
+
+def _open_connection(key, timeout):
+    """Open a fresh connection for ``key`` = ``(scheme, host, port)``."""
+    scheme, host, port = key
+    if scheme == 'https':
+        conn = _PooledHTTPSConnection(host, port, timeout=timeout)
+    else:
+        conn = _PooledHTTPConnection(host, port, timeout=timeout)
+    conn.connect()
+    return conn
+
+
+class _ConnectionPool:
+    """Bounded per-``(scheme, host, port)`` keep-alive connection pool (2a).
+
+    Policy:
+
+    * **Reuse** — an idle connection is handed out LIFO when present.
+    * **Bounded** — at most ``max_per_host`` *pooled* connections per key.  When
+      the cap is reached and nothing is idle, a short-lived *ephemeral*
+      connection is opened and closed after the request instead of waiting for
+      a slot: waiting would re-serialise exactly the concurrency the pool
+      exists to preserve.  Ephemeral connections are never retained.
+    * **Eviction** — idle connections older than ``idle_ttl`` are closed lazily
+      on the next checkout (no reaper thread).
+    * **Healing** — the caller discards a connection that raises a stale-socket
+      error and retries once on a fresh one (see :func:`_pool_request`).
+
+    ``_lock`` guards the bucket bookkeeping only; connect / close / request IO
+    always happens outside it (lock discipline: never hold a lock across IO).
+    """
+
+    def __init__(self, max_per_host, idle_ttl):
+        self._lock = threading.Lock()
+        self._idle = {}                        # key -> [(conn, idle_since)] LIFO
+        self._live = {}                        # key -> pooled connection count
+        self._max_per_host = max(1, int(max_per_host))
+        self._idle_ttl = max(0.0, float(idle_ttl))
+        self.stats = {'reuse': 0, 'new': 0, 'stale': 0, 'evicted': 0,
+                      'ephemeral': 0}
+
+    def acquire(self, key, timeout):
+        """Check out ``(conn, reused, ephemeral)`` for ``key``."""
+        now = time.time()
+        expired = []
+        conn = None
+        reused = False
+        ephemeral = False
+        reserved = False
+        with self._lock:
+            bucket = self._idle.get(key)
+            if bucket:
+                while bucket:
+                    candidate, idle_since = bucket.pop()
+                    if now - idle_since <= self._idle_ttl:
+                        conn, reused = candidate, True
+                        break
+                    expired.append(candidate)
+                    self._live[key] = max(0, self._live.get(key, 1) - 1)
+                    self.stats['evicted'] += 1
+                if not bucket:
+                    self._idle.pop(key, None)
+            if conn is None:
+                if self._live.get(key, 0) < self._max_per_host:
+                    self._live[key] = self._live.get(key, 0) + 1
+                    reserved = True
+                else:
+                    ephemeral = True
+                    self.stats['ephemeral'] += 1
+        for dead in expired:
+            _close_quietly(dead)
+
+        if reused:
+            try:
+                if conn.sock is not None:
+                    conn.sock.settimeout(timeout)
+            except OSError:
+                # Died between checkout and reuse: free the slot and dial fresh.
+                self._discard_live(key, conn)
+                conn = None
+                reused = False
+                with self._lock:
+                    if self._live.get(key, 0) < self._max_per_host:
+                        self._live[key] = self._live.get(key, 0) + 1
+                        reserved = True
+                    else:
+                        ephemeral = True
+                        self.stats['ephemeral'] += 1
+            else:
+                self.stats['reuse'] += 1
+                return conn, True, False
+
+        try:
+            conn = _open_connection(key, timeout)
+        except BaseException:
+            if reserved:
+                with self._lock:
+                    self._live[key] = max(0, self._live.get(key, 1) - 1)
+            raise
+        self.stats['new'] += 1
+        return conn, False, ephemeral
+
+    def release(self, key, conn, ephemeral=False):
+        """Return a still-healthy connection to the idle bucket."""
+        if ephemeral:
+            _close_quietly(conn)
+            return
+        now = time.time()
+        overflow = []
+        with self._lock:
+            bucket = self._idle.setdefault(key, [])
+            bucket.append((conn, now))
+            # The idle list can never exceed the per-host cap (also covers a
+            # cap lowered at runtime).
+            while len(bucket) > self._max_per_host:
+                overflow.append(bucket.pop(0)[0])
+                self._live[key] = max(0, self._live.get(key, 1) - 1)
+        for dead in overflow:
+            _close_quietly(dead)
+
+    def discard(self, key, conn, ephemeral=False):
+        """Drop an unusable connection (never returned to the pool)."""
+        if ephemeral:
+            _close_quietly(conn)
+            return
+        self._discard_live(key, conn)
+
+    def note_stale(self):
+        with self._lock:
+            self.stats['stale'] += 1
+
+    def _discard_live(self, key, conn):
+        with self._lock:
+            self._live[key] = max(0, self._live.get(key, 1) - 1)
+        _close_quietly(conn)
+
+
+_pool = _ConnectionPool(HTTP_POOL_MAX_PER_HOST, HTTP_POOL_IDLE_TTL)
+_resolver = _DNSResolver(HTTP_DNS_CACHE_TTL)
+
+
+class _PooledResponse:
+    """Minimal read-only response façade (the ``urlopen`` contract fetch uses)."""
+
+    def __init__(self, body, status, headers):
+        self._body = body
+        self.status = status
+        self.headers = headers
+
+    def read(self, amt=None):
+        if amt is None or amt < 0:
+            body, self._body = self._body, b''
+            return body
+        chunk, self._body = self._body[:amt], self._body[amt:]
+        return chunk
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _send(conn, method, path, headers):
+    """Run one request on ``conn`` and return (status, headers, body, close?)."""
+    conn.request(method, path, headers=headers or {})
+    resp = conn.getresponse()
+    body = resp.read()
+    will_close = bool(getattr(resp, 'will_close', True)) or conn.sock is None
+    return resp.status, getattr(resp, 'msg', None), body, will_close
+
+
+def _pool_request(method, url, headers, timeout):
+    """Perform one pooled GET/HEAD request, retrying a stale socket once."""
+    parsed = urlsplit(url)
+    scheme = (parsed.scheme or '').lower()
+    if scheme not in ('http', 'https'):
+        raise urllib.error.URLError(
+            f'unsupported URL scheme {scheme!r} in {url!r}')
+    host = parsed.hostname
+    if not host:
+        raise urllib.error.URLError(f'missing host in URL {url!r}')
+    port = parsed.port or (443 if scheme == 'https' else 80)
+    path = parsed.path or '/'
+    if parsed.query:
+        path = f'{path}?{parsed.query}'
+    key = (scheme, host, port)
+
+    for attempt in (0, 1):
+        conn, reused, ephemeral = _pool.acquire(key, timeout)
+        try:
+            status, resp_headers, body, will_close = _send(
+                conn, method, path, headers)
+        except _STALE_CONNECTION_ERRORS as exc:
+            _pool.note_stale()
+            _pool.discard(key, conn, ephemeral=ephemeral)
+            if reused and attempt == 0:
+                continue                    # stale keep-alive ⇒ retry once fresh
+            raise urllib.error.URLError(exc) from exc
+        except (socket.timeout, TimeoutError):
+            _pool.discard(key, conn, ephemeral=ephemeral)
+            raise
+        except urllib.error.URLError:
+            _pool.discard(key, conn, ephemeral=ephemeral)
+            raise
+        except OSError as exc:
+            _pool.discard(key, conn, ephemeral=ephemeral)
+            raise urllib.error.URLError(exc) from exc
+        except http.client.HTTPException as exc:
+            _pool.discard(key, conn, ephemeral=ephemeral)
+            raise urllib.error.URLError(exc) from exc
+        if will_close:
+            _pool.discard(key, conn, ephemeral=ephemeral)
+        else:
+            _pool.release(key, conn, ephemeral=ephemeral)
+        return status, resp_headers, body
+    raise urllib.error.URLError('stale connection retry exhausted')
+
+
+def urlopen(req, timeout=None):
+    """Pooled drop-in for ``urllib.request.urlopen`` (http/https).
+
+    Accepts the ``Request`` object ``fetch_json`` builds (module-level so tests
+    keep patching ``cache.urlopen`` as the single network seam) and returns a
+    context-manager response whose ``read()`` yields the body bytes.  Redirects
+    are followed (≤ :data:`_MAX_REDIRECTS`), 4xx/5xx raise
+    ``urllib.error.HTTPError`` and transport failures raise
+    ``urllib.error.URLError`` — matching the stdlib contract ``_classify`` and
+    every caller already rely on.  The difference is transport: same-host
+    requests reuse a kept-alive connection from ``_pool``.
+    """
+    if isinstance(req, Request):
+        url = req.full_url
+        headers = dict(req.header_items())
+        method = req.get_method()
+    else:
+        url = str(req)
+        headers = {}
+        method = 'GET'
+    current = url
+    redirects = 0
+    while True:
+        status, resp_headers, body = _pool_request(method, current, headers,
+                                                   timeout)
+        if status in _REDIRECT_CODES and resp_headers is not None:
+            location = resp_headers.get('location')
+            if location:
+                redirects += 1
+                if redirects > _MAX_REDIRECTS:
+                    raise urllib.error.HTTPError(
+                        current, status, 'too many redirects',
+                        resp_headers, None)
+                current = urljoin(current, location)
+                continue
+        if status >= 400:
+            raise urllib.error.HTTPError(
+                current, status,
+                http.client.responses.get(status, ''), resp_headers, None)
+        return _PooledResponse(body, status, resp_headers)
 
 
 def fetch_json(url, headers=None, ttl=None, encoding='utf-8', deadline=None):

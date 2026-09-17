@@ -48,7 +48,10 @@ def _stock_nav_pages():
 
 # Bounded parallelism for batch fetches. Public alias (no underscore) is the
 # one stream.py reads to size the refresh coverage window (INV-1b / AR-1).
-BATCH_MAX_WORKERS = 8
+# Env-registered in config (default 16, aligned with HTTP_POOL_MAX_PER_HOST) so
+# the SSE capacity model is retunable without a code change; the module-level
+# name is kept so stream.py (and tests) read it exactly as before.
+BATCH_MAX_WORKERS = config.BATCH_MAX_WORKERS
 _BATCH_MAX_WORKERS = BATCH_MAX_WORKERS
 
 # End-to-end batch budgets. REST is bounded by AC-E2 (<=15s); CDP navigation is

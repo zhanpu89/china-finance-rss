@@ -1,5 +1,7 @@
 """Unit tests for cache.py (cache.md §8 T-CACHE-*)."""
 
+import http.client
+import socket
 import threading
 import time
 import unittest
@@ -7,6 +9,7 @@ import urllib.error
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from unittest import mock
+from urllib.request import Request
 
 import china_finance_rss.cache as cache_mod
 from china_finance_rss import config, metrics
@@ -719,6 +722,252 @@ class FetchEncodingTests(_CacheTestCase):
             self.assertEqual(cache_mod.fetch_json(url, ttl=60), 'ok')
         self.assertNotIn(url, cache_mod._negative)            # not classed as failure
         self.assertEqual(metrics.snapshot().get('upstream_fail_total', {}), {})
+
+
+# ── HTTP transport: keep-alive pool + DNS cache (perf fix) ─────────────────
+
+def _headers(mapping):
+    msg = http.client.HTTPMessage()
+    for key, value in mapping.items():
+        msg[key] = value
+    return msg
+
+
+class _FakeSocket:
+    """Socket stand-in exposing the ``settimeout`` the pool calls on reuse."""
+
+    def __init__(self):
+        self.timeouts = []
+
+    def settimeout(self, value):
+        self.timeouts.append(value)
+
+
+class _PoolResponse:
+    def __init__(self, body=b'{}', status=200, headers=None, will_close=False):
+        self.body = body
+        self.status = status
+        self.msg = headers if headers is not None else http.client.HTTPMessage()
+        self.will_close = will_close
+
+    def read(self):
+        return self.body
+
+
+class _FakeConnection:
+    """Scripted connection double: one queued reply per request."""
+
+    def __init__(self, replies=()):
+        self._replies = list(replies)
+        self._pending = None
+        self.requests = []
+        self.closed = False
+        self.sock = _FakeSocket()
+        self.timeout = None
+
+    def request(self, method, path, headers=None):
+        self.requests.append((method, path))
+        reply = self._replies.pop(0) if self._replies else _PoolResponse()
+        if isinstance(reply, BaseException):
+            raise reply
+        self._pending = reply
+
+    def getresponse(self):
+        return self._pending
+
+    def close(self):
+        self.closed = True
+
+
+class HttpConnectionPoolTests(_CacheTestCase):
+    KEY = ('http', 't', 80)
+
+    def setUp(self):
+        super().setUp()
+        self.pool = cache_mod._ConnectionPool(max_per_host=4, idle_ttl=60)
+
+    def _urlopen(self, path, factory, timeout=5.0):
+        with mock.patch.object(cache_mod, '_pool', self.pool), \
+                mock.patch.object(cache_mod, '_open_connection',
+                                  side_effect=factory):
+            return cache_mod.urlopen(
+                Request(f'http://t{path}', headers={'User-Agent': 'x'}),
+                timeout=timeout)
+
+    def test_same_host_request_reuses_the_connection(self):
+        made = []
+
+        def factory(key, timeout):
+            conn = _FakeConnection([_PoolResponse(b'first'),
+                                    _PoolResponse(b'second')])
+            made.append(conn)
+            return conn
+
+        self.assertEqual(self._urlopen('/a', factory).read(), b'first')
+        self.assertEqual(self._urlopen('/b', factory).read(), b'second')
+        self.assertEqual(len(made), 1)                    # one dial, then reused
+        self.assertEqual(made[0].requests, [('GET', '/a'), ('GET', '/b')])
+        self.assertEqual(self.pool.stats['new'], 1)
+        self.assertEqual(self.pool.stats['reuse'], 1)
+
+    def test_stale_keepalive_is_discarded_and_retried_once(self):
+        stale = _FakeConnection([http.client.RemoteDisconnected('gone')])
+        fresh = _FakeConnection([_PoolResponse(b'ok')])
+        self.pool.release(self.KEY, stale)                # seed an idle conn
+        self.pool._live[self.KEY] = 1
+        dials = []
+
+        def factory(key, timeout):
+            dials.append(key)
+            return fresh
+
+        self.assertEqual(self._urlopen('/x', factory).read(), b'ok')
+        self.assertTrue(stale.closed)                     # dead socket dropped
+        self.assertFalse(fresh.closed)
+        self.assertEqual(dials, [self.KEY])               # exactly one fresh dial
+        self.assertEqual(self.pool.stats['stale'], 1)
+        self.assertEqual(self.pool.stats['new'], 1)
+
+    def test_redirect_is_followed_on_the_reused_connection(self):
+        made = []
+
+        def factory(key, timeout):
+            conn = _FakeConnection([
+                _PoolResponse(b'', status=302,
+                              headers=_headers({'Location': 'http://t/moved'})),
+                _PoolResponse(b'final'),
+            ])
+            made.append(conn)
+            return conn
+
+        self.assertEqual(self._urlopen('/old', factory).read(), b'final')
+        self.assertEqual(len(made), 1)
+        self.assertEqual(made[0].requests,
+                         [('GET', '/old'), ('GET', '/moved')])
+
+    def test_pool_is_bounded_and_overflow_is_ephemeral(self):
+        self.pool = cache_mod._ConnectionPool(max_per_host=2, idle_ttl=60)
+        made = []
+
+        def factory(key, timeout):
+            conn = _FakeConnection()
+            made.append(conn)
+            return conn
+
+        with mock.patch.object(cache_mod, '_open_connection',
+                               side_effect=factory):
+            first = self.pool.acquire(self.KEY, 5)
+            second = self.pool.acquire(self.KEY, 5)
+            third = self.pool.acquire(self.KEY, 5)
+        self.assertEqual((first[1], first[2]), (False, False))
+        self.assertEqual((second[1], second[2]), (False, False))
+        self.assertTrue(third[2])                         # over cap ⇒ ephemeral
+        self.assertEqual(self.pool._live[self.KEY], 2)
+        self.assertEqual(len(made), 3)
+
+    def test_idle_connection_evicted_after_ttl(self):
+        self.pool = cache_mod._ConnectionPool(max_per_host=4, idle_ttl=0.05)
+        old = _FakeConnection()
+        new = _FakeConnection()
+        self.pool.release(self.KEY, old)
+        self.pool._live[self.KEY] = 1
+        time.sleep(0.06)
+
+        conn, reused, _ephemeral = self._acquire(new)
+        self.assertIs(conn, new)
+        self.assertFalse(reused)
+        self.assertTrue(old.closed)
+        self.assertEqual(self.pool.stats['evicted'], 1)
+        self.assertEqual(self.pool._live[self.KEY], 1)
+
+    def _acquire(self, conn):
+        with mock.patch.object(cache_mod, '_open_connection',
+                               return_value=conn):
+            return self.pool.acquire(self.KEY, 5)
+
+
+class PooledTransportErrorTests(_CacheTestCase):
+    def _fetch(self, replies):
+        pool = cache_mod._ConnectionPool(max_per_host=4, idle_ttl=60)
+        conn = _FakeConnection(replies)
+        with mock.patch.object(cache_mod, '_pool', pool), \
+                mock.patch.object(cache_mod, '_open_connection',
+                                  return_value=conn):
+            return cache_mod.fetch_json('http://t/x', ttl=60)
+
+    def test_http_500_is_classified_upstream_error(self):
+        with self.assertRaises(cache_mod.FetchError) as ctx:
+            self._fetch([_PoolResponse(b'boom', status=500)])
+        self.assertEqual(ctx.exception.kind, 'upstream_error')
+        self.assertIn('http://t/x', cache_mod._negative)
+
+    def test_socket_timeout_is_classified_upstream_timeout(self):
+        with self.assertRaises(cache_mod.FetchError) as ctx:
+            self._fetch([socket.timeout('slow')])
+        self.assertEqual(ctx.exception.kind, 'upstream_timeout')
+
+    def test_transport_oserror_is_classified_upstream_error(self):
+        with self.assertRaises(cache_mod.FetchError) as ctx:
+            self._fetch([ConnectionRefusedError('nope')])
+        self.assertEqual(ctx.exception.kind, 'upstream_error')
+
+
+class DnsResolverTests(unittest.TestCase):
+    @staticmethod
+    def _infos(host, port):
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, '',
+                 ('10.0.0.1', port))]
+
+    def test_resolve_caches_within_ttl_and_force_bypasses(self):
+        calls = []
+
+        def fake(host, port, type=None):
+            calls.append((host, port))
+            return self._infos(host, port)
+
+        resolver = cache_mod._DNSResolver(ttl=300)
+        with mock.patch.object(cache_mod.socket, 'getaddrinfo',
+                               side_effect=fake):
+            resolver.resolve('example.com', 443)
+            resolver.resolve('example.com', 443)
+            self.assertEqual(len(calls), 1)               # second call cached
+            resolver.resolve('example.com', 443, force=True)
+            self.assertEqual(len(calls), 2)               # force re-resolves
+
+    def test_ttl_zero_disables_the_cache(self):
+        calls = []
+
+        def fake(host, port, type=None):
+            calls.append((host, port))
+            return self._infos(host, port)
+
+        resolver = cache_mod._DNSResolver(ttl=0)
+        with mock.patch.object(cache_mod.socket, 'getaddrinfo',
+                               side_effect=fake):
+            resolver.resolve('example.com', 443)
+            resolver.resolve('example.com', 443)
+        self.assertEqual(len(calls), 2)
+
+    def test_failed_lookup_is_not_cached(self):
+        def boom(host, port, type=None):
+            raise socket.gaierror('nope')
+
+        resolver = cache_mod._DNSResolver(ttl=300)
+        with mock.patch.object(cache_mod.socket, 'getaddrinfo',
+                               side_effect=boom):
+            with self.assertRaises(socket.gaierror):
+                resolver.resolve('nope.example', 443)
+        self.assertEqual(resolver._cache, {})
+
+    def test_connect_falls_back_to_stdlib_when_resolution_fails(self):
+        resolver = cache_mod._DNSResolver(ttl=300)
+        sentinel = object()
+        with mock.patch.object(cache_mod.socket, 'getaddrinfo',
+                               side_effect=socket.gaierror('x')), \
+                mock.patch.object(cache_mod.socket, 'create_connection',
+                                  return_value=sentinel) as fallback:
+            self.assertIs(resolver.connect(('h', 443), 5, None), sentinel)
+        fallback.assert_called_once()
 
 
 if __name__ == '__main__':

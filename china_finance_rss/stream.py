@@ -55,7 +55,7 @@ _FIELD_HANDLERS = {
 _FIELD_DOMAINS = {'quote': 'quote', 'fundflow': 'fundflow', 'timeline': 'timeline'}
 _STREAM_REFRESH_KEY = 'stream_refresh'
 
-# ── Refresh capacity model (BR-STR-16, recalibrated by BUG-P6C-01/P6C-06) ──
+# ── Refresh capacity model (BR-STR-16; recalibrated BUG-P6C-06, then r5) ───
 # A tick's fresh refresh costs `codes × _fetches_per_code(fields)` upstream REST
 # calls, executed as per-field *serial* phases (each phase ≤ BATCH_MAX_WORKERS
 # wide).  `coverage` is therefore measured in fetch-calls per tick, never in
@@ -64,14 +64,21 @@ _STREAM_REFRESH_KEY = 'stream_refresh'
 # group pays 1 call/code instead of the historical unconditional 3-field cost.
 _TICK_BUDGET_FRACTION = 0.8
 # Serial-equivalent seconds one upstream REST call occupies one batch worker.
-# Recalibrated against the r3 deployment measurement (BUG-P6C-06): the cold
-# path costs ≈2.2 s per worker-call (20 codes × 3 fields cold = 10.5 s at
-# BATCH_MAX_WORKERS=8; the per-tick 1.0 estimate was still ~2× optimistic, so a
-# 51-fetch tick measured ≈14 s > the 6.4 s budget).  At tick=8 /
-# BATCH_MAX_WORKERS=8 this yields coverage=23 fetch-calls per tick, i.e.
-# coverage_codes=23 for a one-domain group — a <20-code group full-refreshes
-# every tick (23 × 2.2 / 8 = 6.3 s ≤ 0.8 × 8 s).
-_PER_FETCH_EST = 2.2
+# Source: config.STREAM_PER_FETCH_EST (env-overridable; default 0.3).
+# Recalibrated by the r5 warm-path measurement: once `cache.fetch_json` pools
+# connections and caches DNS the single-request latency is 139 ms p50 /
+# 167 ms max (was 340 ms), so a worker-call costs ≈0.14 s.  The old 2.2 priced
+# the pre-pooling *cold* path and over-estimated ≈16×, which capped coverage at
+# 23 fetch-calls/tick and left the 50-code × 8 s target unmet.  0.3 keeps
+# ≈2.2× headroom over the measured p50 (concurrency queueing / upstream jitter
+# / a cold first call); it is the conservative end of the warm-path range.
+# At tick=8 / BATCH_MAX_WORKERS=16 (see config; aligned with
+# HTTP_POOL_MAX_PER_HOST) this yields coverage = int(6.4 × 16 / 0.3) = 341
+# fetch-calls per tick, i.e. coverage_codes = 341 / 170 / 113 for 1 / 2 / 3
+# subscribed fields.  The 50-code target therefore lands in C1 (whole-pool)
+# for both 1 and 3 domains, and the C1 threshold is exactly the 6.4 s budget
+# (341 × 0.3 / 16 = 6.4 s = 0.8 × 8 s).
+_PER_FETCH_EST = config.STREAM_PER_FETCH_EST
 # Upstream REST calls per code per field.  Every steady-state domain costs ONE
 # call/code: `quote` (handle_cls_basic_infos → fetch_cls_basic_info) is
 # two-phase — basic_info + stock detail (sector) — but phase 2 is served from
