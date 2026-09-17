@@ -154,7 +154,9 @@
           "git diff *": "allow",
           "git show *": "allow",
           ".opencode/scripts/*.sh *": "allow",
-          ".opencode/project/scripts/*.sh *": "allow"
+          ".opencode/project/scripts/*.sh *": "allow",
+          "bash .opencode/scripts/*.sh *": "allow",
+          "bash .opencode/project/scripts/*.sh *": "allow"
         }
       },
       "prompt": "{file:.opencode/skills/self-evolve/SKILL.md}"
@@ -225,6 +227,9 @@
           "docker inspect *": "allow",
           "docker exec *": "allow",
           ".opencode/scripts/*.sh *": "allow",
+          "bash .opencode/scripts/*.sh *": "allow",
+          "bash .opencode/project/scripts/*.sh *": "allow",
+          "git rev-parse *": "allow",
           "curl *": "allow"
         },
         "read": "allow",

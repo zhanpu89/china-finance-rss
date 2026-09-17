@@ -42,9 +42,12 @@ with open('$PROJECT_DIR/opencode.json') as f:
 assert 'default_agent' in d, '缺少 default_agent'
 assert 'agent' in d, '缺少 agent'
 assert 'pipeline-orchestrator' in d['agent'], '缺少 pipeline-orchestrator agent'
-# 检查所有 agent 有 description
+# 检查所有 agent 有 description；自定义 agent（非内置）还必须有 prompt
+BUILTIN_AGENTS = {'general', 'explore'}
 for name, cfg in d['agent'].items():
     assert 'description' in cfg, f'{name} 缺少 description'
+    if name in BUILTIN_AGENTS:
+        continue  # 内置 agent 无自定义 prompt，仅覆盖权限
     assert 'prompt' in cfg, f'{name} 缺少 prompt'
 print('  ✅ JSON 格式有效，agent 配置完整')
 " 2>&1 || {
@@ -131,10 +134,13 @@ with open('$PROJECT_DIR/opencode.json') as f:
 agents = d.get('agent', {})
 skills_dir = '$PROJECT_DIR/.opencode/skills'
 all_good = True
+BUILTIN_AGENTS = {'general', 'explore'}
 for name in agents:
     skill_path = os.path.join(skills_dir, name, 'SKILL.md')
     if agents[name].get('mode') == 'primary':
         continue  # 主 agent 不走 file 加载
+    if name in BUILTIN_AGENTS:
+        continue  # 内置 agent 无自定义 SKILL.md
     if not os.path.exists(skill_path):
         print(f'  ❌ agent {name}: 对应的 .opencode/skills/{name}/SKILL.md 不存在')
         all_good = False
@@ -159,10 +165,12 @@ for name in sorted(os.listdir(skills_dir)):
         continue
     with open(skill_file) as f:
         content = f.read()
-    # 匹配 resources/xxx.md 和 templates/xxx.md 引用
-    refs = set(re.findall(r'(?:resources|templates)/[\w.-]+\.md', content))
+    # 匹配 resources/xxx.md 和 templates/xxx.md 引用（含跨 skill 的 <skill>/resources/xxx.md）
+    refs = set(re.findall(r'(?:[\w.-]+/)?(?:resources|templates)/[\w.-]+\.md', content))
     for ref in sorted(refs):
-        if not os.path.exists(os.path.join(skill_dir, ref)):
+        # 本 skill 目录优先，其次按 skills 根目录解析跨 skill 引用
+        if not (os.path.exists(os.path.join(skill_dir, ref))
+                or os.path.exists(os.path.join(skills_dir, ref))):
             print(f'  ❌ {name}: 引用 {ref} 不存在')
             all_good = False
 if all_good:
