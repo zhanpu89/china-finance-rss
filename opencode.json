@@ -218,6 +218,7 @@
           "git show *": "allow",
           "git rebase *": "allow",
           "git cherry-pick *": "allow",
+          "git merge *": "allow",
           "python -m py_compile *": "allow",
           "python -m unittest *": "allow",
           "docker compose *": "allow",
