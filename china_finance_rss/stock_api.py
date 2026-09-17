@@ -1,10 +1,13 @@
 """Stock data APIs: fundflow, timeline, F10, basic_info, stock detail.
 
 Every code-level fetcher shares one signature ``fetch_*(code, deadline=None,
-ttl=None)`` so the request deadline (R13) and the cache TTL (INV-1a) propagate
-end to end: handler -> budget -> ``_handle_cached_batch`` -> ``_process_chunk``
--> ``_run_batch`` -> ``_fetch_one`` -> fetcher -> ``fetch_json`` (the sole HTTP
-funnel — URL/negative cache + single-flight).
+ttl=None, refresh_epoch=None)`` so the request deadline (R13), the cache TTL
+(INV-1a) and the scheduled refresh's freshness floor propagate end to end:
+handler -> budget -> ``_handle_cached_batch`` -> ``_process_chunk`` ->
+``_run_batch`` -> ``_fetch_one`` -> fetcher -> ``fetch_json`` (the sole HTTP
+funnel — URL/negative cache + single-flight).  ``refresh_epoch`` is set only by
+the SSE refresh path (it has no default) and is omitted from every REST /
+prefetch call, so those keep their exact pre-existing behaviour.
 
 Failures are classified as ``cache.FetchError(kind)`` and surfaced per code by
 ``cache.build_batch_response`` as ``_errors``; successful-but-empty stays
@@ -30,8 +33,9 @@ from .config import (
     _ANNOUNCEMENT_BASE_URL, _ANNOUNCEMENT_HEADERS, _BASIC_INFO_BASE_URL,
     _BASIC_INFO_HEADERS, _F10_EXPECTED_KEYS, _FUNDFLOW_BASE_URL,
     _FUNDFLOW_HEADERS, _STOCK_DETAIL_BASE_URL, _STOCK_DETAIL_HEADERS,
+    _STOCK_DEPTH_URL, _STOCK_DEPTH_HEADERS,
     _TIMELINE_BASE_URL, _TIMELINE_HEADERS, cache_policy, canonical_code,
-    stock_nav_page_names,
+    stock_nav_page_names, upstream_secu_code,
 )
 from .utils import cls_sign_params
 
@@ -48,7 +52,11 @@ def _stock_nav_pages():
 
 # Bounded parallelism for batch fetches. Public alias (no underscore) is the
 # one stream.py reads to size the refresh coverage window (INV-1b / AR-1).
-BATCH_MAX_WORKERS = 8
+# Env-registered in config (default 20, aligned with HTTP_POOL_MAX_PER_HOST=24
+# so the fan-out never queues on the per-host pool) so the SSE capacity model
+# is retunable without a code change; the module-level name is kept so stream.py
+# (and tests) read it exactly as before.
+BATCH_MAX_WORKERS = config.BATCH_MAX_WORKERS
 _BATCH_MAX_WORKERS = BATCH_MAX_WORKERS
 
 # End-to-end batch budgets. REST is bounded by AC-E2 (<=15s); CDP navigation is
@@ -117,6 +125,11 @@ _basic_info_cache = OrderedDict()
 _basic_info_cache_ts = {}
 _basic_info_cache_lock = threading.Lock()
 
+_basic_depth_pool = {}
+_basic_depth_cache = OrderedDict()
+_basic_depth_cache_ts = {}
+_basic_depth_cache_lock = threading.Lock()
+
 _announcement_pool = {}
 _announcement_cache = OrderedDict()
 _announcement_cache_ts = {}
@@ -126,6 +139,7 @@ _announcement_cache_lock = threading.Lock()
 # it has no dedup pool and no terminal cache (URL cache only, §10#4).
 _DOMAIN_STORES = {
     'quote':        (_basic_info_pool,   _basic_info_cache,   _basic_info_cache_ts,   _basic_info_cache_lock),
+    'depth':        (_basic_depth_pool,  _basic_depth_cache,  _basic_depth_cache_ts,  _basic_depth_cache_lock),
     'fundflow':     (_fundflow_pool,     _fundflow_cache,     _fundflow_cache_ts,     _fundflow_cache_lock),
     'timeline':     (_timeline_pool,     _timeline_cache,     _timeline_cache_ts,     _timeline_cache_lock),
     'f10':          (_f10_pool,          _f10_cache,          _f10_cache_ts,          _f10_cache_lock),
@@ -255,7 +269,7 @@ def code_cooldown_list(now=None):
 
 # ── Deadline / failure classification helpers (BR-SA-19) ───────────────────
 
-def _fetch_rest_json(url, headers, ttl, deadline=None):
+def _fetch_rest_json(url, headers, ttl, deadline=None, refresh_epoch=None):
     """The single REST fetch funnel: budget pass-through + failure classification.
 
     The remaining R13 budget is threaded into ``fetch_json`` so its
@@ -271,9 +285,17 @@ def _fetch_rest_json(url, headers, ttl, deadline=None):
     ``fetch_json`` already counts its own network failures (BR-CACHE-6), so a
     ``FetchError`` from it is re-raised untouched (BR-SA-29). Only the failures
     this layer detects (JSON decode / non-dict payload) are counted here.
+
+    ``refresh_epoch`` (scheduled-refresh freshness floor) is forwarded to
+    ``fetch_json`` **only when set**, so the default (REST / prefetch) path
+    keeps its exact pre-existing call shape — the epoch is a purely additive
+    hint for the stream refresh path.
     """
+    kwargs = {'ttl': ttl, 'deadline': deadline}
+    if refresh_epoch is not None:
+        kwargs['refresh_epoch'] = refresh_epoch
     try:
-        raw = json.loads(fetch_json(url, headers, ttl=ttl, deadline=deadline))
+        raw = json.loads(fetch_json(url, headers, **kwargs))
     except FetchError:
         raise                                                         # cache counted it
     except Exception as exc:                                          # JSON decode
@@ -283,6 +305,21 @@ def _fetch_rest_json(url, headers, ttl, deadline=None):
         metrics.incr('upstream_fail_total', key='upstream_error')
         raise FetchError('upstream_error', url=url)
     return raw
+
+
+def _rest_fetch(url, headers, ttl, deadline, refresh_epoch=None):
+    """Call the REST funnel, adding the refresh-epoch hint only when present.
+
+    Code-level fetchers share this so the scheduled refresh path (which needs
+    every tick's data to actually come from upstream) can pass an epoch while
+    the REST / prefetch path calls ``_fetch_rest_json`` with exactly its
+    pre-existing arguments.  Keeping the default invocation byte-identical is
+    what makes the epoch a pure additive hint rather than a new mandatory
+    parameter of the funnel.
+    """
+    if refresh_epoch is None:
+        return _fetch_rest_json(url, headers, ttl, deadline)
+    return _fetch_rest_json(url, headers, ttl, deadline, refresh_epoch)
 
 
 # ── Terminal cache (LRU + TTL + cache_max; BR-SA-2/13..16) ─────────────────
@@ -336,20 +373,31 @@ def cached_batch(domain, codes, now=None):
 
 # ── Batch pipeline: _fetch_one / _run_batch / _process_chunk / _handle_cached_batch ──
 
-def _call_fetcher(fetcher, code, deadline, ttl):
-    """Call ``fetcher(code, deadline=..., ttl=...)``, degrading only on a
-    **call-frame** TypeError (argument binding — a signature-mismatched test
-    double that rejects the keyword form).
+def _call_fetcher(fetcher, code, deadline, ttl, refresh_epoch=None):
+    """Call ``fetcher(code, deadline=..., ttl=..., refresh_epoch=...)``.
+
+    Degrades only on a **call-frame** TypeError (argument binding — a
+    signature-mismatched test double that rejects the keyword form).
 
     A TypeError raised *inside* the fetcher body is a real failure and is
     re-raised untouched: retrying it would execute the fetch twice (P2-④).
     Each fallback keeps ``deadline``/``ttl`` for every parameter the callable
     accepts, so the budget is never silently dropped (S1-5).
+
+    ``refresh_epoch`` is attempted **first and only when set** (a scheduled
+    refresh): the fallback chain omits it, so a fetcher that predates the
+    keyword — or any REST/prefetch call, where it is ``None`` — gets exactly the
+    pre-existing call shapes.
     """
-    for kwargs in ({'deadline': deadline, 'ttl': ttl},
+    combos = []
+    if refresh_epoch is not None:
+        combos.append({'deadline': deadline, 'ttl': ttl,
+                       'refresh_epoch': refresh_epoch})
+    combos.extend(({'deadline': deadline, 'ttl': ttl},
                    {'deadline': deadline},
                    {'ttl': ttl},
-                   {}):
+                   {}))
+    for kwargs in combos:
         try:
             return fetcher(code, **kwargs)
         except TypeError as exc:
@@ -360,7 +408,7 @@ def _call_fetcher(fetcher, code, deadline, ttl):
     raise TypeError(f'{fetcher!r} does not accept (code, deadline, ttl)')
 
 
-def _fetch_one(fetcher, code, deadline=None, ttl=None):
+def _fetch_one(fetcher, code, deadline=None, ttl=None, refresh_epoch=None):
     """The single deadline/failure-classification funnel. Never raises.
 
     An already elapsed deadline is ``_LOCAL_BUDGET`` — our own budget, not an
@@ -370,14 +418,15 @@ def _fetch_one(fetcher, code, deadline=None, ttl=None):
     if deadline is not None and time() > deadline:                    # BR-SA-20
         return None, _LOCAL_BUDGET
     try:
-        return _call_fetcher(fetcher, code, deadline, ttl), None
+        return _call_fetcher(fetcher, code, deadline, ttl, refresh_epoch), None
     except FetchError as exc:
         return None, exc.kind
     except Exception:
         return None, 'upstream_error'
 
 
-def _run_batch(fetcher, codes, deadline=None, ttl=None, concurrent=True):
+def _run_batch(fetcher, codes, deadline=None, ttl=None, concurrent=True,
+               refresh_epoch=None):
     """Fetch codes, returning ``(results, errors)``.
 
     BR-SA-20: an exhausted budget creates no threads — every code is reported
@@ -394,13 +443,15 @@ def _run_batch(fetcher, codes, deadline=None, ttl=None, concurrent=True):
         return results, errors
     if not concurrent:
         for code in codes:                                            # CDP must be serial
-            data, kind = _fetch_one(fetcher, code, deadline, ttl)
+            data, kind = _fetch_one(fetcher, code, deadline, ttl,
+                                    refresh_epoch)
             results[code] = data
             if kind:
                 errors[code] = kind
         return results, errors
     with ThreadPoolExecutor(max_workers=min(BATCH_MAX_WORKERS, len(codes))) as ex:
-        futures = {ex.submit(_fetch_one, fetcher, code, deadline, ttl): code
+        futures = {ex.submit(_fetch_one, fetcher, code, deadline, ttl,
+                             refresh_epoch): code
                    for code in codes}
         for fut in as_completed(futures):
             code = futures[fut]
@@ -416,12 +467,21 @@ def _run_batch(fetcher, codes, deadline=None, ttl=None, concurrent=True):
 
 def _process_chunk(codes, domain, policy, fetcher, pool=None, cache=None,
                    cache_ts=None, lock=None, deadline=None, after=None,
-                   concurrent=True):
+                   concurrent=True, refresh_epoch=None):
     """Process one chunk (caller passes <= _MAX_BATCH_SIZE codes).
 
     canonicalise -> dedupe -> validate -> pool touch -> cache lookup ->
     cooldown gate -> fetch -> cache/ledger merge.  Returns ``(results,
     errors)`` keyed by the *requested* spellings.
+
+    ``refresh_epoch`` is the scheduled round's start instant.  When set, a
+    terminal-cache entry written before it is *not* a hit even though its TTL
+    has not elapsed: the previous round wrote it δ s after that round started,
+    so at this round it is only ``tick − δ`` old and would otherwise be served
+    without any upstream request (the phase coupling behind the effective 8 s
+    quote cadence).  It is also forwarded to the fetchers' URL-cache funnel, so
+    both cache layers agree on what "this round's data" means.  ``None`` (REST /
+    prefetch) keeps the plain TTL behaviour.
     """
     ttl = policy['ttl']
     pool_max = policy['pool_max']
@@ -462,11 +522,13 @@ def _process_chunk(codes, domain, policy, fetcher, pool=None, cache=None,
         with lock:
             for canon in canons:
                 data = cache.get(canon)
-                if data is not None and now - cache_ts.get(canon, 0) < ttl:
+                written = cache_ts.get(canon, 0)
+                if data is not None and now - written < ttl \
+                        and (refresh_epoch is None or written >= refresh_epoch):
                     cache.move_to_end(canon)
                     by_canon[canon] = data
                 else:
-                    missing.append(canon)                              # expired -> refetch
+                    missing.append(canon)   # expired / pre-epoch -> refetch
     else:
         missing = list(canons)
     # ④ code cooldown gate (hit -> no network)
@@ -479,10 +541,11 @@ def _process_chunk(codes, domain, policy, fetcher, pool=None, cache=None,
             err_canon[canon] = entry[2] or 'upstream_error'
             continue
         eligible.append(canon)
-    # ⑤ fetch (deadline propagates; returns (results, errors))
+    # ⑤ fetch (deadline + refresh floor propagate; returns (results, errors))
     if eligible:
         fetched, fetch_errors = _run_batch(fetcher, eligible, deadline=deadline,
-                                           ttl=ttl, concurrent=concurrent)
+                                           ttl=ttl, concurrent=concurrent,
+                                           refresh_epoch=refresh_epoch)
         # ⑥ merge + ledger + cache write
         for canon in eligible:
             data = fetched.get(canon)
@@ -529,11 +592,16 @@ def _ceil_div(a, b):
 def _handle_cached_batch(codes, domain, policy, fetcher, pool=None, cache=None,
                          cache_ts=None, lock=None, budget=None,
                          per_call_timeout=REQUEST_TIMEOUT, after=None,
-                         concurrent=True):
+                         concurrent=True, refresh_epoch=None):
     """Shard codes into <= _MAX_BATCH_SIZE chunks and process them all.
 
     Never truncates: every code is processed across chunks (stream.py hands the
     whole dedup pool here). Returns ``(results, errors)``.
+
+    ``refresh_epoch`` (scheduled refresh only) is forwarded to every chunk so
+    the terminal cache and the URL cache both refuse entries written before this
+    round started.  ``None`` — the REST handlers and every prefetch path — keeps
+    plain TTL caching.
     """
     if not codes:
         return {}, {}
@@ -549,7 +617,8 @@ def _handle_cached_batch(codes, domain, policy, fetcher, pool=None, cache=None,
         r, e = _process_chunk(chunk, domain, policy, fetcher, pool=pool,
                               cache=cache, cache_ts=cache_ts, lock=lock,
                               deadline=chunk_deadline, after=after,
-                              concurrent=concurrent)
+                              concurrent=concurrent,
+                              refresh_epoch=refresh_epoch)
         results.update(r)
         errors.update(e)
     return results, errors
@@ -561,7 +630,7 @@ def _announcement_url(stock_code):
     """Build signed announcement API URL — requires CLS sign."""
     params = {
         'app': 'CailianpressWeb', 'os': 'web', 'sv': '8.7.9',
-        'secu_code': stock_code,
+        'secu_code': upstream_secu_code(stock_code),
     }
     params['sign'] = cls_sign_params(params)
     return f'{_ANNOUNCEMENT_BASE_URL}?{urlencode(params)}'
@@ -775,15 +844,21 @@ def _basic_sector_put(code, sector, now=None):
 
 # ── Code-level fetchers (REST first, CDP fallback) ─────────────────────────
 
-def fetch_cls_fundflow(stock_code, deadline=None, ttl=None):
-    """Fetch fund flow — REST first, CDP evaluate_fetch fallback."""
+def fetch_cls_fundflow(stock_code, deadline=None, ttl=None, refresh_epoch=None):
+    """Fetch fund flow — REST first, CDP evaluate_fetch fallback.
+
+    ``refresh_epoch`` is the scheduled refresh round's start; it reaches only
+    the REST leg's URL cache (the CDP leg performs no cached fetch), so when
+    this domain sets the tick its per-tick refresh is a genuine upstream call.
+    """
     domain = 'fundflow'
-    url = f'{_FUNDFLOW_BASE_URL}?secu_code={stock_code}'
+    url = f'{_FUNDFLOW_BASE_URL}?secu_code={upstream_secu_code(stock_code)}'
     ttl = cache_policy(domain)['ttl'] if ttl is None else ttl
     metrics.incr('upstream_fetch_total', key=domain)                  # BR-SA-28
     err = None
     try:
-        raw = _fetch_rest_json(url, _FUNDFLOW_HEADERS, ttl, deadline)
+        raw = _rest_fetch(url, _FUNDFLOW_HEADERS, ttl, deadline,
+                          refresh_epoch)
         if raw.get('code') == 200:
             return raw.get('data')                                    # may be None
         err = FetchError('upstream_error', url=url)
@@ -799,15 +874,19 @@ def fetch_cls_fundflow(stock_code, deadline=None, ttl=None):
     raise err
 
 
-def fetch_cls_timeline(stock_code, deadline=None, ttl=None):
-    """Fetch stock timeline — REST first, CDP evaluate_fetch fallback."""
+def fetch_cls_timeline(stock_code, deadline=None, ttl=None, refresh_epoch=None):
+    """Fetch stock timeline — REST first, CDP evaluate_fetch fallback.
+
+    ``refresh_epoch`` behaves as in :func:`fetch_cls_fundflow`.
+    """
     domain = 'timeline'
-    url = f'{_TIMELINE_BASE_URL}?secu_code={stock_code}'
+    url = f'{_TIMELINE_BASE_URL}?secu_code={upstream_secu_code(stock_code)}'
     ttl = cache_policy(domain)['ttl'] if ttl is None else ttl
     metrics.incr('upstream_fetch_total', key=domain)
     err = None
     try:
-        raw = _fetch_rest_json(url, _TIMELINE_HEADERS, ttl, deadline)
+        raw = _rest_fetch(url, _TIMELINE_HEADERS, ttl, deadline,
+                          refresh_epoch)
         if raw.get('code') == 200:
             return raw.get('data')
         err = FetchError('upstream_error', url=url)
@@ -850,7 +929,7 @@ def fetch_cls_announcement(stock_code, deadline=None, ttl=None):
 def fetch_cls_stock_detail(stock_code, deadline=None, ttl=None):
     """Fetch CLS stock detail — REST only."""
     domain = 'quote'
-    url = f'{_STOCK_DETAIL_BASE_URL}?secu_code={stock_code}'
+    url = f'{_STOCK_DETAIL_BASE_URL}?secu_code={upstream_secu_code(stock_code)}'
     ttl = cache_policy(domain)['ttl'] if ttl is None else ttl
     metrics.incr('upstream_fetch_total', key=domain)
     raw = _fetch_rest_json(url, _STOCK_DETAIL_HEADERS, ttl, deadline)
@@ -860,26 +939,65 @@ def fetch_cls_stock_detail(stock_code, deadline=None, ttl=None):
     raise FetchError('upstream_error', url=url)
 
 
-def fetch_cls_basic_info(stock_code, deadline=None, ttl=None):
-    """Fetch basic info with sector_name.
+# Validity probe for the upstream `basic` payload (BSE / wrong-spelling shell
+# defence).  x-quote answers a wrong `secu_code` spelling with HTTP 200 +
+# `code:200` + a 41-key all-null object — not an error code — so a fetcher that
+# trusts `code == 200` alone caches and streams a "frame full of nulls".  A real
+# quote always names the instrument and/or carries a last price.
+_BASIC_INFO_KEY_FIELDS = ('secu_name', 'last_px')
 
-    Two-phase:
+
+def _basic_info_is_valid(raw):
+    """True when ``raw`` carries real instrument data (not the all-null shell)."""
+    data = raw.get('data')
+    if not isinstance(data, dict) or not data:
+        return False
+    return any(data.get(f) not in (None, '') for f in _BASIC_INFO_KEY_FIELDS)
+
+
+def fetch_cls_basic_info(stock_code, deadline=None, ttl=None,
+                         refresh_epoch=None):
+    """Fetch basic info with sector_name and the five-level order book.
+
+    Three-phase:
       1) REST basic_info API for pricing data (fatal)
       2) REST stock detail API for sector (non-fatal, best effort; served from
          the 7-day `sector`-policy cache once the code's industry is known)
-    Returns dict with secu_code + price data (+ sector_name).
+      3) REST volume API for the five-level order book (non-fatal, best
+         effort; attached as ``depth``)
+
+    Returns dict with secu_code + price data (+ sector_name, + depth).
+    Every non-fatal phase is best-effort: their failure never withholds the
+    phase-1 quote, and a missing depth is written as ``None`` — never a
+    fabricated all-zero order book.
+
+    Phase 1 is the fatal leg, and a ``code:200`` payload with no instrument
+    data (the all-null shell upstream returns for a wrong ``secu_code``
+    spelling) counts as a failed fetch — never a cacheable quote.
+
+    ``refresh_epoch`` (scheduled refresh only) reaches **phase 1 and phase 3**
+    — the two steady-state calls — so a per-tick quote refresh really re-fetches
+    both the quote and its order book instead of being served by the previous
+    tick's URL-cache entries.  Phase 2 (sector) is deliberately left on plain
+    TTL semantics: it is already gated by the 7-day sector cache once warm, and
+    forcing it every tick would make a code whose upstream returns no sector pay
+    a third call per tick, breaking the 2-call/code capacity model.
     """
     domain = 'quote'
     ttl = cache_policy(domain)['ttl'] if ttl is None else ttl
     result, err = None, None
     # Phase 1: quote/identity (fatal)
-    url = f'{_BASIC_INFO_BASE_URL}?secu_code={stock_code}'
+    url = f'{_BASIC_INFO_BASE_URL}?secu_code={upstream_secu_code(stock_code)}'
     metrics.incr('upstream_fetch_total', key=domain)
     try:
-        raw = _fetch_rest_json(url, _BASIC_INFO_HEADERS, ttl, deadline)
-        if raw.get('code') == 200:
+        raw = _rest_fetch(url, _BASIC_INFO_HEADERS, ttl, deadline,
+                          refresh_epoch)
+        if raw.get('code') == 200 and _basic_info_is_valid(raw):
             result = raw
         else:
+            # Covers both a real error code and the all-null "empty shell"
+            # upstream returns for a wrong `secu_code` spelling — the latter
+            # must never be cached or streamed as a successful quote.
             err = FetchError('upstream_error', url=url)
             metrics.incr('upstream_fail_total', key='upstream_error')
     except FetchError as exc:
@@ -891,7 +1009,7 @@ def fetch_cls_basic_info(stock_code, deadline=None, ttl=None):
     sector = _basic_sector_get(stock_code) if result is not None else None
     if sector is None and result is not None \
             and (deadline is None or time() < deadline):
-        detail_url = f'{_STOCK_DETAIL_BASE_URL}?secu_code={stock_code}'
+        detail_url = f'{_STOCK_DETAIL_BASE_URL}?secu_code={upstream_secu_code(stock_code)}'
         metrics.incr('upstream_fetch_total', key=domain)
         try:
             detail_raw = _fetch_rest_json(detail_url, _STOCK_DETAIL_HEADERS, ttl, deadline)
@@ -905,11 +1023,107 @@ def fetch_cls_basic_info(stock_code, deadline=None, ttl=None):
         if not isinstance(result.get('data'), dict):
             result['data'] = {}
         result['sector_name'] = sector
+    # Phase 3: five-level order book (non-fatal, additive).  `fetch_cls_stock_depth`
+    # never raises and returns None for index / unknown / empty payloads, so a
+    # depth outage can never withhold the quote.  Attached here (not in
+    # `handle_cls_basic_infos`) so it rides the same `quote` terminal-cache
+    # entry: a quote cache hit already carries its depth, no extra upstream call.
+    if result is not None:
+        depth = fetch_cls_stock_depth(stock_code, deadline=deadline, ttl=ttl,
+                                      refresh_epoch=refresh_epoch)
+        if depth is not None:
+            result['depth'] = depth
     if result is not None:
         return result
     if err is not None:
         raise err
     return None
+
+
+# The 20 five-band value fields.  Used to tell a real order book from the
+# all-zero payload an index (sh000001 / sz399001) returns.
+_DEPTH_VALUE_FIELDS = tuple(
+    f'{side}_{kind}_{level}'
+    for side in ('b', 's')
+    for kind in ('px', 'amount')
+    for level in range(1, 6)
+)
+
+
+def fetch_cls_stock_depth(stock_code, deadline=None, ttl=None,
+                          refresh_epoch=None):
+    """Fetch the five-level order book (五档盘口) for ``stock_code``, or None.
+
+    Source: ``GET /quote/stock/volume?secu_code=<code>&field=five`` — a plain
+    REST endpoint (no sign, no WS, no Chrome).  ``secu_code`` is the upstream
+    wire spelling from :func:`config.upstream_secu_code` (prefixed for SH/SZ,
+    dotted ``430047.BJ`` for BSE); the wrong form returns an empty payload.
+
+    **Empty-value semantics (never fabricate data):**
+
+      * empty ``data`` dict (unknown/invalid codes) → ``None``
+      * every five-level price/amount field is ``0`` (indexes such as
+        ``sh000001`` / ``sz399001`` have no order book) → ``None``
+      * otherwise the ``data`` dict: 20 band fields (``b_px_1..5``,
+        ``b_amount_1..5``, ``s_px_1..5``, ``s_amount_1..5``) + ``preclose_px``
+
+    This is the ``depth`` domain's code-level fetcher, so it shares the
+    module-wide ``fetch_*(code, deadline=None, ttl=None)`` signature and goes
+    through the single ``_fetch_rest_json`` funnel (URL cache / negative cache
+    / single-flight / pool).  Unlike the fatal price fetchers it never raises
+    for a semantic (``code != 200``) response: depth is *augmenting* data, so
+    the honest answer is ``None`` — a failure here must never take down the
+    ``quote`` payload it accompanies.
+
+    ``refresh_epoch`` (scheduled refresh only) forces the order book to be
+    re-fetched each tick alongside its quote; without it a quote-only group's
+    steady-state cost would silently fall to 1 call/code/tick with a stale book.
+    """
+    domain = 'depth'
+    url = f'{_STOCK_DEPTH_URL}?secu_code={upstream_secu_code(stock_code)}&field=five'
+    ttl = cache_policy(domain)['ttl'] if ttl is None else ttl
+    metrics.incr('upstream_fetch_total', key=domain)                  # BR-SA-28
+    try:
+        raw = _rest_fetch(url, _STOCK_DEPTH_HEADERS, ttl, deadline,
+                          refresh_epoch)
+    except FetchError:
+        # Transport/JSON failure.  Non-fatal: no data, no raise (the caller
+        # keeps the quote payload).  `_fetch_rest_json` already counted it.
+        return None
+    if raw.get('code') != 200:
+        metrics.incr('upstream_fail_total', key='upstream_error')     # semantic failure
+        return None
+    data = raw.get('data')
+    if not isinstance(data, dict) or not data:
+        return None                                                   # bj* / unknown code
+    if all(not data.get(f) for f in _DEPTH_VALUE_FIELDS):
+        return None                                                   # index: no order book
+    _depth_store(stock_code, data)
+    return data
+
+
+def _depth_store(code, data, now=None):
+    """Record a fetched order book in the `depth` domain's pool + terminal cache.
+
+    `fetch_cls_stock_depth` is called from inside `fetch_cls_basic_info`, not
+    through `_process_chunk`, so it owns its own pool-touch + cache-write using
+    the `depth` policy (the single authority for its caps).  Keeping the terminal
+    cache live is what makes `DOMAIN_MATRIX['depth']`'s pool_max/cache_max real
+    settings rather than dead ones (P2-9), and gives `cached_batch('depth', …)`
+    a genuine read path for a future depth-only consumer.
+    """
+    policy = cache_policy('depth')
+    now = time() if now is None else now
+    pool_max = policy['pool_max']
+    with _basic_depth_cache_lock:
+        _basic_depth_pool[code] = now
+        if pool_max is not None and len(_basic_depth_pool) > pool_max:
+            victims = sorted(_basic_depth_pool, key=_basic_depth_pool.get)
+            for victim in victims[:len(_basic_depth_pool) - pool_max]:
+                del _basic_depth_pool[victim]
+    _cache_store(_basic_depth_cache, _basic_depth_cache_ts,
+                 _basic_depth_cache_lock, code, data, policy['cache_max'],
+                 'depth', now)
 
 
 def _raise_cdp_unavailable():
@@ -999,13 +1213,13 @@ def _direct_fetch(url, headers, domain, deadline=None, ttl=None):
 
 def _fundflow_direct_fetch(stock_code, deadline=None):
     """Fetch fund flow via CDP browser context (anti-ban), REST fallback."""
-    return _direct_fetch(f'{_FUNDFLOW_BASE_URL}?secu_code={stock_code}',
+    return _direct_fetch(f'{_FUNDFLOW_BASE_URL}?secu_code={upstream_secu_code(stock_code)}',
                          _FUNDFLOW_HEADERS, 'fundflow', deadline)
 
 
 def _timeline_direct_fetch(stock_code, deadline=None):
     """Fetch timeline via CDP browser context (anti-ban), REST fallback."""
-    return _direct_fetch(f'{_TIMELINE_BASE_URL}?secu_code={stock_code}',
+    return _direct_fetch(f'{_TIMELINE_BASE_URL}?secu_code={upstream_secu_code(stock_code)}',
                          _TIMELINE_HEADERS, 'timeline', deadline)
 
 
@@ -1017,25 +1231,27 @@ def _announcement_direct_fetch(stock_code, deadline=None):
 
 # ── Public batch handlers (server / stream contract) ───────────────────────
 
-def handle_cls_fundflow(codes, deadline=None, dropped=0):
+def handle_cls_fundflow(codes, deadline=None, dropped=0, refresh_epoch=None):
     """Fund Flow Data (资金流向) — batch supported."""
     policy = cache_policy('fundflow')                                 # once per request
     budget = deadline if deadline is not None else time() + _BATCH_BUDGET_REST
     pool, cache, cache_ts, lock = _DOMAIN_STORES['fundflow']
     results, errors = _handle_cached_batch(
         codes, 'fundflow', policy, fetch_cls_fundflow,
-        pool=pool, cache=cache, cache_ts=cache_ts, lock=lock, budget=budget)
+        pool=pool, cache=cache, cache_ts=cache_ts, lock=lock, budget=budget,
+        refresh_epoch=refresh_epoch)
     return build_batch_response(codes, results, errors, dropped=dropped)
 
 
-def handle_cls_timeline(codes, deadline=None, dropped=0):
+def handle_cls_timeline(codes, deadline=None, dropped=0, refresh_epoch=None):
     """Stock Timeline Data (分时图) — batch supported."""
     policy = cache_policy('timeline')
     budget = deadline if deadline is not None else time() + _BATCH_BUDGET_REST
     pool, cache, cache_ts, lock = _DOMAIN_STORES['timeline']
     results, errors = _handle_cached_batch(
         codes, 'timeline', policy, fetch_cls_timeline,
-        pool=pool, cache=cache, cache_ts=cache_ts, lock=lock, budget=budget)
+        pool=pool, cache=cache, cache_ts=cache_ts, lock=lock, budget=budget,
+        refresh_epoch=refresh_epoch)
     return build_batch_response(codes, results, errors, dropped=dropped)
 
 
@@ -1052,14 +1268,21 @@ def handle_cls_f10(codes, deadline=None, dropped=0):
     return build_batch_response(codes, results, errors, dropped=dropped)
 
 
-def handle_cls_basic_infos(codes, deadline=None, dropped=0):
-    """Stock Basic Info — batch supported."""
+def handle_cls_basic_infos(codes, deadline=None, dropped=0,
+                           refresh_epoch=None):
+    """Stock Basic Info — batch supported.
+
+    ``refresh_epoch`` is supplied by the SSE scheduler so the domain that sets
+    the tick is genuinely re-fetched every tick (see `_process_chunk`); REST
+    callers omit it and keep plain TTL caching.
+    """
     policy = cache_policy('quote')
     budget = deadline if deadline is not None else time() + _BATCH_BUDGET_REST
     pool, cache, cache_ts, lock = _DOMAIN_STORES['quote']
     results, errors = _handle_cached_batch(
         codes, 'quote', policy, fetch_cls_basic_info,
-        pool=pool, cache=cache, cache_ts=cache_ts, lock=lock, budget=budget)
+        pool=pool, cache=cache, cache_ts=cache_ts, lock=lock, budget=budget,
+        refresh_epoch=refresh_epoch)
     return build_batch_response(codes, results, errors, dropped=dropped)
 
 

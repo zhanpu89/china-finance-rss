@@ -37,8 +37,8 @@ def fetch_stock(code, timeout=30):
     url = f'{BASE_URL}/stock/data?code={code}'
     start = time.time()
     try:
-        resp = urllib.request.urlopen(url, timeout=timeout)
-        body = resp.read()
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            body = resp.read()
         elapsed = time.time() - start
         data = json.loads(body)
         if 'error' in data:

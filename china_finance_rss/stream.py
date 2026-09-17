@@ -20,6 +20,7 @@ Endpoints (port STREAM_PORT):
   GET    /stream/quote/<sid>           SSE stream (event: quote, every L1 tick)
 """
 
+import hashlib
 import json
 import logging
 import queue
@@ -36,7 +37,7 @@ from .config import (
     STREAM_PORT,
     MAX_STREAM_CONNS, MAX_CODES_PER_SUB, MAX_DEDUP_CODES, MAX_GROUPS,
     MGMT_BODY_TIMEOUT, STREAM_PING_INTERVAL, STREAM_QUEUE_BYTES_BUDGET,
-    stream_frame_bytes, _trading_tiers,
+    stream_frame_bytes, _trading_tiers, cache_policy,
 )
 from .stock_api import (
     BATCH_MAX_WORKERS, _prefetch_advance, _prefetch_slice, cached_batch,
@@ -55,32 +56,51 @@ _FIELD_HANDLERS = {
 _FIELD_DOMAINS = {'quote': 'quote', 'fundflow': 'fundflow', 'timeline': 'timeline'}
 _STREAM_REFRESH_KEY = 'stream_refresh'
 
-# ── Refresh capacity model (BR-STR-16, recalibrated by BUG-P6C-01/P6C-06) ──
+# ── Refresh capacity model (BR-STR-16; recalibrated BUG-P6C-06, then r5) ───
 # A tick's fresh refresh costs `codes × _fetches_per_code(fields)` upstream REST
 # calls, executed as per-field *serial* phases (each phase ≤ BATCH_MAX_WORKERS
 # wide).  `coverage` is therefore measured in fetch-calls per tick, never in
 # codes; `coverage_codes` is the code count whose full refresh fits the budget.
 # `fields` is the *subscribed* set (`_subscribed_fields()`), so a quote-only
-# group pays 1 call/code instead of the historical unconditional 3-field cost.
+# group pays only for its own domains instead of the historical unconditional
+# 3-field cost.  The tick itself is the fastest subscribed domain's tier
+# (`tick_interval(fields)`): 4s (L0) for quote, 8s (L1) for fundflow/timeline,
+# and slower domains simply hit their TTL cache on the intervening fast ticks.
 _TICK_BUDGET_FRACTION = 0.8
 # Serial-equivalent seconds one upstream REST call occupies one batch worker.
-# Recalibrated against the r3 deployment measurement (BUG-P6C-06): the cold
-# path costs ≈2.2 s per worker-call (20 codes × 3 fields cold = 10.5 s at
-# BATCH_MAX_WORKERS=8; the per-tick 1.0 estimate was still ~2× optimistic, so a
-# 51-fetch tick measured ≈14 s > the 6.4 s budget).  At tick=8 /
-# BATCH_MAX_WORKERS=8 this yields coverage=23 fetch-calls per tick, i.e.
-# coverage_codes=23 for a one-domain group — a <20-code group full-refreshes
-# every tick (23 × 2.2 / 8 = 6.3 s ≤ 0.8 × 8 s).
-_PER_FETCH_EST = 2.2
+# Source: config.STREAM_PER_FETCH_EST (env-overridable; default 0.3).
+# Recalibrated by the r5 warm-path measurement: once `cache.fetch_json` pools
+# connections and caches DNS the single-request latency is 139 ms p50 /
+# 167 ms max (was 340 ms), so a worker-call costs ≈0.14 s.  The old 2.2 priced
+# the pre-pooling *cold* path and over-estimated ≈16×, which capped coverage at
+# 23 fetch-calls/tick and left the 50-code × 8 s target unmet.  0.3 keeps
+# ≈2.2× headroom over the measured p50 (concurrency queueing / upstream jitter
+# / a cold first call); it is the conservative end of the warm-path range.
+# At tick=8 / BATCH_MAX_WORKERS=20 (see config; HTTP_POOL_MAX_PER_HOST=24
+# keeps the fan-out off the pool queue) this yields coverage =
+# int(6.4 × 20 / 0.3) = 426 fetch-calls per tick; at the quote-driven tick=4
+# it is 213.  In fetch-calls per code the steady-state costs are quote=2
+# (basic + depth), fundflow=1, timeline=1, so coverage_codes =
+# coverage // (_fetches_per_code(fields)): at tick=4, quote-only =
+# 213 // 2 = 106 and the 3-domain set = 213 // 4 = 53 — both ≥ 50, so the
+# 50-code × 3-domain target lands in C1 (whole pool every 4 s, no C2 shard;
+# BUG-SSE-DEPTH-01: at 16 workers the 3-domain figure was 42 < 50, forcing a
+# 2-tick shard and a 12.33 s cold first frame).  The C1 threshold is exactly
+# the 0.8 × tick budget (213 × 0.3 / 20 = 3.195 s ≤ 3.2 s = 0.8 × 4 s).
+_PER_FETCH_EST = config.STREAM_PER_FETCH_EST
 # Upstream REST calls per code per field.  Every steady-state domain costs ONE
 # call/code: `quote` (handle_cls_basic_infos → fetch_cls_basic_info) is
 # two-phase — basic_info + stock detail (sector) — but phase 2 is served from
 # the 7-day `sector` cache once warm, so the steady-state cost is 1 (the old
 # `2` priced the cold path, over-charging every tick — BUG-P6C-06).
+# `quote` is now 2: the five-level order book (`fetch_cls_stock_depth`, the
+# `depth` domain) is fetched alongside the basic info and rides the same frame,
+# so a quote refresh really does cost two upstream calls again — this time on
+# the steady-state path, not the cold one.
 # fundflow/timeline were always 1.  Unknown (test-injected) fields default to
 # _DEFAULT_FETCH_CALLS.  This map is the single authority for the per-code cost
 # model.
-_FIELD_FETCH_CALLS = {'quote': 1, 'fundflow': 1, 'timeline': 1}
+_FIELD_FETCH_CALLS = {'quote': 2, 'fundflow': 1, 'timeline': 1}
 _DEFAULT_FETCH_CALLS = 1
 
 # P1-4 admission cap (create_group / patch_group): the cross-group distinct-frame
@@ -128,6 +148,10 @@ class SubscriptionGroup:
         self.conns = set()          # of _SSEConn
         self.conns_lock = threading.Lock()
         self.last_push_ts = 0.0
+        # ★ BUG-冷启动-01: digest of the last frame actually enqueued to this
+        # group (ts excluded — see `_frame_signature`). `None` until the first
+        # send. Written only by the single push thread, like `last_push_ts`.
+        self.last_sig = None
         self.created_ts = time.time()
 
 
@@ -373,7 +397,11 @@ def _refresh_pool(codes, now=None, fields=None, tick=None, deadline=None):
 
     `now` is an injection point for tests; the scheduler uses wall-clock time.
     It is also forwarded to the terminal-cache read, so a test can drive the
-    sharded (C2) path with genuinely expired cache entries (T4).
+    sharded (C2) path with genuinely expired cache entries (T4).  In addition it
+    is the round's **freshness floor**: the domain that sets `tick` is passed
+    `now` as its `refresh_epoch`, so a cache entry written by the previous round
+    (δ s into that round) cannot satisfy this round and the data is really
+    re-fetched (see `_domain_refresh_epoch`).
 
     `tick` and `deadline` come from `_push_once` (one tick computation, one
     shared per-tick budget — P1-1/P1-6); a direct caller gets them recomputed
@@ -397,13 +425,19 @@ def _refresh_pool(codes, now=None, fields=None, tick=None, deadline=None):
     # threshold and the dispatch cadence can never disagree at a tier flip
     # (09:30/11:30/13:00 gave 8 s here vs 120 s in `_push_once`).
     if tick is None:
-        tick = tick_interval()
+        tick = tick_interval(fields)
     if deadline is None:
         # ★ P1-1: all field phases share ONE tick budget.  Without it each
         # handler fell back to `_BATCH_BUDGET_REST` (15 s) and three serial
         # phases could block the push thread for 45 s — every SSE connection
         # starved of `event: quote` exactly when the market is busiest.
         deadline = time.time() + _TICK_BUDGET_FRACTION * tick
+    # ★ Freshness floor base: the round's start (`now` from `_push_once`; a
+    # direct caller with `now=None` gets wall-clock).  Entries written before it
+    # belong to an earlier round and must not be served — see
+    # `_domain_refresh_epoch`.  This is what makes the domain that sets the tick
+    # genuinely re-fetch each tick instead of every other one.
+    epoch_base = time.time() if now is None else now
     coverage, coverage_codes = refresh_capacity(tick, fields)
     fetches_per_code = _fetches_per_code(fields)
 
@@ -427,8 +461,11 @@ def _refresh_pool(codes, now=None, fields=None, tick=None, deadline=None):
             for code in sl:
                 errors.setdefault(code, 'tick_budget_exceeded')
             break
-        fetched = handler(list(sl), deadline=deadline)  # BR-STR-24: no `dropped`
-        if not fetched:
+        # The domain that sets the tick is force-refreshed this round; a slower
+        # domain keeps its TTL interleave (epoch None).
+        epoch = _domain_refresh_epoch(_FIELD_DOMAINS.get(field), tick, epoch_base)
+        fetched = _call_refresh_handler(handler, list(sl), deadline, epoch)
+        if not fetched:                             # BR-STR-24: no `dropped`
             continue
         for code, data in fetched.items():
             if not isinstance(code, str) or code.startswith('_'):
@@ -518,9 +555,115 @@ def _build_frame(snapshot, codes, fields):
     return json.dumps(payload, ensure_ascii=False, separators=(',', ':'))
 
 
-def tick_interval():
-    """Push cadence = L1 tier (8s in trading, 120s off-hours)."""
-    return _trading_tiers()['L1']
+# `_build_frame` emits `{'ts': <ms>, **content}` with the compact separators,
+# so `ts` is always the frame's leading field.
+_TS_FIELD_PREFIX = b'{"ts":'
+
+
+def _frame_signature(frame):
+    """Dedup basis: `frame` with the build-time ``ts`` field removed (hashed).
+
+    ★ BUG-冷启动-01: ``ts`` changes on every build, so it cannot take part in
+    the "did the market data change?" comparison.  The frame is serialized
+    with the compact separators and ``ts`` first, so slicing past its comma
+    yields the content byte-for-byte: ``codes_total`` / ``fields`` / ``items`` /
+    ``missing`` / ``missing_count`` / ``errors`` / ``stale`` / ``stale_count``.
+    A 16-byte blake2b digest is kept instead of the slice so the per-group dedup
+    state stays O(1) bytes (retaining the slice would double the memory a large
+    group's frame occupies) and the comparison is one fixed-size compare rather
+    than a deep dict walk.
+    """
+    data = frame.encode('utf-8')
+    if data[:len(_TS_FIELD_PREFIX)] == _TS_FIELD_PREFIX:
+        comma = data.find(b',', len(_TS_FIELD_PREFIX))
+        if comma != -1:
+            data = data[comma + 1:]
+    return hashlib.blake2b(data, digest_size=16).digest()
+
+
+def tick_interval(fields=None):
+    """Push cadence = the shortest TTL among ``fields``' domains.
+
+    ``fields`` is the live subscription's field union (``_subscribed_fields()``);
+    each field maps to a cache domain via ``_FIELD_DOMAINS`` and the cadence is
+    that domain's tier TTL, so a quote-only group is pushed at the L0 cadence
+    (4s in-session) while a fundflow-only group stays on L1 (8s).  A mixed
+    subscription takes the minimum, i.e. the fastest domain wins — the client
+    asked for the fastest thing it subscribes to.
+
+    Because every fetch goes through the TTL-cached ``fetch_json`` funnel, a
+    slower domain (fundflow/timeline, L1=8s) simply hits its cache on the
+    intervening 4s tick and issues no upstream request: a 4s tick does not
+    double upstream load, it interleaves the domains (按域分拍).
+
+    The *fastest* domain cannot interleave with itself, though: its TTL equals
+    the tick, and a cache write lands δ s after the round start, so a plain TTL
+    read at the next tick would find an entry only ``tick − δ`` old and skip the
+    upstream call — every other tick would carry no new data.  `_refresh_pool`
+    therefore passes the round start as that domain's ``refresh_epoch``, forcing
+    one real upstream refresh per tick (quote-only: 2 calls/code/tick), while
+    the slower domains keep the TTL interleave.
+
+    With no fields (no live subscription) the historical L1 baseline is kept,
+    so an idle scheduler and every pre-existing caller behave exactly as before.
+    """
+    fields = fields or []
+    domains = {_FIELD_DOMAINS.get(f) for f in fields}
+    domains.discard(None)
+    if not domains:
+        return _trading_tiers()['L1']
+    tiers = _trading_tiers()
+    return min(tiers[cache_policy(d)['tier']] for d in sorted(domains))
+
+
+def _domain_refresh_epoch(domain, tick, now):
+    """Freshness floor for one domain's *scheduled* refresh, or ``None``.
+
+    A domain whose cache TTL is **no longer than the tick** is the domain that
+    *sets* the tick, and it suffers the phase coupling: a refresh writes its
+    cache entry δ s after the round started, so the next round (at ``t0 + tick``)
+    reads an entry only ``tick − δ`` old — inside a TTL equal to the tick — and
+    issues no upstream request, silently halving the effective cadence (a 4 s
+    quote TTL refreshed every 8 s).  For such a domain the round start is
+    returned as the floor: `stock_api`/`cache` then refuse any entry written
+    before this round, so the data is guaranteed to come from upstream.
+
+    A domain whose TTL is **longer** than the tick (fundflow/timeline, L1=8 s,
+    under a quote-driven 4 s tick) is *deliberately* interleaved through that
+    cache (按域分拍); forcing it every tick would double its upstream load for
+    no fresher data, so it keeps plain TTL semantics (``None``).
+
+    ``domain`` is ``None`` only for a test-injected field with no
+    `_FIELD_DOMAINS` entry — no floor, exactly as before.
+    """
+    if domain is None:
+        return None
+    if cache_policy(domain)['ttl'] <= tick:
+        return now
+    return None
+
+
+def _call_refresh_handler(handler, codes, deadline, refresh_epoch):
+    """Call a ``_FIELD_HANDLERS`` entry with the round's freshness floor.
+
+    Mirrors ``stock_api._call_fetcher``: the epoch is a *pure additive hint*, so
+    a handler whose signature predates it (a test double patched into
+    ``_FIELD_HANDLERS``, a tool-supplied handler) still receives the exact
+    pre-existing call shape.  Only a **call-frame** binding ``TypeError``
+    triggers the fallback; a ``TypeError`` raised *inside* the handler body is a
+    real failure and is re-raised untouched.  Every production handler accepts
+    the keyword (pinned by a test), so the fallback is never taken in
+    production and the floor can never be silently dropped.
+    """
+    if refresh_epoch is not None:
+        try:
+            return handler(codes, deadline=deadline,
+                           refresh_epoch=refresh_epoch)
+        except TypeError as exc:
+            tb = exc.__traceback__
+            if tb is None or tb.tb_next is not None:
+                raise                                  # raised in the body
+    return handler(codes, deadline=deadline)
 
 
 # ── connection / broadcast ─────────────────────────────────────────────────
@@ -534,6 +677,10 @@ class _SSEConn:
         # overwrites). None sentinel wakes the handler to exit (not billed).
         self.q = queue.Queue(maxsize=8)
         self.closed = False
+        # ★ BUG-冷启动-01: has this connection received any frame yet?  A fresh
+        # `_serve_sse` connection must be force-fed the current frame even when
+        # its content is unchanged.  Only the push thread touches this.
+        self.sent_any = False
 
 
 class _Frame:
@@ -667,7 +814,26 @@ def _reserve_for(incoming_len):
 
 
 def _broadcast(snapshot):
-    """BR-STR-2/9/10/11/13: frame build + enqueue outside all group locks."""
+    """BR-STR-2/9/10/11/13: frame build + enqueue outside all group locks.
+
+    ★ BUG-冷启动-01 (send-layer dedup): a tick whose snapshot is byte-identical
+    to the group's previous frame (``ts`` excluded — it changes on every build)
+    is not re-sent.  The tick grid pins *round starts* to ``t0 + k×tick``, but
+    frames leave at the *round end*, so their arrival spacing is
+    ``tick − dur_k + dur_{k+1}``: a 3.5 s cold round followed by a 0.1 s warm
+    one put two frames 0.6 s apart even though the second carried no new data
+    (a cache-hit frame).  Dropping the duplicate removes that artifact at the
+    source.  It only ever *sends less*, never later: a changed snapshot still
+    goes out on its own tick, and any connection that has not yet received a
+    frame (``sent_any``) is force-fed the current one instead of waiting.
+
+    Guarantee (BUG-冷启动-01 ④): a connection that has received a frame is only
+    sent again when the content *differs* from the group's last sent content,
+    so no stream carries two consecutive frames with identical content.  Frames
+    dropped by ``_reserve_for``/``queue.Full`` for an already-lagging client are
+    the one pre-existing exception (that client is outside the frame contract
+    and re-syncs on the next content change).
+    """
     now = time.time()
     with _groups_lock:
         groups = list(_groups.values())             # ① snapshot then release
@@ -688,9 +854,23 @@ def _broadcast(snapshot):
         payload = _build_frame(snapshot, codes, fields)     # ★ outside locks
         if payload is None:
             continue
+        sig = _frame_signature(payload)             # ★ BUG-冷启动-01
+        newcomers = [c for c in live if not c.sent_any]
+        if sig == g.last_sig and not newcomers:
+            # Identical to the frame this group already holds and every live
+            # connection has it ⇒ re-sending would emit the byte-identical
+            # "cache-hit frame" behind the sub-tick gap. `last_push_ts` is
+            # deliberately NOT refreshed — it tracks a real send.
+            continue
+        # A changed snapshot goes to every live connection; an unchanged one
+        # only to connections that never received a frame (they must not wait a
+        # full tick) — never re-sent to a connection already holding it, which
+        # would put two identical consecutive frames on its stream.
+        targets = live if sig != g.last_sig else newcomers
         frame = _Frame(payload, g.sid)
         _reserve_for(frame.size)                    # make room before enqueueing
-        for conn in live:
+        sent = False
+        for conn in targets:
             if conn.closed:
                 continue
             # ★ BR-STR-9 (P1-1): bill BEFORE the frame becomes visible. A handler
@@ -717,9 +897,16 @@ def _broadcast(snapshot):
                 except queue.Full:
                     _frame_release(frame)   # ★ never enqueued ⇒ un-bill
                     continue
+            conn.sent_any = True
+            sent = True
             if conn.closed:             # ★ BR-STR-13: put/closed race收口
                 _drain_conn_queue(conn)
-        g.last_push_ts = now
+        if sent:
+            # ★ BUG-冷启动-01: refresh the dedup basis + the zombie-reaper
+            # timestamp only when a frame really went out (a skipped duplicate
+            # or an all-closed target list must not claim a push).
+            g.last_sig = sig
+            g.last_push_ts = now
 
 
 _GROUP_IDLE_TTL = config.STREAM_GROUP_IDLE_TTL  # idle zombie group reaper
@@ -752,6 +939,47 @@ def _sweep_idle_groups(now=None):
             log.warning(f'[stream] sweep {sid} failed: {e}')
 
 
+# ── Idle-sleep wake (SSE cold-start latency) ───────────────────────────────
+# The push loop sleeps on the tick grid with a hard `time.sleep`.  With no live
+# demand the grid falls back to the L1 baseline (8s in-session, 120s off-hours),
+# so the FIRST subscriber of a cold process used to wait up to a whole baseline
+# tick before any refresh started (measured 5.69s of the 9.87s cold first
+# frame).  `_wake_push_loop` interrupts that wait.
+#
+# No-burst guarantee (BUG-P6C-06): only the wait of a round that found NO live
+# demand is interruptible.  A round with live demand keeps its plain
+# `time.sleep` onto the `t0 + k×tick` grid, so a wake can never put two round
+# *starts* less than one tick apart (an empty-demand round emits no frame at
+# all, so it cannot burst frames either — see `_tick_sleep_seconds` for why the
+# guarantee is about round starts, not frame arrivals).  The woken round
+# re-reads `t0 = time.time()` at the top of the iteration, i.e. it starts on a
+# fresh, full-tick grid.
+_wake_lock = threading.Lock()     # leaf lock: guards the two flags below only
+_wake_event = threading.Event()   # set to interrupt an idle wait
+_idle_sleeping = False            # True while push_loop is in a wakeable idle wait
+_wake_pending = False             # a wake arrived while not yet idle-sleeping
+_last_round_idle = False          # did the last completed round find no demand?
+# Process's first refresh-bearing round is exempt from degraded/slip (cold path).
+_first_refresh_done = False
+
+
+def _wake_push_loop():
+    """Interrupt an idle push-loop wait so new demand refreshes immediately.
+
+    Safe from any thread and never blocks on IO or a non-leaf lock (`_wake_lock`
+    guards two flags only).  When the loop is not currently idle-sleeping the
+    request is merely remembered in `_wake_pending`, which closes the
+    lost-wakeup window between a round reading its targets and the loop marking
+    itself idle-sleeping.  A pending request is consumed at the top of the next
+    round, so it can never wake a later *active* sleep (no burst).
+    """
+    global _wake_pending
+    with _wake_lock:
+        _wake_pending = True
+        if _idle_sleeping:
+            _wake_event.set()
+
+
 def _tick_sleep_seconds(t0, tick, now):
     """BR-STR-27 cadence baseline + BUG-P6C-06 integer-tick grid alignment.
 
@@ -766,7 +994,19 @@ def _tick_sleep_seconds(t0, tick, now):
     the budget.  A round longer than one whole tick then produced a frame 2 s
     after the previous one — the "2 s back-to-back duplicate frame" — preceded
     by a 12–17 s stall: a two-peak inter-frame histogram.  On the grid the
-    interval is never shorter than one tick, so no short burst can be emitted.
+    *round-start* spacing is never shorter than one tick, so that back-to-back
+    re-run is gone.
+
+    ★ BUG-冷启动-01 — the real invariant is **round start to round start
+    ≥ 1 tick**, not "frame interval ≥ 1 tick".  Frames leave at the round *end*
+    (``_broadcast``), so the arrival spacing between two *sent* frames is
+    ``tick − dur_k + dur_{k+1}`` and inherits the refresh-duration jitter: it
+    can be shorter than a tick when ``dur_k > dur_{k+1}`` — e.g. a 3.5 s cold
+    round followed by a 0.1 s warm one gave a measured ~0.6 s gap once the
+    quote tick dropped to 4 s.  The old wording claimed a frame-arrival floor
+    of one tick, which was falsified.  Unchanged frames are now dropped by
+    ``_broadcast``'s dedup, so a sub-tick gap only survives a *real* data
+    change between the two rounds (new information, sent immediately).
     """
     elapsed = now - t0
     k = int(elapsed // tick) + 1                     # next grid point after now
@@ -775,8 +1015,16 @@ def _tick_sleep_seconds(t0, tick, now):
     return max(t0 + k * tick - now, 0.0)
 
 
-def _push_once(t0=None):
+def _push_once(t0=None, tick=None):
     """One scheduled iteration of `push_loop`; returns that round's sleep delay.
+
+    ``tick`` is the round's cadence, computed **once** by `push_loop` from the
+    live subscription (`tick_interval(_subscribed_fields())`) and handed down
+    here (P1-6: the C1/C2 threshold, the per-tick deadline and the slip
+    accounting must all agree, and re-computing it per stage opened a window at
+    a tier flip where the frame cadence and the budget disagreed).  A direct
+    caller (tests / tools) that omits it gets it recomputed from the live
+    subscription, exactly as `push_loop` would.
 
     Extracted (BUG-P6C-08) so a test can drive **the real scheduled path** —
     the `if codes:` guard and its empty-pool branch included — without an
@@ -786,10 +1034,13 @@ def _push_once(t0=None):
     `_refresh_pool`: the latter is unreachable once the pool is empty (the
     guard below), so the gauge used to strand at its last C2 value forever
     after the final subscription went away (tester r4 §5, 150s/≥2 ticks at 2).
+
+    Also publishes `_last_round_idle` (read by `push_loop` to decide whether its
+    sleep is wakeable) and applies the one-time cold-start degraded/slip
+    exemption for the process's first refresh-bearing round.
     """
-    global _last_group_sweep
+    global _last_group_sweep, _last_round_idle, _first_refresh_done
     t0 = time.time() if t0 is None else t0
-    tick = tick_interval()
     now = time.time()
     if now - _last_group_sweep >= 60:
         _sweep_idle_groups(now)
@@ -797,7 +1048,18 @@ def _push_once(t0=None):
     # ★ BUG-P6C-06: codes + fields read together (one lock acquisition)
     # so the refresh set can never disagree with the live subscription.
     codes, fields = _active_targets()
+    _last_round_idle = not codes        # ★ wake only interrupts an empty-pool wait
+    cold_first = False
+    if tick is None:                                # direct caller (no push_loop)
+        tick = tick_interval(fields)
     if codes:
+        # ★ Cold-start exemption: the process's first refresh-bearing round pays
+        # the one-off cold path (empty connection pool / DNS cache / sector
+        # cache), which is a start-up cost, not a degradation.  ONLY that round
+        # is exempt — every later overrun is counted, so a real degradation is
+        # never hidden.  Empty rounds never reach here and cannot consume it.
+        cold_first = not _first_refresh_done
+        _first_refresh_done = True
         snapshot = _refresh_pool(codes, now, fields, tick=tick)   # ★ P1-6
         snapshot, stale = _carry_forward(snapshot, codes, fields)  # ★ P1-4
         if stale:
@@ -811,16 +1073,23 @@ def _push_once(t0=None):
     duration = time.time() - t0
     metrics.set_gauge('stream_tick_duration_ms', round(duration * 1000, 2))
     # Empty rounds cost ~0ms, so neither counter grows on this branch: degraded
-    # and slip are strictly a property of a refresh that ran and overran.
-    if duration > _TICK_BUDGET_FRACTION * tick:
+    # and slip are strictly a property of a refresh that ran and overran.  The
+    # cold first refresh is the one documented exception (`cold_first` above).
+    if not cold_first and duration > _TICK_BUDGET_FRACTION * tick:
         metrics.incr('stream_tick_degraded_total')
-    if duration >= tick:
+    if not cold_first and duration >= tick:
         metrics.incr('stream_tick_slip_total')
     return _tick_sleep_seconds(t0, tick, time.time())    # ★ BR-STR-27
 
 
 def push_loop():
-    """Background thread: refresh the active pool every L1 tick, then fan out.
+    """Background thread: refresh the active pool every tick, then fan out.
+
+    The tick is the fastest domain the live subscription needs
+    (`tick_interval(_subscribed_fields())`): 4s while a quote group is live
+    (L0), 8s for fundflow/timeline only, 120s off-hours.  It is computed once
+    per round here and passed into `_push_once`, so the frame cadence, the
+    refresh budget and the slip accounting can never disagree.
 
     BR-STR-25..27: the tick budget baseline is this round's start time, so a
     slow refresh cannot eat into the next interval (no silent slip).  The
@@ -831,25 +1100,62 @@ def push_loop():
     (1, 2, 4, … ticks, capped) instead of the old fixed ``sleep(1)``.  A fault
     that repeats used to degrade the loop into a ~1 s spin — up to ~tick×
     rounds per interval, multiplying upstream pressure exactly when it is worst.
+
+    Cold-start wake (SSE latency): a round that found NO live demand sleeps on
+    the L1 baseline grid and is *interruptible* — `_wake_push_loop` (called by
+    `create_group` and `_serve_sse`) releases it as soon as demand appears, so
+    the first subscriber is refreshed immediately instead of waiting up to a
+    whole baseline tick.  An active round keeps a hard `time.sleep` so the
+    round-start tick grid (the invariant `_tick_sleep_seconds` documents) is
+    untouched.
     """
+    global _idle_sleeping, _wake_pending
     consecutive = 0
+    tick = tick_interval()                          # seed: no live demand yet
     while True:
+        # Consume any wake that arrived while the loop was not sleeping: it is
+        # either already reflected in this round's targets, or (if it arrived
+        # mid-round) it will be re-observed in `_wake_pending` below.  Clearing
+        # here guarantees a stale request can never wake a later active sleep.
+        with _wake_lock:
+            _wake_event.clear()
+            _wake_pending = False
         t0 = time.time()
-        tick = tick_interval()
+        idle = False
         try:
-            delay = _push_once(t0)
+            tick = tick_interval(_subscribed_fields())   # ★ once per round
+            delay = _push_once(t0, tick=tick)
+            idle = _last_round_idle
             consecutive = 0
         except Exception as e:
             consecutive += 1
             log.error(f'[stream] push_loop error (x{consecutive}): {e}')
+            # `tick` keeps the last computed cadence (or the L1 seed), so the
+            # backoff still lands on the round's grid.
             spans = min(2 ** (consecutive - 1), _PUSH_ERROR_BACKOFF_CAP_TICKS)
             # Back off on the tick grid: the exponential span when it fits,
             # otherwise the next grid point — never a ~1 s spin (and never a
             # busy loop when the failing round itself overran the span).
             backoff = spans * tick - (time.time() - t0)
             delay = max(backoff, _tick_sleep_seconds(t0, tick, time.time()))
-        if delay > 0:
+        if delay <= 0:
+            continue
+        if not idle:
+            # Active demand: a hard grid sleep (never interruptible ⇒ no burst).
             time.sleep(delay)
+            continue
+        # Empty-demand round: an interruptible wait.  `_wake_pending` closes the
+        # race where a wake arrived after this round read its targets but before
+        # the loop marked itself idle-sleeping (lost wakeup).
+        with _wake_lock:
+            _idle_sleeping = True
+            if _wake_pending:
+                _wake_event.set()
+        try:
+            _wake_event.wait(delay)
+        finally:
+            with _wake_lock:
+                _idle_sleeping = False
 
 
 # ── group CRUD (used by HTTP handlers and tests) ───────────────────────────
@@ -908,6 +1214,9 @@ def create_group(codes, fields):
         sid = _new_sid()
         group = SubscriptionGroup(sid, clean, g_fields)     # ★ local (no KeyError)
         _groups[sid] = group
+    # ★ Cold-start wake: a new subscription must not wait for the next baseline
+    # grid point.  Outside `_groups_lock` (`_wake_lock` is a leaf).
+    _wake_push_loop()
     log.info(f'[stream] group {sid} created: {len(clean)} codes, '
              f'fields={group.fields}')
     return sid, None
@@ -1032,7 +1341,7 @@ def _capacity_meta(codes, fields):
     size its watchlist instead of discovering a >95%-null frame later.  Keys are
     additive — the existing ``sid``/``codes``/``fields`` contract is unchanged.
     """
-    _, coverage_codes = refresh_capacity(tick_interval(), fields)
+    _, coverage_codes = refresh_capacity(tick_interval(fields), fields)
     n = len(codes)
     if n <= coverage_codes:
         return {'refresh_capacity_codes': coverage_codes}
@@ -1219,6 +1528,11 @@ class StreamHandler(BaseHTTPRequestHandler):
             _release_conn(conn)                      # drain (empty) + decrement
             self._send_json(404, {'error': 'subscription not found'})
             return
+        # ★ Cold-start wake: demand just became live (the first connection of a
+        # cold process is what turns a created-but-empty group into real state).
+        # If the push loop is in its idle (empty-pool) wait, refresh now instead
+        # of waiting up to a whole L1 baseline tick.
+        _wake_push_loop()
         stalled = False
         try:
             self.send_response(200)

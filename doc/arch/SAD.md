@@ -1,12 +1,12 @@
 # 短线交易财经数据服务 — 高效/准确/稳定优化专项架构建档（SAD）
 
-> **文档编号** SAD-2026-P6C-01 · **版本** v1.5 · **状态** 待复审
-> **日期** 2026-09-16 · **产出** system-architect
+> **文档编号** SAD-2026-P6C-01 · **版本** v1.7 · **状态** 待复审
+> **日期** 2026-09-17 · **产出** system-architect
 > **上游输入** PRD `doc/prd/perf-stability-optimization.md`（v0.4，30 AC / R1-R20）
-> **修订依据**（v1.1）review-expert `doc/review/perf-stability-optimization_架构评审_专家版.md`（REV-ARCH-20260915-001，❌ 阻断：P0×1 + P1×7 + P2×8；Q1/Q2/Q3 裁决）；（v1.2）复审「❌ 仍阻断」但机制层（P0×1 + P1×7）已全部合格、Q1/Q2/Q3 逐字落地——仅收口 **P1-N1（coverage 单位）** ＋ **P1-N2（`_Frame.refs` 收口）** 与 7 项 P2。逐项落地见 §9；（v1.3）基础层三模块详设评审 review-expert `doc/review/基础层三模块_详细设计评审_专家版.md`（REV-DES-20260915-001，✅ 通过 P0×0/P1×1/P2×8）——落地 P3b 评审的 SAD 侧动作：3 项内部矛盾更正 + 6 项裁决 + D-1~D-7 偏差回填 + 2 项 SAD↔代码不一致更正，逐项见 §9.3；（v1.4）**P7b 契约同步**——以**代码为准**回写实现的最新行为（帧契约、订阅字段容量模型、单帧余量准入、探预算阶梯、deadline 贯通、`canonical_code` 归一化权威、CDP/观测口径），并登记 1 项与 PRD AC-A5 冲突的**待裁决**漂移，逐项见 **§9.4**；（v1.5）**裁决落地收尾同步**——编排层对 3 处契约冲突的裁决已同步 PRD（`perf-stability-optimization.md` v0.5），本轮以**代码为准**把 SAD 侧结论回写：① **N1 关闭**（业务端点降级维持 **200 + error 客体**，`server._json_payload_has_data` 已删除、`_send_json_shape` 恒 200，`http_503_total` 计数点 4→3）；② **AC-S3 模式 B 探测预算阶梯封顶 5s**（`2→4→5`，`cache._PROBE_BUDGET_CAP=5.0`；P95 口径重标为**高密度 ≤5s / 低密度 ≤10s**）；③ **`_LOCAL_BUDGET` 不入冷却账本**的 v1.4 反转**正式确认**（反转 REV-DES-15 裁决②）。逐项见 **§9.5**
+> **修订依据**（v1.1）review-expert `doc/review/perf-stability-optimization_架构评审_专家版.md`（REV-ARCH-20260915-001，❌ 阻断：P0×1 + P1×7 + P2×8；Q1/Q2/Q3 裁决）；（v1.2）复审「❌ 仍阻断」但机制层（P0×1 + P1×7）已全部合格、Q1/Q2/Q3 逐字落地——仅收口 **P1-N1（coverage 单位）** ＋ **P1-N2（`_Frame.refs` 收口）** 与 7 项 P2。逐项落地见 §9；（v1.3）基础层三模块详设评审 review-expert `doc/review/基础层三模块_详细设计评审_专家版.md`（REV-DES-20260915-001，✅ 通过 P0×0/P1×1/P2×8）——落地 P3b 评审的 SAD 侧动作：3 项内部矛盾更正 + 6 项裁决 + D-1~D-7 偏差回填 + 2 项 SAD↔代码不一致更正，逐项见 §9.3；（v1.4）**P7b 契约同步**——以**代码为准**回写实现的最新行为（帧契约、订阅字段容量模型、单帧余量准入、探预算阶梯、deadline 贯通、`canonical_code` 归一化权威、CDP/观测口径），并登记 1 项与 PRD AC-A5 冲突的**待裁决**漂移，逐项见 **§9.4**；（v1.5）**裁决落地收尾同步**——编排层对 3 处契约冲突的裁决已同步 PRD（`perf-stability-optimization.md` v0.5），本轮以**代码为准**把 SAD 侧结论回写：① **N1 关闭**（业务端点降级维持 **200 + error 客体**，`server._json_payload_has_data` 已删除、`_send_json_shape` 恒 200，`http_503_total` 计数点 4→3）；② **AC-S3 模式 B 探测预算阶梯封顶 5s**（`2→4→5`，`cache._PROBE_BUDGET_CAP=5.0`；P95 口径重标为**高密度 ≤5s / 低密度 ≤10s**）；③ **`_LOCAL_BUDGET` 不入冷却账本**的 v1.4 反转**正式确认**（反转 REV-DES-15 裁决②）。逐项见 **§9.5**；（v1.6）**P2-4 内存口径统一**——按容器内实测把 CDP 页面内存从单一「150MB+/页」拆为**明示双重口径**（RSS vs PSS），登记**固定基线 250MB(PSS)** 与 `CDP_STOCK_PAGES` **env 驱动**（2C2G 档位 = 4，+2 常驻 = **6 内容页**），逐项见 **§9.6**；（v1.7）**P7b 契约同步（第二轮）**——以**代码为准**把多轮实现回写到 SAD：① **新增 L0 档（盘中 4s）**，`quote`/`depth` 升 L0、`tick_interval(fields)` 改为**订阅域最短 tier TTL**（无订阅回落 L1）；② **容量常量/数值重标定**（`_PER_FETCH_EST` 2.2→**0.3**、`BATCH_MAX_WORKERS` 8→**20**、`HTTP_POOL_MAX_PER_HOST` 16→**24**；`coverage` 盘中 4s→**213** / 8s→426 / 盘后 120s→6400，`coverage_codes` 4s quote-only→**106** / 3 域→**53**，50 码 3 域**回 C1**）；③ **`refresh_epoch`** 解耦 tick 与缓存 TTL（每拍必真回源；原"TTL==tick 即命中缓存"的相位缺陷致名义 4s 曾实际 8s）；④ **`_tick_sleep_seconds` 真实不变量订正**为「轮起点→轮起点 ≥ 1 tick」（"帧间隔 ≥ tick"已被证伪）；⑤ **上游传输层**（keep-alive 连接池 + 进程内 DNS TTL 缓存 + 启动预热 `warm_transport`；实测单请求 340ms→**139ms**、DNS 170ms→**15.8ms**、4s 重试尾消除）；⑥ **上游双 wire 格式**（沪/深 = 前缀形、北交所 = 点号大写 `430047.BJ`；新增 `config.upstream_secu_code()`；上游用 `HTTP 200 + 空壳`表示错误格式 ⇒ **关键字段非空校验**）；⑦ **新增 `depth` 五档域**并入 SSE `quote` 负载（只增字段；空 dict/全 0 ⇒ 无 `depth` 键，不伪造）；⑧ **帧发送层去重**（内容未变不发、新连接强制首发）。逐项见 **§9.7**
 > **硬约束** Python 3 标准库零依赖 · 无前端 · 无外部存储 · 不改技术栈
 > **定位** 优化专项架构（非新建系统）：只做**架构级改造与契约收口**，不新增业务功能、不改路由与 API 签名
-> **端锁定** 🟠 STABLE（仅**新增**下划线保留键与观测字段；`feeds[].status` 属**改既有字段取值**，须编排层批准，见 §7.1 Q2）。**v1.4 新增两项边界（须编排层登记）**：① SSE 帧**只增**元数据（`codes_total`/`fields`/`missing`/`missing_count`/`errors`/`stale`/`stale_count`）属 🟠 STABLE 的"只增"；② **JSON 单体/面板/工具端点业务降级维持 200**（v1.5 N1 裁决关闭）——这不是"状态码变更"，而是**保持旧版本契约**，与 PRD AC-A5 逐格一致；真实 503 仅**连接准入拒绝**（主/流端口）与 **`/healthz` degraded**（健康端点自身语义，**不构成"业务端点可 503"的先例**）（§2.4 / §7.1 N1）
+> **端锁定** 🟠 STABLE（仅**新增**下划线保留键与观测字段；`feeds[].status` 属**改既有字段取值**，须编排层批准，见 §7.1 Q2）。**v1.4 新增两项边界（须编排层登记）**：① SSE 帧**只增**元数据（`codes_total`/`fields`/`missing`/`missing_count`/`errors`/`stale`/`stale_count`）属 🟠 STABLE 的"只增"；② **JSON 单体/面板/工具端点业务降级维持 200**（v1.5 N1 裁决关闭）——这不是"状态码变更"，而是**保持旧版本契约**，与 PRD AC-A5 逐格一致；真实 503 仅**连接准入拒绝**（主/流端口）与 **`/healthz` degraded**（健康端点自身语义，**不构成"业务端点可 503"的先例**）（§2.4 / §7.1 N1）。**v1.7 新增两项「只增」边界（须编排层登记）**：③ SSE `quote` 字段负载内新增 `depth`（五档盘口）——`items[code].quote` 由"basic 客体"变为"basic 客体 **+ `depth` 键**"，属 🟠 STABLE「只增」（既有键类型与含义不变；空 dict/全 0/非普通股/指数 ⇒ **该键不出现**，不伪造）；④ `POST`/`PATCH /stream/subscriptions` 响应新增 `refresh_capacity_codes`/`refresh_lag_ticks`/`capacity_warning`（只增）
 
 ## 0. 阅读指引
 
@@ -101,7 +101,7 @@ push_loop()                                          [stream.py:246]  每 L1 tic
 | R17 | `STREAM_PING_INTERVAL=20`、socket 30s、部分窗口写死在代码 | 关键 IO 参数未 env 化 | 实现级 | S7 |
 | R18 | CDP 页面取数无防御访问：`_fill_missing(r, data, ...)` 假定 `data` 为 dict；`handle_finance_timeline` 返回 `.get('timeline')` 可为 `None`（非 error 客体） | **外部数据边界无防御契约**（与 R1 同源） | 架构级（契约） | S1/S4 |
 | R19 | `_cdp_memory_watchdog` 每 7200s **无条件**重启 Chrome（含交易时段）→ 15s 节流 + 45s 启动窗口内 CDP 端点全空，且外部不可观测 | **降级窗口无策略、无可见性** | 架构级（策略+观测） | S10/S4 |
-| R20 | `CDP_STOCK_PAGES` 默认 3 + 2 常驻页，每页 150MB+ | 参数化已具备，缺内存总账联动 | 实现级 | S9 |
+| R20 | `CDP_STOCK_PAGES` 默认 3 + 2 常驻页，每页 150MB+（**RSS 口径**；v1.6 校准：**PSS 口径 ≈60MB/页、固定基线 250MB(PSS)**，见 §4.3 / §9.6） | 参数化已具备，缺内存总账联动 | 实现级 | S9 |
 
 **归类小结**：架构级 15 项（R1/R2/R4/R5/R6/R7/R8/R9/R11/R12/R13/R14/R15/R16/R18/R19 中除 R3/R10/R17/R20 外）、实现级 4 项（R3/R10/R17/R20）。**M7 必做项全部落在架构级**——这决定了 task-decomposer 的拆分方式：先落 §2 的 6 个机制，再落逐 handler 的适配。
 
@@ -149,7 +149,8 @@ push_loop()                                          [stream.py:246]  每 L1 tic
 
 ```
 DOMAIN_MATRIX = {   # domain → (tier, ttl_factor, pool_refresh_factor, pool_max, cache_max)
-  'quote':        ('L1', 1.0, 1.0, 'dedup', 2000),   # basic_info / stock_detail / data（实时价）
+  'quote':        ('L0', 1.0, 1.0, 'dedup', 2000),   # ★ v1.7：个股实时价（basic_info / stock_detail / data），升 L0
+  'depth':        ('L0', 1.0, 1.0, 'dedup',  500),   # ★ v1.7 新增：五档盘口（与 quote 同拍；空 dict/全 0 ⇒ 无数据）
   'fundflow':     ('L1', 1.0, 1.0, 'dedup', 2000),
   'timeline':     ('L1', 1.0, 1.0, 'dedup', 2000),
   'plate':        ('L2', 1.0, 1.0, 'fixed:200',  'n/a'),  # 3 分区 stagger 由 handler 从 L2 派生（见下）；URL 缓存独占 ⇒ cache_max n/a
@@ -161,11 +162,15 @@ DOMAIN_MATRIX = {   # domain → (tier, ttl_factor, pool_refresh_factor, pool_ma
   'f10':          ('L4', 1.0, 1.0, 'dedup',      500),
   'sector':       ('L4', 'override:604800', 'n/a', 'fixed:2000', 2000),  # 行业名，7d
 }
-cache_policy('quote')  → {'tier':'L1','ttl':8,  'pool_refresh':8,  'pool_max':2000,'cache_max':2000}
+cache_policy('quote')  → 盘中 {'tier':'L0','ttl':4,  'pool_refresh':4,  'pool_max':2000,'cache_max':2000}
+                           非盘中 {'tier':'L0','ttl':120,'pool_refresh':120,...}
+cache_policy('depth')  → 盘中 {'tier':'L0','ttl':4,  'pool_refresh':4,  'pool_max':2000,'cache_max':500}
 cache_policy('feed')   → {'tier':'L3','ttl':30 (盘中) / 180 (非盘中),'pool_refresh':30/180,'cache_max':100}
 cache_policy('longhu') → {'tier':'L4','ttl':300,'encoding':'gbk','cache_max':null}
 cache_policy('plate')  → {'tier':'L2','ttl':12,'pool_refresh':12,'pool_max':200,'cache_max':null}
 ```
+
+> ⚠️ **v1.7 更正（L0 档，按代码回写）**：`_trading_tiers()` 现为 **5 档**——盘中 `{'L0':4,'L1':8,'L2':12,'L3':30,'L4':300}`，非盘中 `{'L0':120,'L1':120,'L2':120,'L3':180,'L4':300}`。**L0 = 4s**（≈上游实测 3.0s 一跳的 1.3×，既能看到每次上游变化又砍掉 8s 档的一半浪费），承载 `quote` 与新增的 `depth`；**非盘中 L0 钉到 L1 基线 120s**，不交易的市场不为"更快"多付上游请求。SAD v1.6 及以前写 `quote` 属 L1（8s），与代码不符，此处以代码为准。
 
 > ⚠️ **v1.4 更正（`cache_max` 口径，2 格）**：`plate` 与 `margin` 的 `cache_max` 是 `'n/a'`（运行时 `None`），**不是** 200 / 16。理由（实现 P2-9）：`cache_max` 约束的是**域自己的终点缓存**（`stock_api._cache_store` 的 `_*_cache`）或 **feed 缓存**（`cache.feed_cache_put`）；`plate`/`margin` 只经**共享 URL 缓存**（`cache.fetch_json`，`cache{}`）服务，其条目由全局 `cache.MAX_CACHE_SIZE=2000` 约束 ⇒ 给它们一个 per-domain int 是**操作者无法执行的死配置**。故"URL 缓存独占域"（`plate` / `news_url` / `longhu` / `margin`）一律 `'n/a'`；`pool_max` 不受影响（`plate`/`margin` 的 `fixed:200`/`fixed:16` 保留，它们约束的是去重池而非缓存）。SAD 上一版这两格与实现不符，此处以**代码为准**更正。
 
@@ -179,37 +184,47 @@ cache_policy('plate')  → {'tier':'L2','ttl':12,'pool_refresh':12,'pool_max':20
 
 **不变式（INV-1，可白盒断言，服务 AC-A3）**
 
-> **INV-1a（可证）**：对任意 domain：`ttl_url(d) == ttl_terminal(d) == cache_policy(d)['ttl']`，且 `pool_refresh(d) >= ttl(d)`；实时域（quote/fundflow/timeline）满足 `ttl(d) <= L1`。
+> **INV-1a（可证）**：对任意 domain：`ttl_url(d) == ttl_terminal(d) == cache_policy(d)['ttl']`，且 `pool_refresh(d) >= ttl(d)`；实时域（quote/depth/fundflow/timeline）满足 `ttl(d) <= L1`（quote/depth 实为 **L0=4s**，更严）。
 > 池刷新间隔 = ttl ⇒ 池内数据在被判定过期**之前**恰好被替换，不存在"配置上过期、实际无人刷新"的沉默窗口。
 >
-> **INV-1b（条件成立，修 P1-1 / P1-N1；**v1.4 按实现重标定**）**：「一个 L1 周期内覆盖整池」**不是**由池上限单独保证的，它取决于**活跃码数 N_active、订阅字段并集与单周期取数能力 coverage 的关系**。`_refresh_pool` 对**存活组订阅字段并集**（`_subscribed_fields()`，`stream.py:214`）按 `_FIELD_HANDLERS` 顺序**串行**各调一次批量 handler，`_handle_cached_batch` 内再按 50 分块串行——故 coverage 的**单位是「取数次数/周期」，不是「码」**，且**每码成本 = `_fetches_per_code(fields)`**（v1.4：**按订阅字段计**，不再是历史的无条件 3）：
+> **INV-1b（条件成立，修 P1-1 / P1-N1；**v1.7 按实现重标定**）**：「一个 tick 周期内覆盖整池」**不是**由池上限单独保证的，它取决于**活跃码数 N_active、订阅字段并集与单周期取数能力 coverage 的关系**。`_refresh_pool` 对**存活组订阅字段并集**（`_subscribed_fields()`，`stream.py:238`）按 `_FIELD_HANDLERS` 顺序**串行**各调一次批量 handler，`_handle_cached_batch` 内再按 50 分块串行——故 coverage 的**单位是「取数次数/周期」，不是「码」**，且**每码成本 = `_fetches_per_code(fields)`**（**按订阅字段计**）：
 > ```
-> _PER_FETCH_EST        = 2.2   # 单次取数占一个 batch worker 的串行等效秒数（r3 部署实测冷路径 ≈2.2s）
-> _FIELD_FETCH_CALLS    = {'quote': 1, 'fundflow': 1, 'timeline': 1}
->   # ★ v1.4：quote（handle_cls_basic_infos）实为两相（basic_info + stock detail/sector），
->   #   但第 2 相命中 7d `sector` 缓存后稳态成本 = 1（旧值 2 把冷路径价摊到每个 tick）。
->   #   fundflow / timeline 恒为 1。未知（测试注入）字段回退 _DEFAULT_FETCH_CALLS = 1。
-> _fetches_per_code(fields) = Σ _FIELD_FETCH_CALLS[f] for f in fields     # 1 / 2 / 3
-> coverage       = max(1, floor(_TICK_BUDGET_FRACTION × tick × BATCH_MAX_WORKERS / _PER_FETCH_EST))
->                = floor(0.8 × 8 × 8 / 2.2) = 23 取数次数/周期   （盘中 tick=8；非盘中 tick=120 ⇒ 349）
+> _PER_FETCH_EST        = 0.3   # 单次取数占一个 batch worker 的串行等效秒数
+>                               # ★ v1.7：2.2 → 0.3。keep-alive 连接池 + 进程内 DNS 缓存后暖路径
+>                               #   实测 139ms p50 / 167ms max（原 340ms）；0.3 留 ≈2.2× 余量
+> BATCH_MAX_WORKERS     = 20    # ★ v1.7：8 → 20，与 HTTP_POOL_MAX_PER_HOST=24 对齐（扇出不排队在池上）
+> _FIELD_FETCH_CALLS    = {'quote': 2, 'fundflow': 1, 'timeline': 1}
+>   # ★ v1.7：quote 稳态 = basic_info + 五档 depth 两次真实上游调用（depth 与 quote 同拍）。
+>   #   v1.4 的"quote 稳态 1"被 depth 并入推翻——那次第 2 相（sector）命中 7d 缓存，
+>   #   这一次第 2 相是每拍必刷的 depth。fundflow / timeline 恒为 1；
+>   #   未知（测试注入）字段回退 _DEFAULT_FETCH_CALLS = 1。
+> _fetches_per_code(fields) = Σ _FIELD_FETCH_CALLS[f] for f in fields  # quote 2 / 2 域 3 / 全 3 域 4
+> tick           = tick_interval(fields) = min(订阅域的 tier TTL)
+>                  # 盘中 quote→L0=4s；fundflow/timeline-only→L1=8s；无订阅回落 L1=8s
+> coverage       = max(1, int(_TICK_BUDGET_FRACTION × tick × BATCH_MAX_WORKERS / _PER_FETCH_EST))
+>                = int(0.8 × 4  × 20 / 0.3) = 213 取数次数/周期   （盘中 quote tick=4）
+>                = int(0.8 × 8  × 20 / 0.3) = 426                  （盘中 fundflow/timeline tick=8）
+>                = int(0.8 × 120× 20 / 0.3) = 6400                 （非盘中 tick=120）
 > coverage_codes = max(1, coverage // _fetches_per_code(fields))
->                = 盘中 1 域 → 23 码/周期 · 2 域 → 11 · 3 域 → 7
+>                = 盘中 tick=4: quote-only 213//2 = 106 · 2 域 213//3 = 71 · 3 域 213//4 = 53
 > 条件 C1: _fetches_per_code(fields) × N_active ≤ coverage
->           ⇔ N_active ≤ coverage_codes      ⇒ 一个 L1 周期覆盖整池（lag = 0）
+>           ⇔ N_active ≤ coverage_codes      ⇒ 一个 tick 覆盖整池（lag = 0）
 > 条件 C2: _fetches_per_code(fields) × N_active >  coverage
 >           ⇒ 单周期物理刷不完 ⇒ 降级为「分片轮转刷新」（见 §2.2 R-6 / AR-1），
->             池内陈旧度 ≤ ceil(N_active / coverage_codes) × L1
+>             池内陈旧度 ≤ ceil(N_active / coverage_codes) × tick
 > ```
-> **两处口径变更（v1.4，原 SAD 失准）**：① 旧 `_PER_FETCH_EST=0.3` 属标定偏乐观（实测冷路径 ≈2.2s/worker-call；旧值下 51 取数实测 ≈14s > 6.4s 预算）⇒ `coverage 170 → 23`；② 旧公式把每码成本固定为 `len(_FIELD_HANDLERS)=3`，而实现**按订阅字段并集**计价 ⇒ `coverage_codes` 由 `≈56` 变为 **23 / 11 / 7**（1 / 2 / 3 域）。
-> **不建议**把 3 字段 handler 改并发以抬高 coverage：单 handler 内已用满 `_BATCH_MAX_WORKERS=8`，字段级并发会把在飞取数抬到 24，违反 AC-E8 资源口径（见 §2.2「不选其他」）。
-> **AC-A3「绝对陈旧度 ≤ L1×(1+抖动)」的成立前提是 C1**；C1 不成立的**典型输入即"1-2 个不重叠活跃组 × ≤200 码"**（200 码 × 3 域 ⇒ 600 取数 > 23；即使 quote-only 也 200 > 23）——即**默认场景即降级**，必须接受降级并在 metrics 标记（不再是"必然覆盖"的假承诺）。池上限本身**不得**写死为 `MAX_CODES_PER_SUB=200`：池是**跨组共享**的单一 dict，用单组上限界全池会造成 `_process_chunk` 反复抖空端点缓存（P1-1 根因）。
-> **切片与容量的单一派生点**：`refresh_capacity(tick, fields)` 同时产出 `(coverage, coverage_codes)`，C1 门限与 C2 切片尺寸**同源**，二者不可能互相矛盾（也不可能与真实每码上游成本矛盾）。
+> **四处口径变更（v1.7，原 SAD 失准）**：① `_PER_FETCH_EST` **2.2 → 0.3**（r2/r5 实测暖路径 139ms/worker-call；旧值把冷路径价摊到稳态，低估 coverage ≈16×）；② `BATCH_MAX_WORKERS` **8 → 20**、`HTTP_POOL_MAX_PER_HOST` **16 → 24**（BUG-SSE-DEPTH-01：把 50 码 3 域从 C2 拉回 C1）；③ 每码成本由"按订阅字段、quote 稳态 1"改为 **`{'quote': 2, ...}`**（depth 并入后 quote 真的每拍 2 次调用）；④ **tick 由订阅域最短 TTL 决定**（L0=4s），不再是固定 L1=8s 或无条件 3 域。
+> **50 码 × 3 域回 C1**：`4 × 50 = 200 ≤ coverage = 213` ⇒ **lag=0，整池每 4s 刷新**（v1.7 前 `BATCH_MAX_WORKERS=16` 下 coverage=170 ⇒ 200>170 ⇒ C2 lag=2，冷启动首帧实测 12.33s）。
+> **不建议**把 3 字段 handler 改并发以抬高 coverage：单 handler 内已用满 `BATCH_MAX_WORKERS=20`，字段级并发会把在飞取数抬到 60，远超 `HTTP_POOL_MAX_PER_HOST=24`（违反 AC-E8 资源口径，见 §2.2「不选其他」）。
+> **AC-A3「绝对陈旧度 ≤ 该域 tier TTL×(1+抖动)」的成立前提是 C1**；C1 不成立的输入（如 3 域 × >53 码）走 §2.2 R-6 分片轮转并在 metrics 标记。池上限本身**不得**写死为 `MAX_CODES_PER_SUB=200`：池是**跨组共享**的单一 dict，用单组上限界全池会造成 `_process_chunk` 反复抖空端点缓存（P1-1 根因）。
+> **切片与容量的单一派生点**：`refresh_capacity(tick, fields)` 同时产出 `(coverage, coverage_codes)`，`tick` 由 `tick_interval(fields)` 单一派生，C1 门限与 C2 切片尺寸**同源**，二者不可能互相矛盾（也不可能与真实每码上游成本矛盾）。
+> **`refresh_epoch`（v1.7，定时刷新的新鲜度契约）**：`tick` 与域的缓存 TTL 解耦后，**最快域**（TTL ≤ tick，如 quote L0=4s）每拍必须真回源——其缓存写入落在轮起点之后 δ s，下一轮（`t0+tick`）读到的条目年龄仅 `tick−δ`（< TTL）会被普通 TTL 判定命中，导致**名义 4s、实际 8s**（隔拍跳过）。因此 `_domain_refresh_epoch(domain, tick, now)` 对 `cache_policy(domain)['ttl'] <= tick` 的域返回**轮起点**作为 `refresh_epoch`，`cache._cache_fresh(entry, refresh_epoch)` 拒绝 `write_time < refresh_epoch` 的条目；TTL > tick 的慢域保持普通 TTL（按域分拍，不为更快的 tick 多付上游）。
 
 **三层缓存的一致性设计**
 
 | 层 | 现状 | 目标 |
 |----|------|------|
-| ① 去重池 `_*_pool`（码 → 最后访问 ts） | LRU 触碰已有（`_process_chunk` 写 pool[code]=now），**上限 500 与"跨组活跃码 ≤2000"不匹配**；且池淘汰会 `cache.pop` 连带清除终点缓存 | ① 池是**跨组共享的成员账（membership ledger）**，上限 = `cache_policy(d)['pool_max']`（L1 域 = `MAX_DEDUP_CODES=2000`，与去重码硬上界同源）；② **池淘汰不再 `cache.pop`**（解耦），避免多活跃组时反复抖空终点缓存（修 P1-1） |
+| ① 去重池 `_*_pool`（码 → 最后访问 ts） | LRU 触碰已有（`_process_chunk` 写 pool[code]=now），**上限 500 与"跨组活跃码 ≤2000"不匹配**；且池淘汰会 `cache.pop` 连带清除终点缓存 | ① 池是**跨组共享的成员账（membership ledger）**，上限 = `cache_policy(d)['pool_max']`（实时域 L0/L1 = `MAX_DEDUP_CODES=2000`，与去重码硬上界同源）；② **池淘汰不再 `cache.pop`**（解耦），避免多活跃组时反复抖空终点缓存（修 P1-1） |
 | ② URL 缓存 `cache{}` | TTL 由调用方各自传；淘汰按插入时间 | TTL 统一由 `cache_policy` 派生；淘汰改按 `last_access`（见 §2.2）；命中时更新 `last_access` |
 | ③ 终点缓存 `_*_cache/_*_cache_ts` | `_MAX_CACHE_AGE=120` 硬编码，与 ② 无关；大小被动受池上限约束 | `_process_chunk` 增加 `ttl` 形参，由 handler 从 `cache_policy(d)` 注入 ⇒ `ttl_terminal == ttl_url`；**独立上限** `cache_policy(d)['cache_max']`，按 LRU + TTL 自管（内存护栏从"池"移到"缓存"） |
 
@@ -254,8 +269,8 @@ cache_policy('plate')  → {'tier':'L2','ttl':12,'pool_refresh':12,'pool_max':20
 **R-5 管理请求 IO 预算（R6）**
 `_read_json_body` 前置 `self.connection.settimeout(MGMT_BODY_TIMEOUT=5)`，读完恢复为 30s（长连接/SSE 不受影响）；保留 64KB 体长上限。预算来源：`MGMT_BODY_TIMEOUT` 走 config + env（R17）。
 
-**R-6 分片轮转刷新（AR-1 的正确缓解对象，修 P1-1 / P1-N1；v1.4 按实现重标定）**
-tick 的刷新集是 `_active_codes()`（**可达 `MAX_DEDUP_CODES=2000`，不受池上限约束**），字段集是**存活组订阅字段并集**（`_subscribed_fields()`）；单周期取数能力 `coverage = 23 取数次数/周期 ⇒ coverage_codes = 23 / 11 / 7 码/周期`（1 / 2 / 3 域，见 §2.1 INV-1b）。当 `_fetches_per_code(fields) × N_active > coverage`（条件 C2）时：
+**R-6 分片轮转刷新（AR-1 的正确缓解对象，修 P1-1 / P1-N1；v1.7 按实现重标定）**
+tick 的刷新集是 `_active_codes()`（**可达 `MAX_DEDUP_CODES=2000`，不受池上限约束**），字段集是**存活组订阅字段并集**（`_subscribed_fields()`）；**节拍 `tick = tick_interval(fields)` = 订阅域最短 tier TTL**（盘中 quote→L0=4s、fundflow/timeline-only→L1=8s、无订阅回落 L1=8s）；单周期取数能力 `coverage = int(0.8×tick×20/0.3)` ⇒ 盘中 tick=4 时 `213 取数次数/周期 ⇒ coverage_codes = 106 / 71 / 53 码/周期`（quote / 2 域 / 全 3 域，见 §2.1 INV-1b）。当 `_fetches_per_code(fields) × N_active > coverage`（条件 C2）时：
 
 - `push_loop` 每 tick 只对 `_active_codes()` 的一个**切片** `slice`（按码计量）发起网络刷新，切片须满足取数次数上界：`_fetches_per_code(fields) × |slice| ≤ coverage`（`coverage` 已内含 0.8×tick 预算）⇒ `|slice| ≤ coverage_codes`。切片按轮转游标推进（**复用 `_prefetch_slice` / `_prefetch_advance`**，游标键 `'stream_refresh'`，与 prefetch 池的 round-robin 语义同一实现）。
 - **`codes` 与 `fields` 必须在同一次加锁中读出**（`_active_targets()`）：两次独立读会与"组关闭"交错，得到一个**字段集已不再被订阅**的码池（P1-6）。
@@ -264,10 +279,11 @@ tick 的刷新集是 `_active_codes()`（**可达 `MAX_DEDUP_CODES=2000`，不�
 - **tick 与 deadline 单次计算、向下传递（v1.4）**：`_push_once` 计算 `tick = tick_interval()` 一次并传给 `_refresh_pool`，**C1/C2 门限与调度节拍因此不可能在 tier 翻转点（09:30/11:30/13:00）互相矛盾**（旧实现两处各自求值，曾出现 8s vs 120s 的分歧）；`_refresh_pool` 内所有字段相**共享同一 `deadline = t0 + 0.8×tick`**，某字段相启动时已过 `deadline` 则**跳过**并把该切片码标 `_errors[code]='tick_budget_exceeded'`，绝不阻塞 push 线程（旧实现每相各自回退到 `_BATCH_BUDGET_REST=15s`，三相串行最坏 45s ⇒ 最忙时所有 SSE 连接收不到帧）。
 - **帧完整性口径（修 P2-N2，v1.4 补 last-known 后收敛）**：**warm（有终点缓存/有 last-known）码的帧完整性不降级**；**冷码（既无缓存也无历史）在进入首个切片前以 `null` 出现于 `missing`**（不再"缺席"），在 ≤ lag 个 tick 内首次取得数据。故 AC-A1 的"每帧覆盖全部码"以 **warm 稳态 + 200 帧窗口**为前提，首帧即全覆盖**不是**本降级路径的保证。
 - 记录 `stream_refresh_lag_ticks`（= `ceil(N_active / |slice|)`，C1 时**发布 0**）与 `stream_tick_degraded_total`；`_fetches_per_code(fields) × N_active ≤ coverage` 时退化为原"整池一周期刷新"，lag=0。**空池时该 gauge 由 `_push_once` 置 0**（不能在 `_refresh_pool` 里重置——空池路径根本到不了那里，否则最后一个订阅消失后 gauge 永久停在最后一个 C2 值）。
-- **切片上限随 tick 动态**：`coverage` 与 `tick` 成正比，非盘中 `tick=120` ⇒ `coverage=349 ⇒ 3 域 coverage_codes=116`。**不得**把盘中值 7/23 硬编码为断言（SAD 只给盘中实值口径）。
+- **切片上限随 tick 动态**：`coverage` 与 `tick` 成正比，非盘中 `tick=120` ⇒ `coverage=6400 ⇒ 3 域 coverage_codes=1600`。**不得**把盘中值 53/106/213 硬编码为断言（SAD 只给盘中实值口径）。
+- **`refresh_epoch` 保证"每拍真回源"（v1.7，解耦 tick 与缓存 TTL）**：切片内每个域取数前由 `_domain_refresh_epoch(domain, tick, now)` 判定——`cache_policy(domain)['ttl'] <= tick` 的**最快域**（quote/depth，TTL==tick）得到**本轮起点** `now` 作为 `refresh_epoch`，`cache._cache_fresh` 拒绝更早写入的条目，故不隔拍跳过；TTL > tick 的慢域（fundflow/timeline 在 4s tick 下）传 `None`，走普通 TTL**按域分拍**（不为更快的 tick 多付上游）。`refresh_epoch` 由 `_call_refresh_handler` 以关键字下传，仅在**调用帧** `TypeError`（旧 handler/测试替身）时回退到无 epoch 形状，生产 handler 必收该关键字（单测钉死）。
 > 说明：AR-1 原缓解"池上限=200/域"对准的是 prefetch 池，而 tick 刷新集是 `_active_codes()`——缓解对象错误（P1-1 附带项）。R-6 直接约束 `_active_codes()`。
 
-**不选其他**：不为 SSE 改异步/多路复用（违反"标准库 + SSE 全量帧"约束与 W 级范围）；不为缓存引入 TTL 调度器线程（净增线程无收益，双触发清扫已够）；不靠"调大 `_BATCH_MAX_WORKERS`"兜 coverage（会放大上游压力且违反 AC-E8 资源口径）；**不把 `_FIELD_HANDLERS` 的 3 个字段 handler 改并发执行以抬高 coverage**——单 handler 内已用满 `_BATCH_MAX_WORKERS=8`，字段级并发会把在飞取数抬到 24，违反 AC-E8 资源口径（修 P1-N1 的备选方案评审结论）；**也不靠"把每码成本一律记 3"来保守**——那会把 quote-only 组的刷新能力**低估 3 倍**（`coverage_codes 23→7`），制造一个不存在的容量不足（v1.4）。
+**不选其他**：不为 SSE 改异步/多路复用（违反"标准库 + SSE 全量帧"约束与 W 级范围）；不为缓存引入 TTL 调度器线程（净增线程无收益，双触发清扫已够）；不靠"调大 `_BATCH_MAX_WORKERS`"兜 coverage（会放大上游压力且违反 AC-E8 资源口径）；**不把 `_FIELD_HANDLERS` 的 3 个字段 handler 改并发执行以抬高 coverage**——单 handler 内已用满 `BATCH_MAX_WORKERS=20`，字段级并发会把在飞取数抬到 60（远超 `HTTP_POOL_MAX_PER_HOST=24`），违反 AC-E8 资源口径（v1.4 立论、v1.7 随 worker 数更新）；**也不靠"把每码成本记成 `len(_FIELD_HANDLERS)=3`"来保守**——那会把 quote-only 组的刷新能力**大幅低估**（v1.7 正确 `coverage_codes=106`，误记 3 则为 213//3=71），制造一个不存在的容量不足（v1.4 立论，v1.7 数值更新）。
 
 **权衡**：全局队列字节预算的计费在**帧构建/入队/出队**三处各一次 O(1) 引用计数（见 §4.2），成本可忽略；换来的是唯一能兜住"组×码×帧"组合爆炸的机制。
 
@@ -502,6 +518,8 @@ _handle_request
 
 **R18 防御访问**：新增 `cdp_engine.page_data(page)` 防御取数——`None`/非 dict/空 → 由调用方按 shape 产出 error 客体或 `cdp_unavailable`；删除对页面数据的一切"假定为 dict"的直接 `.pop/.get` 链。
 
+**空壳防御（v1.7，ADR-020）**：上游 `x-quote.cls.cn/quote/stock/basic` 对**错误的 `secu_code` 拼写**返回 `HTTP 200 + code:200` + 全 null 的 41 键客体（**不是错误码**），volume 则返回空 `data`。若取数只信 `code == 200`，会把空壳**缓存并推流**为"成功但全空"的行情（北交所历史症状）。故个股取数**必须**做关键字段非空校验：`stock_api._basic_info_is_valid` 要求 `secu_name`/`last_px` 至少一个非空，否则记 `FetchError('upstream_error')`（`upstream_fail_total{upstream_error}`）且**不缓存、不进帧**；`depth` 对空 `data`/全 0 返回 `None`。**线路拼写**一律经 `config.upstream_secu_code`（沪/深前缀形，北交所点号 `430047.BJ`），禁止本地拼装。
+
 **权衡**：`_errors` 会随响应体增大（最坏 50 码全失败 ≈ +1KB），对 RSS/JSON 客户端无影响；相比 envelope 的收益是**既有消费方零改动**（PRD 🟠 STABLE 只增不改的硬要求）。
 
 ### 2.5 并发模型（R5/R6 + AC-S2/A1/A2）
@@ -555,7 +573,7 @@ _broadcast(snapshot):
 { "ts": <epoch_ms>,
   "codes_total": <int>,          // ★ 该组订阅码总数（= len(codes)）
   "fields": ["quote","fundflow","timeline"],   // ★ 订阅字段集（请求的形状）
-  "items": { "<code>": { "<field>": <data|null> } },   // ★ 覆盖**全部订阅码**，缺数据为 null
+  "items": { "<code>": { "<field>": <data|null> } },   // ★ 覆盖**全部订阅码**，缺数据为 null；v1.7：<field>="quote" 的值内含可选 "depth"（五档，只增）
   "missing": ["<code>", ...],    // ★ 所有请求字段均为 null 的码（已排序）
   "missing_count": <int>,
   "errors": { "<code>": "<kind>" },   // 仅非空时出现（kind ∈ KINDS ∪ {'tick_budget_exceeded'}）
@@ -570,6 +588,10 @@ _broadcast(snapshot):
 3. **`errors` 与 `missing` 不正交**：一个码可以"有数据但某字段失败"（warm 码之一相失败）⇒ 同时出现在 `items`（有值）与 `errors`（有失败字段），但不进 `missing`。`errors` 的 kind 值域 = `FetchError.KINDS` ∪ `{'tick_budget_exceeded'}`（后者是**调度层**错误——该切片本轮没轮到/已过 tick 预算，**不是**上游故障，故不入 `upstream_fail_total`）。
 
 **收缩行为**：`payload['errors']` / `payload['stale']` 只保留 `code in items` 的条目（防御性过滤，防止 `_` 前缀或已移除码泄漏进帧）；`items` 的键序为 `sorted(codes)`、字段序为 `fields` 顺序 ⇒ **帧字节确定**（便于测试断言与 `stream_frame_bytes` 估算）。
+
+**C-5 补充（v1.7：`depth` 并入 + 发送层去重）**
+- **`depth`（五档盘口）并入 `quote` 负载**（ADR-021）：`items[code].quote` 内新增 `depth` 键（20 个价位/量字段 + `preclose_px`）。**只增**——既有键类型/含义不变；**空 `data` dict、20 字段全 0（指数无盘口）、非普通股/未知码 ⇒ 该键不出现**（绝不伪造全 0 假档）。depth 与 quote **同拍**（阶段 3），故 quote 的终点缓存命中**天然带着 depth**（零额外调用）；帧字节因此增大（实测 quote×50 ≈58.9KB，depth ≈322B/码）。
+- **发送层去重**（ADR-022）：`_broadcast` 用 `_frame_signature(frame)`（剔除每帧必变的 `ts` 后取 blake2b 16 字节摘要）与 `SubscriptionGroup.last_sig` 比较，**内容未变则不重发**；未收到过任何帧的新连接（`sent_any=False`）**强制首发**当前帧。因此"本 tick 无新帧"是**数据未变**的合法信号（心跳 `event: ping` 每 20s 一帧保活）。
 
 **C-5 不选其他**：不用"缺席即无数据"的隐式契约（C2 分片下 200 码组每帧只 7 码有值，客户端无法区分"未轮到/无数据/上游故障"三个完全不同的处置——这是 P1-4 的根因）；不用增量 diff 帧（PRD §6 W 级不做）；不把 `stale` 做成布尔（客户端需要**具体哪些码**是旧值，才能对旧值降级展示）。
 
@@ -595,7 +617,7 @@ _broadcast(snapshot):
 | `cache_entries{url,feed,quote,fundflow,timeline,f10,announcement,longhu,sector}` | 各缓存写入点（URL/feed 缓存发布在**业务锁释放后**） | AC-S10 / E6 |
 | `cache_hit_ratio`（**设计目标观测项，非 AC**，Q1） | `cache._cache_put` / 各正缓存命中路径（由 cache 本地 `_cache_stats{hit,miss}` 派生发布，**不在请求热路径持有 `_cache_lock` 时发布**；裁决 #5 / S1-4） | Q1 |
 | `negative_cache_size` / `upstream_fail_total{kind}` | `cache.fetch_json`（`_record_failure`/`_clear_negative`，**锁释放后**发布）；`upstream_fail_total` 另由 `stock_api._fetch_rest_json`/`_raise_cdp_unavailable`、`market_api.fetch_margin` 补充非网络失败 | AC-S10 / S3 |
-| `upstream_fetch_total{domain}`（**每域上游取数计数**，D-6 补列） | 各域取数点（回源 round-trip 计数；**每个逻辑取数恰好 +1**，CDP 回退路径不重复计） | AR-6 / Q3⑤（P6c 核对"上游负载增幅 ≤ 可接受阈值"） |
+| `upstream_fetch_total{domain}`（**每域上游取数计数**，D-6 补列；**v1.7：域键含 `depth`**） | 各域取数点（回源 round-trip 计数；**每个逻辑取数恰好 +1**，CDP 回退路径不重复计） | AR-6 / Q3⑤（P6c 核对"上游负载增幅 ≤ 可接受阈值"） |
 | `code_cooldown_list`（**可枚举清单**，非计数，修 P1-5/P2-6） | 共享失败状态层（§2.3 D-6）；gauge 发布**至多每 5s 一次**（滞后 ≤5s 对 120s 冷却无影响） | AC-S10 / S6 |
 | `cdp_restart_window`（`idle`/`restarting`/`unavailable` + 上次窗口起止） | `cdp_engine`（模块加载即发布初始 `idle`） | AC-S10 / S4 / R19 |
 | `healthz_stale_total` / `healthz_inflight` | `build_health_payload`（有界准入，见下） | AC-S8 / S10 |
@@ -637,12 +659,13 @@ _broadcast(snapshot):
   > 修 P2-N1：上一版"精确 schema"漏列既有 `feeds[]` / `cache_ttl` / `request_timeout`，与 🟠 STABLE「只增不改」及 ADR-001「`cache_ttl` 保留字段名与含义」冲突。**既有键一个不少**，仅在其上叠加 `stale`/`metrics`/`policy`/`cdp`；`feeds[].status` 的取值变更单独按 Q2 走编排层批准。
 - **契约口径（Q2）**：`feeds[].status` 的取值由 `requires_chrome_cdp`/标注漂移改为目标值属「**改既有字段取值**」（≠"只增不改"），须编排层批准并记入变更日志（见 §7.1 Q2）。
 
-**tick 观测与预算（R8；v1.4 按实现回写）**
+**tick 观测与预算（R8；v1.4 按实现回写，v1.7 订正不变量 + 订阅驱动节拍）**
 - `push_loop` 的迭代体抽为 `_push_once(t0)`（**不变量**：空池路径的 `stream_refresh_lag_ticks=0` 必须在 `_push_once` 里，因为 `_refresh_pool` 在空池时根本不被调用——gauge 曾因此永久停在最后一个 C2 值）。
-- `push_loop` 用 `t0 = time()` 包裹刷新+广播，`tick = tick_interval()` **只算一次**并下传给 `_refresh_pool`（C1/C2 门限与调度节拍同源）。
-- **节拍 = 整 tick 网格（v1.4 更正）**：`delay = t0 + k×tick − now`，`k = floor((now − t0)/tick) + 1 ≥ 1`。即"本轮刚好装进一个 tick"⇒ sleep 到 `t0+tick`；"本轮超了一个 tick" ⇒ **整 tick 滑移到下一个网格点**。**旧规则**（超预算后 `floor` 到 `0.25×tick`）会在一次 >1 tick 的长轮之后紧跟一个 2s 的短间隔帧 ⇒ **帧间隔直方图双峰**（一个 12–17s 停顿 + 一次 2s 连发）。网格化后帧间隔**永短于一个 tick**，不可能出现短促连发。
+- `push_loop` 每轮用 `t0 = time()` 包裹刷新+广播，`tick = tick_interval(_subscribed_fields())` **每股只算一次**并下传给 `_push_once`/`_refresh_pool`（C1/C2 门限与调度节拍同源；**v1.7：tick = 订阅域最短 tier TTL**，盘中 quote-only → L0=4s，无需求回合回落 L1 基线）。
+- **空池等待可打断（v1.7，冷启动）**：`_wake_push_loop()`（由 `create_group` / `_serve_sse` 调用）只打断**空池轮**的等待，使新订阅立即刷新，而不是等满一个基线 tick；**活跃轮保持硬网格睡眠**（no-burst：唤醒不可能让两个轮起点间隔小于一个 tick，空池轮也不发帧）。
+- **节拍 = 整 tick 网格（v1.4 更正）**：`delay = t0 + k×tick − now`，`k = floor((now − t0)/tick) + 1 ≥ 1`。即"本轮刚好装进一个 tick"⇒ sleep 到 `t0+tick`；"本轮超了一个 tick" ⇒ **整 tick 滑移到下一个网格点**。**旧规则**（超预算后 `floor` 到 `0.25×tick`）会在一次 >1 tick 的长轮之后紧跟一个 2s 的短间隔帧 ⇒ **帧间隔直方图双峰**（一个 12–17s 停顿 + 一次 2s 连发）。★ **v1.7 订正：真实不变量 = 「轮起点 → 轮起点 ≥ 1 tick」，而不是"帧间隔 ≥ 1 tick"**——帧在**轮末**离开（`_broadcast`），两帧到达间隔 = `tick − dur_k + dur_{k+1}`，当 `dur_k > dur_{k+1}`（如 3.5s 冷轮后接 0.1s 暖轮）时可**短于一个 tick**（实测 ~0.6s），旧表述"帧间隔永不短于 tick"已被证伪。**内容未变**的 sub-tick 帧由**发送层去重**（ADR-022）消除；仍存在的 sub-tick 间隔只对应**真实数据变化**（新信息立即送达，可接受）。
 - **异常退避（v1.4）**：`_push_once` 抛异常时，连续失败数 `consecutive` 决定退避跨度 `min(2^(consecutive−1), 8)` 个 tick，并与网格取 max。**旧行为是固定 `sleep(1)`**——一个反复失败的路由会把循环降级成 ~1s 自旋（每个间隔重跑至多 `tick` 次），在最糟的时刻放大上游压力。
-- **degraded 与 slip 只统计"真的跑过的轮"**：耗时 > `0.8×tick` ⇒ `stream_tick_degraded_total += 1`；耗时 ≥ `tick` ⇒ `stream_tick_slip_total += 1`。空池轮耗时 ≈0ms，两个计数都不增长（它们是刷新超预算的属性，不是空转的属性）。
+- **degraded 与 slip 只统计"真的跑过的轮"**：耗时 > `0.8×tick` ⇒ `stream_tick_degraded_total += 1`；耗时 ≥ `tick` ⇒ `stream_tick_slip_total += 1`。空池轮耗时 ≈0ms，两个计数都不增长（它们是刷新超预算的属性，不是空转的属性）。**v1.7：进程首个"刷新轮"（`cold_first`）豁免一次**——它付的是一次性冷路径成本（空连接池/DNS 缓存/sector 缓存），属启动开销而非退化；仅该轮豁免，其后所有超时照常计数（真实退化绝不被隐藏）。
 
 ---
 
@@ -652,11 +675,11 @@ _broadcast(snapshot):
 
 | 模块 | 改什么 | 为什么（根因） | AC | 风险 |
 |------|--------|---------------|----|------|
-| **config.py** | 新增 `cache_policy()` + `DOMAIN_MATRIX`（含 `longhu` 域、`cache_max`、plate stagger 派生；`plate`/`margin` 的 `cache_max` = `'n/a'`）+ **内部名 `_DOMAIN_ENCODING`（D-5）**；删除/改由 policy 承接的 TTL 与 `*_REFRESH` 常量；**`CACHE_TTL` 逐消费者迁移后删除**（cache.py 默认、`server._get_or_fetch_feed`；**`utils.py:12` 为未使用 import**，Q3）；**新增代码归一化唯一权威 `canonical_code(code) -> str\|None`（v1.4）** + `VALID_STOCK_CODE`/`_DOTTED_STOCK_CODE`（规范形 = 小写交易所前缀 `sh600519`；接受 `SH600519`/`600519.SH`；非法 ⇒ `None`）+ **帧尺寸单一来源 `stream_frame_bytes(codes, fields)`**（`STREAM_FIELDS_PER_FRAME=3`/`STREAM_FRAME_BYTES_PER_FIELD=23KB`）；新增 env：`MAX_INFLIGHT`/`MAX_GROUPS`/`MGMT_BODY_TIMEOUT`/`STREAM_QUEUE_BYTES_BUDGET`(默认 128MB)/`NEG_TTL`/`PROBE_TIMEOUT`/`MAX_HEALTH_INFLIGHT`/**`STREAM_PING_INTERVAL`(默认 20，原硬编码，D-4)**/**`LISTEN_BACKLOG`(默认 128，TCP accept backlog，默认 5 会在突发连接下内核丢 SYN ⇒ ~1s RTO 尾巴)**/**`CDP_RESTART_THROTTLE`(默认 15)**/**`STREAM_GROUP_IDLE_TTL`(默认 300)**/**`TRADING_HOLIDAYS`(空，逗号分隔 `YYYY-MM-DD`)**；`_trading_tiers()` 保留为唯一时间源，`_is_trading_hours(now=None)` 增补 `now` 注入点 + 节假日判定（配置的假日按非交易时段处理） | RC-1（R16/R12/D1-D5）、R6/R17、P1-6 | A3/A4/E6/E9/S3/S7 | **H** |
-| **cache.py** | `fetch_json` **五段式**（正缓存 → **端到端 deadline 闸门（v1.4，第 5 位形参 `deadline`；闸门在正缓存之后）** → 负缓存门禁 → leader 单次尝试 → follower 读状态）+ **半开探测 `_probe_budget` 阶梯（2→4→5，`_PROBE_BUDGET_CAP=5.0` 封顶，v1.5）** + 负缓存（URL 级，4 键含 `first_at`）+ `FetchError(kind)` + 删除 fall-through 三段路径 + **gap 分支 fail-closed 兜底（D-1）**；新增 `encoding='utf-8'` 形参（修 P1-4）；URL 缓存改 `last_access` 淘汰 + 双触发清扫；**feed 缓存机制落点 = `feed_cache_get`/`feed_cache_put`**（LRU/双触发清扫/淘汰均在此层，裁决 #3）；新增 `build_batch_response()`（纯函数，内置 `_` 前缀跳过 / data+error 冲突 / 未知 kind 归一，D-2；**返回组装好的 dict**）；允许 import 新增 `socket`（D-3）；**metrics 一律在业务锁释放后发布**（`_publish_url_stats`/`_record_failure`/`_clear_negative`），命中路径（段①/③双检/④）**统一计 hit**（只计段①会把 `cache_hit_ratio` 系统性低估）；`import json` 已删。**帧计费（`_Frame`/refs/`stream_queue_bytes`）不得落在此模块**——它属 stream 层，cache.py 只做纯缓存/契约，守 `layerIsolation`（修 P2-N6） | RC-2（R9）、R11/R3、RC-3（R4/R14）、P1-2/P1-4/P1-5 | S3/S6/A9/A10/E6/E9 | **H** |
-| **server.py** | 新增 `_guard(shape)` 统一异常边界，覆盖**全部 14 个** JSON 路由分支（**shape 由 `_JSON_SHAPES` 路由表派生**，含 `assert len == 14` 与"分派集合 == 表"的 import 期断言；逐一列名，§2.4）；`_handle_stock_batch` 做**入参归一化（`_parse_stock_codes` → `config.canonical_code`）+ 截断 + `dropped` 注入 + 键回写（`_rekey_batch_response`）**；`build_health_payload` 专用执行器 + **信号量有界准入（替换死代码 stale）+ `_HealthBatch` 准入位生命周期** + 零上游快路径；503 计数接入 metrics（**3 个计数点，v1.5**）；`MAX_INFLIGHT`/`MGMT` 常量接入；`_cache_age()` 改读 policy（未登记路径回落 `_DEFAULT_AGE_DOMAIN='f10'` ⇒ 恒 300，与现状逐字等价）；`/ths/longhu` 改走 `fetch_json`（L4，`encoding='gbk'`，**2 URL 并发 ≤3**）；**feed TTL 派生 + 防击穿调用 `cache.feed_cache_get/put`**（miss → per-path lock → **二次 `feed_cache_get` 双检** → fetch → `feed_cache_put`；`ttl` 在**二次仍 miss 之后**才求值；**机制归 cache 层**，Q3③/裁决 #3）+ `CACHE_TTL` 消费者迁移；`/cls/hotplate` 保持分区 error 客体（**全分区失败时顶层补 `error`**）；**`BoundedThreadPoolServer.__init__(..., max_inflight=None)`（v1.4：流端口显式传 110，否则主端口默认 40 会掩盖 100 连接上限）**；**（v1.5 N1 关闭）`_json_payload_has_data` 已删——`_send_json_shape` 恒 200 + error 客体，业务降级不产生 503（§2.4）**；`request_queue_size = LISTEN_BACKLOG` | RC-3（R1/R4）、RC-4（R2）、D4/D5、R15、P1-3/P1-4/P1-6/P2-3② | S1/S8/S10/A5/A9/A8/E9/E6 | **H** |
-| **stream.py** | `codes→frozenset`、`fields→tuple`；`_build_frame(snapshot, codes, fields)` **签名变更 + 帧契约扩元数据**（`codes_total`/`fields`/`missing`/`missing_count`/`errors`/`stale`/`stale_count`，**items 覆盖全部订阅码**，仅空 `codes` 返回 `None`，C-5）；`_broadcast` 锁序与无锁帧构建 + **先滤 `closed` 再腾位** + put/closed 竞态收口；**distinct 帧引用计数 + 队列字节预算 + 丢弃计数**（P0-1）+ **`_frame_bytes_lock` 保护 `refs` 读改写、`_drain_conn_queue` 在摘除/销毁路径逐帧归还字节、`None` 哨兵不计费**（P1-N2）；**`_refresh_pool(codes, now=None, fields=None, tick=None, deadline=None)`** 改「**按订阅字段并集刷新的分片轮转**」（R-6/AR-1；`coverage_codes` 盘中 **1/2/3 域 = 23/11/7**，v1.4；`tick`/`deadline` 单次计算下传 + `tick_budget_exceeded`）；**新增 `_subscribed_fields`/`_active_targets`（codes+fields 同锁读）**、**`_carry_forward`/`_last_known`（last-known 结转 + `stale`）**、**`_valid_fields` fail-closed（显式非法字段 → 400，不再静默放宽为全字段）**、**`config.canonical_code` 归一化（`create_group`/`patch_group`，含非法码 400）**、**`_capacity_meta`（201/200 响应补容量元数据）**、**`_require_code_list`（非 list → 400）**；`_read_json_body` 5s 读预算；**`_tick_sleep_seconds` 整 tick 网格滑移 + `push_loop` 异常退避（1/2/4…≤8 tick）**；`_refresh_pool` 跳过 `_` 前缀键（但**保留** `_errors` 到 `snapshot['_errors']`）；`create_group` 校验 `MAX_GROUPS`（超限 400）+ **单帧余量准入**（v1.4）；`_serve_sse` 发 `Connection: close` + `close_connection=True`；`make_stream_server` 传 `max_inflight=MAX_STREAM_CONNS+10=110` | R5、R6、R7、R8、R14 陷阱点、P0-1/P1-1/P1-N1/P1-N2/P1-4/P1-6 | S2/S7/S10/E5/E7/A1/A2/A3/A7 | **H** |
-| **stock_api.py** | 全部取数器签名加 `deadline`/`ttl` 并传递到 `fetch_json`；删除 `_MAX_CACHE_AGE`，按 `cache_policy` 注入 `ttl`/`pool_refresh`/`pool_max`/`cache_max`；**池淘汰不再 `cache.pop`，端点缓存独立 LRU**（P1-1）；`fetch_cls_f10` 失败 `raise FetchError('cdp_unavailable')`；`_run_batch` 返回 `(results, errors)`；**新增共享失败状态层 `_fail_ledger`**（码级 120s 冷却，**4 元条目** `[fail_count, cooldown_until, kind, last_fail_ts]`，批量与 prefetch 共用，P1-5），删除 4 个 prefetch 的局部 `fail_blacklist`；**新增 `_LOCAL_BUDGET` 本地预算标记（对外翻译为 `upstream_timeout`、**绝不入冷却账**，v1.4）** + `_call_fetcher` 的"仅调用帧 `TypeError` 才降级"；`_process_chunk` 全链 **`canonical_code` 归一化 + 结果回写原拼写**；`cached_batch(domain, codes)` 只读终点缓存（供 stream 分片）；`code_cooldown_list` 导出 + 发布节流；`fetch_cls_announcement` 裸 `ttl=15` 删除（Q5）；**依赖新增 `cdp_engine.page_data`（同层，无环）** | RC-1（R12）、RC-2（R13/R14）、RC-4、P1-1/P1-5/P1-6 | A3/A6/A7/A10/E2/E9/S6/S7 | **H** |
+| **config.py** | 新增 `cache_policy()` + `DOMAIN_MATRIX`（含 `longhu` 域、`cache_max`、plate stagger 派生；`plate`/`margin` 的 `cache_max` = `'n/a'`）+ **内部名 `_DOMAIN_ENCODING`（D-5）**；删除/改由 policy 承接的 TTL 与 `*_REFRESH` 常量；**`CACHE_TTL` 逐消费者迁移后删除**（cache.py 默认、`server._get_or_fetch_feed`；**`utils.py:12` 为未使用 import**，Q3）；**新增代码归一化唯一权威 `canonical_code(code) -> str\|None`（v1.4）** + `VALID_STOCK_CODE`/`_DOTTED_STOCK_CODE`（规范形 = 小写交易所前缀 `sh600519`；接受 `SH600519`/`600519.SH`；非法 ⇒ `None`）+ **帧尺寸单一来源 `stream_frame_bytes(codes, fields)`**（`STREAM_FIELDS_PER_FRAME=3`/`STREAM_FRAME_BYTES_PER_FIELD=23KB`）；新增 env：`MAX_INFLIGHT`/`MAX_GROUPS`/`MGMT_BODY_TIMEOUT`/`STREAM_QUEUE_BYTES_BUDGET`(默认 128MB)/`NEG_TTL`/`PROBE_TIMEOUT`/`MAX_HEALTH_INFLIGHT`/**`STREAM_PING_INTERVAL`(默认 20，原硬编码，D-4)**/**`LISTEN_BACKLOG`(默认 128，TCP accept backlog，默认 5 会在突发连接下内核丢 SYN ⇒ ~1s RTO 尾巴)**/**`CDP_RESTART_THROTTLE`(默认 15)**/**`STREAM_GROUP_IDLE_TTL`(默认 300)**/**`TRADING_HOLIDAYS`(空，逗号分隔 `YYYY-MM-DD`)**；`_trading_tiers()` 保留为唯一时间源，`_is_trading_hours(now=None)` 增补 `now` 注入点 + 节假日判定（配置的假日按非交易时段处理）；**（v1.7）** `_trading_tiers()` 增 **L0=4s**（盘中），`quote` 由 L1 升 L0、**新增 `depth` 域（L0 / dedup / `cache_max=500`）**；新增**上游线路拼写**权威 `upstream_secu_code(code)`（沪/深=前缀形、北交所=点号大写 `430047.BJ`）与 `warm_hosts()`（从 SSE 热路径 URL 派生预热 host）；env 新增 `BATCH_MAX_WORKERS`(20) / `STREAM_PER_FETCH_EST`(0.3) / `HTTP_POOL_MAX_PER_HOST`(24) / `HTTP_POOL_IDLE_TTL`(60) / `HTTP_DNS_CACHE_TTL`(300) / `HTTP_WARM_CONNECTIONS`(1) / `HTTP_WARM_TIMEOUT`(2.0) | RC-1（R16/R12/D1-D5）、R6/R17、P1-6 | A3/A4/E6/E9/S3/S7 | **H** |
+| **cache.py** | `fetch_json` **五段式**（正缓存 → **端到端 deadline 闸门（v1.4，第 5 位形参 `deadline`；闸门在正缓存之后）** → 负缓存门禁 → leader 单次尝试 → follower 读状态）+ **半开探测 `_probe_budget` 阶梯（2→4→5，`_PROBE_BUDGET_CAP=5.0` 封顶，v1.5）** + 负缓存（URL 级，4 键含 `first_at`）+ `FetchError(kind)` + 删除 fall-through 三段路径 + **gap 分支 fail-closed 兜底（D-1）**；新增 `encoding='utf-8'` 形参（修 P1-4）；URL 缓存改 `last_access` 淘汰 + 双触发清扫；**feed 缓存机制落点 = `feed_cache_get`/`feed_cache_put`**（LRU/双触发清扫/淘汰均在此层，裁决 #3）；新增 `build_batch_response()`（纯函数，内置 `_` 前缀跳过 / data+error 冲突 / 未知 kind 归一，D-2；**返回组装好的 dict**）；允许 import 新增 `socket`（D-3）；**metrics 一律在业务锁释放后发布**（`_publish_url_stats`/`_record_failure`/`_clear_negative`），命中路径（段①/③双检/④）**统一计 hit**（只计段①会把 `cache_hit_ratio` 系统性低估）；`import json` 已删。**帧计费（`_Frame`/refs/`stream_queue_bytes`）不得落在此模块**——它属 stream 层，cache.py 只做纯缓存/契约，守 `layerIsolation`（修 P2-N6）；**（v1.7）** 新增 **HTTP 传输层**：`_ConnectionPool`（按 `(scheme,host,port)` keep-alive 复用、每 host 有界、空闲淘汰、失效连接丢弃并重试一次、锁外 IO）+ `_DNSResolver`（进程内 DNS TTL 缓存，仍按 hostname 拨号以保 SNI/证书校验）+ `warm_transport()`（**仅握手、不发业务请求**的启动预热）+ 池化 `urlopen` drop-in（保持 `urlopen` 可观测契约）；`fetch_json` 增**第 6 关键字形参 `refresh_epoch`**（`_cache_fresh` 拒绝 `write_time < refresh_epoch` 的条目） | RC-2（R9）、R11/R3、RC-3（R4/R14）、P1-2/P1-4/P1-5 | S3/S6/A9/A10/E6/E9 | **H** |
+| **server.py** | 新增 `_guard(shape)` 统一异常边界，覆盖**全部 14 个** JSON 路由分支（**shape 由 `_JSON_SHAPES` 路由表派生**，含 `assert len == 14` 与"分派集合 == 表"的 import 期断言；逐一列名，§2.4）；`_handle_stock_batch` 做**入参归一化（`_parse_stock_codes` → `config.canonical_code`）+ 截断 + `dropped` 注入 + 键回写（`_rekey_batch_response`）**；`build_health_payload` 专用执行器 + **信号量有界准入（替换死代码 stale）+ `_HealthBatch` 准入位生命周期** + 零上游快路径；503 计数接入 metrics（**3 个计数点，v1.5**）；`MAX_INFLIGHT`/`MGMT` 常量接入；`_cache_age()` 改读 policy（未登记路径回落 `_DEFAULT_AGE_DOMAIN='f10'` ⇒ 恒 300，与现状逐字等价）；`/ths/longhu` 改走 `fetch_json`（L4，`encoding='gbk'`，**2 URL 并发 ≤3**）；**feed TTL 派生 + 防击穿调用 `cache.feed_cache_get/put`**（miss → per-path lock → **二次 `feed_cache_get` 双检** → fetch → `feed_cache_put`；`ttl` 在**二次仍 miss 之后**才求值；**机制归 cache 层**，Q3③/裁决 #3）+ `CACHE_TTL` 消费者迁移；`/cls/hotplate` 保持分区 error 客体（**全分区失败时顶层补 `error`**）；**`BoundedThreadPoolServer.__init__(..., max_inflight=None)`（v1.4：流端口显式传 110，否则主端口默认 40 会掩盖 100 连接上限）**；**（v1.5 N1 关闭）`_json_payload_has_data` 已删——`_send_json_shape` 恒 200 + error 客体，业务降级不产生 503（§2.4）**；`request_queue_size = LISTEN_BACKLOG`；**（v1.7）** `main()` 以 daemon 线程调 **`cache.warm_transport`** 预热传输（best-effort，**不 gate 启动/`healthz`**，不发业务请求） | RC-3（R1/R4）、RC-4（R2）、D4/D5、R15、P1-3/P1-4/P1-6/P2-3② | S1/S8/S10/A5/A9/A8/E9/E6 | **H** |
+| **stream.py** | `codes→frozenset`、`fields→tuple`；`_build_frame(snapshot, codes, fields)` **签名变更 + 帧契约扩元数据**（`codes_total`/`fields`/`missing`/`missing_count`/`errors`/`stale`/`stale_count`，**items 覆盖全部订阅码**，仅空 `codes` 返回 `None`，C-5）；`_broadcast` 锁序与无锁帧构建 + **先滤 `closed` 再腾位** + put/closed 竞态收口；**distinct 帧引用计数 + 队列字节预算 + 丢弃计数**（P0-1）+ **`_frame_bytes_lock` 保护 `refs` 读改写、`_drain_conn_queue` 在摘除/销毁路径逐帧归还字节、`None` 哨兵不计费**（P1-N2）；**`_refresh_pool(codes, now=None, fields=None, tick=None, deadline=None)`** 改「**按订阅字段并集刷新的分片轮转**」（R-6/AR-1；`coverage_codes` 盘中 quote / 2 域 / 全 3 域 = **106 / 71 / 53**，v1.7；coverage=213；`tick`/`deadline` 单次计算下传 + `tick_budget_exceeded`）；**新增 `_subscribed_fields`/`_active_targets`（codes+fields 同锁读）**、**`_carry_forward`/`_last_known`（last-known 结转 + `stale`）**、**`_valid_fields` fail-closed（显式非法字段 → 400，不再静默放宽为全字段）**、**`config.canonical_code` 归一化（`create_group`/`patch_group`，含非法码 400）**、**`_capacity_meta`（201/200 响应补容量元数据）**、**`_require_code_list`（非 list → 400）**；`_read_json_body` 5s 读预算；**`_tick_sleep_seconds` 整 tick 网格滑移 + `push_loop` 异常退避（1/2/4…≤8 tick）**；`_refresh_pool` 跳过 `_` 前缀键（但**保留** `_errors` 到 `snapshot['_errors']`）；`create_group` 校验 `MAX_GROUPS`（超限 400）+ **单帧余量准入**（v1.4）；`_serve_sse` 发 `Connection: close` + `close_connection=True`；`make_stream_server` 传 `max_inflight=MAX_STREAM_CONNS+10=110`；**（v1.7）** `tick_interval(fields)` = **订阅域最短 tier TTL**（盘中 quote/depth→L0=4s；无订阅回落 L1=8s）；新增 `_domain_refresh_epoch`（最快域以轮起点为 `refresh_epoch`）+ `_call_refresh_handler`（关键字下传，仅调用帧 `TypeError` 回退）；`_FIELD_FETCH_CALLS['quote']` **1→2**（basic_info + depth 同拍）；`_broadcast` 增**发送层去重**（`_frame_signature` 剔除 `ts` 的 blake2b 摘要 / `last_sig` / 新连接 `sent_any` 强制首发：内容未变不发、新连接必收一帧）；`_wake_push_loop` 冷启动打断**空闲**等待（no-burst：只打断空池轮，活跃轮保持硬网格睡眠） | R5、R6、R7、R8、R14 陷阱点、P0-1/P1-1/P1-N1/P1-N2/P1-4/P1-6 | S2/S7/S10/E5/E7/A1/A2/A3/A7 | **H** |
+| **stock_api.py** | 全部取数器签名加 `deadline`/`ttl` 并传递到 `fetch_json`；删除 `_MAX_CACHE_AGE`，按 `cache_policy` 注入 `ttl`/`pool_refresh`/`pool_max`/`cache_max`；**池淘汰不再 `cache.pop`，端点缓存独立 LRU**（P1-1）；`fetch_cls_f10` 失败 `raise FetchError('cdp_unavailable')`；`_run_batch` 返回 `(results, errors)`；**新增共享失败状态层 `_fail_ledger`**（码级 120s 冷却，**4 元条目** `[fail_count, cooldown_until, kind, last_fail_ts]`，批量与 prefetch 共用，P1-5），删除 4 个 prefetch 的局部 `fail_blacklist`；**新增 `_LOCAL_BUDGET` 本地预算标记（对外翻译为 `upstream_timeout`、**绝不入冷却账**，v1.4）** + `_call_fetcher` 的"仅调用帧 `TypeError` 才降级"；`_process_chunk` 全链 **`canonical_code` 归一化 + 结果回写原拼写**；`cached_batch(domain, codes)` 只读终点缓存（供 stream 分片）；`code_cooldown_list` 导出 + 发布节流；`fetch_cls_announcement` 裸 `ttl=15` 删除（Q5）；**依赖新增 `cdp_engine.page_data`（同层，无环）**；**（v1.7）** 新增 `fetch_cls_stock_depth`（`depth` 域五档盘口，`GET /quote/stock/volume?field=five`，REST/无 sign/无 WS；**空 `data` dict 或 20 字段全 0（指数）⇒ 返回 `None`，不伪造**；非致命，失败绝不影响同拍的 quote）；`fetch_cls_basic_info` 阶段 3 附加 `depth` 并让 `refresh_epoch` 送达**阶段 1 与阶段 3**（阶段 2 sector 保持 TTL）；新增**空壳防御** `_basic_info_is_valid`（`code:200` 但 `secu_name`/`last_px` 全空 ⇒ `upstream_error`，**不缓存、不进帧**）；所有上游 URL 拼写改经 `config.upstream_secu_code`（沪/深前缀形、北交所点号 `430047.BJ`）；取数器签名扩为 `(code, deadline=None, ttl=None, refresh_epoch=None)` | RC-1（R12）、RC-2（R13/R14）、RC-4、P1-1/P1-5/P1-6 | A3/A6/A7/A10/E2/E9/S6/S7 | **H** |
 | **market_api.py** | TTL 改 policy（`margin` 域）；失败降级体保持既有 `_error` 语义（单体客体，**取值收敛为枚举 kind**），补 `FetchError` 分类参与 metrics + **防重复计数约定**（`fetch_json` 已计的失败不再二次计） | R16、RC-3 | S1/S10 | **M** |
 | **cdp_engine.py** | 新增 `page_data(page)` 防御取数（总函数；None/非 dict/空 dict → `None`，**无键级回退**）；`cdp_restart_window` 状态机（`_mark_*` 唯一写者 + 读只经 `restart_window_snapshot()` + **`full_chrome_restart` 的 `finally` 兜底必达终态**）+ 模块加载即发布初始 `idle`；`watchdog_restart_skip_reason()`（盘中避让 + 节流集中判断）；`cdp_ready()`；**`_last_data` 老化口径（时钟缺失 = 陈旧）** + 四表同步淘汰；**`navigate_stock` 有界导航锁（`_acquire_navigate_lock`）+ `canonical_code` 归一化比对**；页面求值超时预算对齐 §2.3 | RC-3（R18）、R19、R20、P1-3 | S1/S4/S9/S10 | **M** |
 | **server.py（CDP 守护）** | **`_cdp_memory_watchdog`（含 `_is_trading_hours` 避让判断）在 `server.py:881`，非 cdp_engine.py**（修 P2-2）；守护重启交易时段避让（`_is_trading_hours()` 为真则跳过本轮，顺延到下一周期） | R19/R20 | S4/S9 | **M** |
@@ -687,6 +710,8 @@ server                               ← Layer 2（main() 内延迟 import strea
 | 路由表与 API 签名：不增删路径、不改方法（**例外 1（P2-7）**：`POST /stream/subscriptions` 新增 `MAX_GROUPS=200` 上限 → 超限返回 400，属新增失败模式，须编排层登记变更日志，见 §7.1） | 🟠 STABLE 端锁定 |
 | **（v1.4 例外 2）`POST`/`PATCH /stream/subscriptions` 入参校验加严**：`codes`/`add`/`remove` **非数组 → 400**；请求体**非 JSON 对象 → 400**；**显式未知字段 → 400**（不再静默放宽为全字段）；**非法股票代码 → 400**（`config.canonical_code → None`，归一化后去重 ⇒ 同一股票的多种拼写只占一个名额、只产生一次上游取数）。均为**新增失败模式**，须编排层登记 | 同上（S2-4 fail-closed / P1-6 归一化） |
 | **（v1.4 例外 3）SSE 帧新增元数据键**：`codes_total`/`fields`/`missing`/`missing_count`/`errors`/`stale`/`stale_count`，且 `items` 由"缺数据即缺席"改为"**覆盖全部订阅码、缺数据为 `null`**"（C-5） | 🟠 STABLE「只增」范围内：既有键 `ts`/`items` 的**类型与含义不变**，新增键与"全码在位"是**语义补全**（原缺席语义无法表达"未轮到"）。**但 `items` 由稀疏变稠密会使帧字节增大**，客户端若按"键存在即数据"的旧假设遍历需适配 ⇒ 列入契约同步项 |
+| **（v1.7 例外 5）SSE `quote` 字段负载内新增 `depth`（五档盘口）** | 🟠 STABLE「只增」：`items[code].quote` 是客体，新增 `depth` 键不改既有键/类型；**空 dict、20 字段全 0（指数）、非普通股（北交所/指数/未知码）⇒ 不出现 `depth` 键**（与"不伪造"语义一致）。帧字节随之增大（实测 quote×50 帧 ≈58.9KB，其中 depth ≈322B/码、占 ≈27%；3 域×50 ≈2.0MB）⇒ 列入契约同步项 |
+| **（v1.7 例外 6）`POST`/`PATCH /stream/subscriptions` 响应新增容量元数据** | `refresh_capacity_codes`（恒有）、`refresh_lag_ticks`/`capacity_warning`（仅 C2 时）；既有 `sid`/`codes`/`fields` 不变 ⇒ 🟠 STABLE「只增」 |
 | **（v1.4 例外 4 → v1.5 关闭）JSON 单体/面板/工具端点的降级状态码** | **N1 裁决关闭（§7.1 N1 / §9.5）**：业务降级**维持 200 + error 客体**，与旧版本契约及 PRD AC-A5 一致 ⇒ **不构成"改既有状态码"，不再是本节的例外**。真实 503 仅准入拒绝与 `/healthz`（§2.4） |
 | 既有字段类型与含义：尤其 `null = 无数据` | 只增不改（**例外**：`feeds[].status` 取值变更，须编排层批准，见 §7.1 Q2；**已在代码落地**，`API.md` 待同步） |
 | 断线重连并续帧语义（AC-S11）：同一 sid 在 1 tick 内重连 → 下一 tick 收完整快照帧；组空闲 300s 回收 | **不改动**；依赖既有 `_register_conn` + `push_loop` 全量快照 + `STREAM_GROUP_IDLE_TTL`（断言依据见 §8） |
@@ -704,14 +729,14 @@ server                               ← Layer 2（main() 内延迟 import strea
 | 路径 | 端到端目标 | 预算分解（服务端 handler） | 备注 |
 |------|-----------|--------------------------|------|
 | 本地缓存命中 | P95 ≤5ms / P99 ≤15ms | policy 查表 <0.01ms + 逐码 dict 命中 + `json.dumps` 50 码 ≈ 1.5ms + socket 写 | 主要成本是序列化，非查表 |
-| 上游命中（REST 回源） | P95 ≤1.2s / P99 ≤3s | 连接+首字节 ≤0.4s + 读 ≤0.8s；硬上限 `REQUEST_TIMEOUT=10s`；**批路径多码并行（≤8）**，故 P95 由单码 RTT 主导而非 50×RTT | 任何单请求 ≤15s（AC-S7）；**仅对无失败历史的 URL** |
+| 上游命中（REST 回源） | P95 ≤1.2s / P99 ≤3s | **v1.7：keep-alive 连接池 + 进程内 DNS 缓存后，单请求实测 p50 139ms / max 167ms**（原 340ms，其中 DNS ≈176ms + 握手 ≈78ms；预热 `warm_transport` 消除冷进程首次扇出的一次性成本）→ 连接+首字节 + 读已远低于 0.4s+0.8s 预算；硬上限 `REQUEST_TIMEOUT=10s`；**批路径多码并行（≤`BATCH_MAX_WORKERS=20`，池上限 24 保证扇出不排队在池上）**，故 P95 由单码 RTT 主导而非 50×RTT | 任何单请求 ≤15s（AC-S7）；**仅对无失败历史的 URL** |
 | 故障快速路径（负缓存命中） | ≤1ms | 负缓存未过期 → 直接 `raise FetchError`，不触网 | AC-S3 模式 A/B |
 | 故障半开探测 | **高密度 P95 ≤5s / 低密度 ≤10s** | `_probe_budget(fail_count)` = 2→4→**5 封顶**（`_PROBE_BUDGET_CAP=5.0`）；持续黑洞稳态 = `5s 探测 + 5s NEG_TTL` = 10s 周期，慢占比 ≈50% ⇒ 高密度 P95 ≈5s、低密度退化为周期上界 ≈10s；**+ `_HISTORY_AGE=600s` 老化**每窗至多放行 1 次 10s 全预算探测（稀有事件，不改分档 P95） | AC-S3 模式 B（v1.5 重标；单请求 ≤15s；**6–10s"慢而未死"上游恢复延迟 ≤600s，见 §2.3 D-1 权衡**；P6c 校准，Q6） |
 | 端到端 budget 耗尽（本地） | ≤1ms | `fetch_json(deadline=)` 正缓存后判超期 / `_LOCAL_BUDGET` ⇒ 不触网、不记冷却 | AC-E2 / P1-1 |
 | CDP 命中 | P95 ≤3s / P99 ≤5s | `navigate_stock` ≤2-3s（含 `_navigate_lock` 公平排队等待，上限由 deadline 约束）+ `evaluate_fetch` ≤2s | 面板端点走 `get_data()` 为纯内存读，≈本地命中 |
 | `/cls/hotplate` | 跟随"上游命中" | **现状 3 次串行 fetch_json（最坏 30s）→ 改为 ≤3 并发**（`_fetch_concurrent` + 共享 `_fanout_executor`，统一 `_FANOUT_WAIT_BUDGET=REQUEST_TIMEOUT` 兜底；超期 spec 被 `cancel()` 并降级 `upstream_timeout`），P95 = max 而非 sum（**v1.4：已落地**） | 本次顺带修（同 R13 家族；AC 归属 = **E2**，非 S7） |
 | `/healthz?check=1` | ≤10s | 5 源并发（专用 5 worker），单源 ≤3s | AC-S8 |
-| SSE 单 tick | ≤1s（AC-E5） | 200 码 ×3 字段帧构建 ≈10-30ms + 100 次 `put_nowait` ≈ 1ms | 全为缓存命中前提 |
+| SSE 单 tick | ≤1s（AC-E5） | 200 码 ×3 字段帧构建 ≈10-30ms + 100 次 `put_nowait` ≈ 1ms | 全为缓存命中前提；**v1.7 实测（50 码）**：quote 帧稳态 181–207ms、3 域 443ms，均在 ≤1s 内；冷启动首拍可显著更高（冷缓存，另有 `cold_first` 豁免不计 degraded/slip） |
 
 ### 4.2 吞吐与连接容量预算（AC-E4/E5/E8）
 
@@ -776,7 +801,7 @@ MAX_GROUPS=200 **不参与**内存护栏（它界的是每 tick 帧构建次数/
 
 **确定性丢弃行为**：构建新帧后若 `stream_queue_bytes + len(frame) > B`，**反复**从"当前保留字节最大的组中队列最满的连接"丢弃其最旧帧，直至可容纳；每次丢弃 `stream_frame_dropped_total += 1`。因 `B ≥ F_max`，任一单帧必可入队（最坏清空其余）⇒ **不丢最新帧**（AC-A2 语义保持）。
 
-**SSE 容量（AC-E5/E7）**：连接 100；单组 ≤200 码 ×3 字段；单 tick 帧构建 + 100 连接入队 ≤1s（**帧对象同组共享同一引用**，不产生 100 份拷贝——耗时与内存同时达标的关键，且与上面的 distinct 计费一致）。流端口 worker = `MAX_STREAM_CONNS + 10 = 110`（每条 SSE 常驻 1 worker）。
+**SSE 容量（AC-E5/E7）**：连接 100；单组 ≤200 码 ×3 字段；单 tick 帧构建 + 100 连接入队 ≤1s（**帧对象同组共享同一引用**，不产生 100 份拷贝——耗时与内存同时达标的关键，且与上面的 distinct 计费一致）。流端口 worker = `MAX_STREAM_CONNS + 10 = 110`（每条 SSE 常驻 1 worker）。**v1.7 实测帧体积**：quote×50（含 depth）≈**58.9KB**；3 域×50 ≈**2.0MB**（`STREAM_FRAME_BYTES_PER_FIELD=23KB` 仍是**上界**——实测 ≈13KB/码/域，模型保守）；`depth` 对 quote 帧的增量 ≈322B/码（占 quote 帧 ≈27%）。
 
 ### 4.3 资源上界表（AC-E6/E7/E8/E9/S9）
 
@@ -793,38 +818,60 @@ MAX_GROUPS=200 **不参与**内存护栏（它界的是每 tick 帧构建次数/
 | 去重码池（成员账 `_*_pool`） | 2000 全局 / 200 单组 | **拒绝（400）**，不截断 | 池上限与"跨组活跃码 ≤2000"对齐（修 P1-1） |
 | 端点缓存（数据 `_*_cache`，L1 域） | **2000/域（独立 LRU）** | 按 `last_access` 淘汰 | 与池解耦、独立 `cache_max` |
 | 端点缓存（f10 / announcement 数据） | 500/域 | 同上 | 独立 LRU |
+| **端点缓存（depth 五档数据，v1.7）** | **500/域** | 池上限 = `pool_max`（dedup=2000），缓存上限 = `cache_max=500`，独立 LRU | 新增（`fetch_cls_stock_depth` 自持 pool + terminal cache，随 `quote` 帧同拍） |
 | URL 缓存 | 2000 条（≈20MB） | 按 `last_access` 淘汰 | FIFO → LRU；清扫双触发 |
 | feed 缓存 | 100 条（≈30MB） | 按 `last_access` 淘汰 | FIFO → LRU；TTL 30s/180s |
 | sector 缓存 | 2000 条 / 7d | 淘汰 + 过期清扫 | 不变 |
 | 负缓存（URL 级） | 与 URL 键同域（≤2000），4 键 `until`/`kind`/`fail_count`/`first_at` | **门禁过期失效；条目保留作失败历史**（仅"成功"或"满额淘汰最早 `until`"时清除）；`first_at` **不被后续失败刷新**（连续失败段起点，`≥_HISTORY_AGE=600s` 即老化 ⇒ 本次用全预算探测） | 新增（v1.4 补 `first_at`） |
 | 码级冷却账 `_fail_ledger` | `(domain, code)` ≤ `_FAIL_LEDGER_MAX = 5 域 × 2000 = 10000`，条目 **4 元** `[fail_count, cooldown_until, kind, last_fail_ts]`，冷却 120s | 过期即清（**老化扫描限流 `_FAIL_LEDGER_PRUNE_INTERVAL=5s`**）；超硬上界按 `dict` 插入序前端弹出（O(1)，不再全表 `sorted`）；`_COOLDOWN_PUBLISH_INTERVAL=5s` 限流 `code_cooldown_list` 重建 | 新增（P1-5；v1.4 更正条目形状 + 补上界/节流） |
 | 流侧 last-known 结转 `_last_known` | `code → {field: 非空值}`，**每 tick 按存活码池剪枝** ⇒ ≤ `MAX_DEDUP_CODES`（2000） | 码离开存活池即回收；全字段为空则删该码条目；无活跃组时整表清空 | 新增（v1.4，P1-4 帧完整性） |
-| CDP 页面 | `CDP_STOCK_PAGES`(默认3) + 2 常驻 | 固定，不随流量增长 | 不变 |
+| CDP 页面 | `CDP_STOCK_PAGES`（**env 驱动；2C2G 部署档位 = 4**，见 `docker-compose.yml` / `doc/deploy/docker-compose.aliyun-2c2g.yml`）+ 2 常驻 = **6 内容页**（另有 2 个 webui renderer） | 固定，不随流量增长 | 不变（v1.6：基线由"默认 3"更正为 **env 驱动**、页面数更正为 **6 内容页**，见 §9.6） |
 | 后台线程 | 4 prefetch + push + stream + watchdog + warm + init ≈ 9（+CDP 心跳 5） | — | 不变 |
 | **healthz 专用执行器线程** | **5（懒创建）** | 信号量准入失败 → stale 快照 | 新增，计入 AC-S9「基线+20」 |
 | healthz 在飞 check | `MAX_HEALTH_INFLIGHT=5` 批 × <=`len(ROUTES)=5` 源 = **≤25 在飞**；执行器队列 ≤20 | 返回上次快照 + `stale:true`（准入位由 `_HealthBatch` 在该批 future 全部结束后释放，**恰好一次**） | 新增（修 P1-3 / P1-1） |
-| 批处理并发 | `_BATCH_MAX_WORKERS = 8`/请求 | — | 不变 |
-| 进程内存 | AC-S9：≤ 基线×1.5，2C2G 参考 ≤1.2GB | 指标告警 | 新增总账 |
+| 批处理并发 | **`BATCH_MAX_WORKERS = 20`/请求（v1.7：8 → 20，env `BATCH_MAX_WORKERS` 可覆盖）** | — | 与 `HTTP_POOL_MAX_PER_HOST=24` 对齐（扇出不排队在连接池上） |
+| **上游连接池（v1.7）** | **每 `(scheme,host,port)` ≤ `HTTP_POOL_MAX_PER_HOST=24` 条 keep-alive**；空闲 > `HTTP_POOL_IDLE_TTL=60s` 在下一次取用时惰性淘汰；超上限的并发请求改用**短命（ephemeral）连接**而非等待 | 不排队、不阻塞；失效 keep-alive 丢弃并重试一次 | 新增（每请求新建 TCP+TLS 的延迟/上游压力消除） |
+| **进程内 DNS 缓存（v1.7）** | `_DNSResolver` 上限 256 条、TTL `HTTP_DNS_CACHE_TTL=300s`；失败不缓存；拨号仍用 hostname（SNI/证书不变） | TTL 内直接用缓存地址；连接被拒时**强制重解析一次** | 新增（DNS 170ms → 15.8ms） |
+| 进程内存 | AC-S9：≤ 基线×1.5，2C2G 参考 ≤1.2GB；容器 `mem_limit 1.5g`（**v1.6 内存总账改为 PSS 口径**，Chrome 跨进程求和禁止用 RSS，见下） | 指标告警 | 新增总账 |
 
 **池上限与"跨组活跃码"的自洽（修 P1-1 / P1-N1，替换原"500→200"推导）**：
 ```
 去重池是跨组共享的单一 dict（_fundflow_pool/_basic_info_pool/_timeline_pool…），
 MAX_CODES_PER_SUB=200 只是**单组**上限，MAX_DEDUP_CODES=2000 才是**活跃码总上界**。
 ⇒ 池上限 = pool_max = MAX_DEDUP_CODES (2000)，不写死 200（200 只会在 ≥2 个不重叠组时抖空缓存）。
-⇒ "一个 L1 周期必然覆盖整池"仅当覆盖条件 C1 成立（`_fetches_per_code(fields) × N_active ≤ coverage = 23 取数次数/周期`，⇔ `N_active ≤ coverage_codes` = **23 / 11 / 7 码/周期**（1 / 2 / 3 域，盘中），见 §2.1 INV-1b）；
-   C1 不成立时按 §2.2 R-6 分片轮转，陈旧度 ≤ ceil(N_active/coverage_codes)×L1，并在 metrics 标记；
-   例：200 码 × 3 域 ⇒ slice=7 ⇒ lag=29 tick ≈ 232s（盘中 8s tick）——**这是默认场景，不是异常**。
-   非盘中 tick=120 ⇒ coverage=349 ⇒ 3 域 coverage_codes=116，同一订阅 lag=2。
+⇒ "一个 tick 周期必然覆盖整池"仅当覆盖条件 C1 成立（`_fetches_per_code(fields) × N_active ≤ coverage = 213 取数次数/周期`（盘中 quote tick=4），⇔ `N_active ≤ coverage_codes` = **106 / 71 / 53 码/周期**（quote / 2 域 / 全 3 域，盘中），见 §2.1 INV-1b）；
+   C1 不成立时按 §2.2 R-6 分片轮转，陈旧度 ≤ ceil(N_active/coverage_codes)×tick，并在 metrics 标记；
+   例：200 码 × 3 域 ⇒ slice=53 ⇒ lag=4 tick ≈ 16s（盘中 4s tick）——**v1.7 前**（coverage=23、slice=7）为 lag=29 ≈ 232s，重标定后大幅收敛。
+   非盘中 tick=120 ⇒ coverage=6400 ⇒ 3 域 coverage_codes=1600，同一 200 码订阅直接 C1（lag=0）。
 ⇒ 数据内存不再由池上限承担：改由终点缓存独立 cache_max（上表）守住。
 ```
 
-**内存分项估算（进程内，2C2G）**：URL 20MB + feed 30MB + L1 端点数据缓存（**3 域** quote/fundflow/timeline × 2000 × ~8KB ≈ 48MB；修 P2-N5，原"4 域≈64MB"失实）+ f10/announcement ≈11MB + sector 0.2MB + **`_last_known` ≤2000 码 × 3 字段（引用同一批 dict/数值对象，≈1MB 保守计，v1.4）** + SSE 队列 ≤128MB + 解释器/栈 ≈30MB ≈ **268MB**；Chrome 独立进程 ≈5 页×150MB ≈ 750MB（见 ADR-012）。合计 ≈1.01GB < 1.2GB 参考线，**余量薄**——故 `STREAM_QUEUE_BYTES_BUDGET=128MB`、**单帧余量准入（⇒ 满配组 ≤8）** 与 `MAX_GROUPS=200` 是必需而非可选。
+**内存分项估算（进程内，2C2G）**：URL 20MB + feed 30MB + L1 端点数据缓存（**3 域** quote/fundflow/timeline × 2000 × ~8KB ≈ 48MB；修 P2-N5，原"4 域≈64MB"失实）+ **depth 端点缓存 ≤500 × ~1KB ≈ 0.5MB（v1.7）** + f10/announcement ≈11MB + sector 0.2MB + **`_last_known` ≤2000 码 × 3 字段（引用同一批 dict/数值对象，≈1MB 保守计，v1.4）** + SSE 队列 ≤128MB + 解释器/栈 ≈30MB ≈ **268MB**（**上界：SSE 队列按满配 128MB 计**；空闲态实测远低于此）。
+
+**Chrome 内存总账（v1.6 统一口径，修 P2-4）**：
+
+> **记账口径（唯一权威表述）**：`Chrome 总内存 ≈ 固定基线 250MB(PSS) + N × 每页`。**跨进程求和必须用 PSS（或 `Pss_Anon`），禁止用 RSS 相加**——每个 chromium 进程都映射约 110–190MB 共享代码页，RSS 在每个进程各记一份，跨进程求和会**虚高约 3.2×**（容器内实测：SUM RSS 2209MiB vs 实际 cgroup 687.5MiB）。**两份文档此前的表面冲突即源于此**：SAD 原「每页 150MB+」是 **RSS 口径**（实测 161–196MB、均值 172，吻合），`doc/deploy/*.yml` 注释的「50-100MB/tab」是 **PSS 份额化口径**（实测 49–83MB、均值 59.5，吻合）——**两者都没写错，冲突的是度量口径**。
+
+| 项 | 口径 | 实测（容器内） | 规划取值 |
+|----|------|---------------|---------|
+| 每页（内容页） | RSS（单进程常驻集） | 161–196MB，均值 **172MB** | — |
+| 每页（内容页） | **PSS（份额化）** | 49–83MB，均值 **59.5MB** | **典型 60MB / 保守 150MB** |
+| 每页 | **`Pss_Anon`（私有匿名）** | 37.5–48.8MB，均值 **43MB** | — |
+| **固定基线**（browser-main + GPU + network + storage + zygote + Omnibox webui renderer） | PSS | ≈ **250MB**（其中 webui renderer ≈ **91MB**——**纯浏览器内部 UI，任何「N×每页」模型都覆盖不到，必须单列**） | **250MB** |
+| 页面配置 | — | `CDP_STOCK_PAGES=4`（compose 默认）+ 2 常驻 = **6 内容页**（另有 2 个 webui renderer） | 同左 |
+
+**按新口径的总账结论（2C2G / `mem_limit 1.5g`）**：
+- **典型（资源满配）**：Chrome = 250 + 6×60 ≈ **610MB**；+ 进程内 268MB（上界）≈ **878MB** ⇒ 对 `1.5g` 余量 ≈0.6GB。
+- **保守规划上界**：Chrome = 250 + 6×150 = **1150MB**；+ 进程内 268MB ≈ **1418MB** ⇒ **贴近 `1.5g`，余量薄**——与 SAD 原结论一致。**（口径说明：保守上界 1418MB 已超过 §4.3 资源上界表的「2C2G 参考 ≤1.2GB」典型参考线，故该参考线只适用于**典型口径**；硬约束以容器 `mem_limit 1.5g` 为准。）**
+- **实测稳态**：容器 `MemUsage 545.5 MiB`（cgroup 原始 **687.5 MiB**；**峰值 769.8 MiB = 51%**）⇒ 对 `1.5g` 实测余量 **≈0.8–1.0GB**，**稳态充足**（实测总量低于"典型规划值"是因为空闲态下缓存/队列未满、无活跃抓取）；但**按保守上界规划余量偏薄**，故 `STREAM_QUEUE_BYTES_BUDGET=128MB`、**单帧余量准入（⇒ 满配组 ≤8）** 与 `MAX_GROUPS=200` 仍是必需而非可选。
+
+**⚠️ 测量局限（如实登记，不得当作活跃态结论）**：上述实测为**空闲/复用态**（容器 CPU ≈1%，池页停在同标的，JS 堆仅 11–13MB）——**活跃抓取时单页会更高**；峰值样本仅覆盖约 **5 分钟**，**未跨 `CDP_RESTART_INTERVAL=7200s` 长周期**；且 **renderer ≠ tab**（webui renderer 是浏览器内部 UI，非订阅内容页，两套命名不可混算）。
 
 ---
 
 ## 5. 架构决策记录（ADR）
 
-> 每条含：背景 → 选项 → 决策 → 理由 → 影响 → 对应 AC。按"可逆性"排序：**低可逆 8 条（001-005 机制/契约 + 013 内存护栏 + 016 帧契约 + 017 代码身份）**，**中可逆 9 条（006-012 + 014 + 015）**。（v1.4 新增 015/016/017；001/003/009/013/014 按实现补正。）
+> 每条含：背景 → 选项 → 决策 → 理由 → 影响 → 对应 AC。按"可逆性"排序：**低可逆 10 条（001-005 机制/契约 + 013 内存护栏 + 016 帧契约 + 017 代码身份 + 018 刷新新鲜度契约 + 020 上游线路拼写）**，**中可逆 12 条（006-012 + 014 + 015 + 019 传输池化 + 021 五档并入 + 022 发送去重）**。（v1.4 新增 015/016/017；v1.7 新增 **018-022**；001/003/009/013/014 按实现补正，v1.7 补 001/009/015/016。）
 
 ### ADR-001 TTL 单一权威来源（低可逆）
 **背景**：R16/R12/D1-D4——7 类互不引用的时间常量，至少 4 处断崖（含新发现的 feed 层 300s vs L3 30s）。
@@ -832,6 +879,7 @@ MAX_CODES_PER_SUB=200 只是**单组**上限，MAX_DEDUP_CODES=2000 才是**活�
 **决策**：C。
 **理由**：分层是需求（L1/L2/L3/L4 是"准确"的基准口径），不能压成单值；B 无法阻止未来再分叉（本次 4 处断崖就是 B 的产物）。C 用**一条不变式**（`ttl_url == ttl_terminal == policy.ttl`）把"一致性"变成可断言的性质而非纪律。
 **影响**：删 8 个常量、改 6 个模块的 TTL 取法、`_cache_age()` 与 `/healthz` 的 `cache_ttl` 改读 policy（后者保留字段名与含义）；**`CACHE_TTL` 消费者核实为 `cache.py` 默认值 + `server._get_or_fetch_feed`**（`utils.py:12` 为未使用 import，随常量删除；`warm_jin10` 经 `fetch_json` 默认值）；**`DOMAIN_MATRIX` 补入 `longhu` 域（L4/300s/GBK）**、`cache_max` 维度、plate stagger 派生；feed 层新鲜度由 300s → **30s（盘中）/ 180s（非盘中）**（行为变更，Q3）；`fetch_json` 新增 `encoding` 形参（D5）。**AC**：A3/A4/E6/E9。
+> **v1.7 补**：`_trading_tiers()` 增 **L0=4s**（盘中），`quote` 由 L1 升 **L0**、新增 **`depth` 域（L0/dedup/`cache_max=500`）**；`DOMAIN_MATRIX` 现为 12 域。**"TTL == tick"并不自动等价"每拍回源"**——最快域（TTL ≤ tick）的缓存条目会因相位（写入落轮起点之后 δ s）被下一拍判命中，须由 **`refresh_epoch`**（ADR-018）补齐，否则名义 4s 实际 8s。
 
 ### ADR-002 下划线保留键 vs envelope（低可逆，对外契约）
 **背景**：R4/R14 需要往批量响应加元信息，但响应是扁平映射 `{code: data}`（🟠 STABLE，只增不改）。
@@ -889,7 +937,7 @@ MAX_CODES_PER_SUB=200 只是**单组**上限，MAX_DEDUP_CODES=2000 才是**活�
 **选项**：A 保持现状（靠 `REQUEST_TIMEOUT` 隐式兜底）；B 只给 REST 取数器加 `*args, **kwargs` 吞掉参数（消除 TypeError，但期限仍不生效）；C 全部取数器显式 `deadline=None` 形参，并在 `urlopen` 与入口都强制使用。
 **决策**：C。
 **理由**：B 只消除异常、不产生约束（"静默丢弃"变成"静默忽略"）；C 让期限成为**可测试的类型契约**（形参即文档），并支撑 §4.2 的 `W_miss` 收敛。
-**影响**：取数器签名变更（`deadline` + `ttl` 两个可选参数，向后兼容）；**`fetch_json` 也新增第 5 位形参 `deadline`（v1.4）**，且**超期闸门位于正缓存命中之后**（先给数据、再谈预算）；`_handle_cached_batch`/`_process_chunk`/`_run_batch` 增加 `budget`/`ttl`，`_run_batch` 返回值变 `(results, errors)`（**管道层内部**结构，handler 侧经 `build_batch_response` 组装为 dict）。**AC**：E2/S7/A10。
+**影响**：取数器签名变更（`deadline` + `ttl` 两个可选参数，向后兼容）；**`fetch_json` 也新增第 5 位形参 `deadline`（v1.4）**，且**超期闸门位于正缓存命中之后**（先给数据、再谈预算）；`_handle_cached_batch`/`_process_chunk`/`_run_batch` 增加 `budget`/`ttl`，`_run_batch` 返回值变 `(results, errors)`（**管道层内部**结构，handler 侧经 `build_batch_response` 组装为 dict）。**v1.7 补**：`fetch_json` 再增**第 6 关键字形参 `refresh_epoch`**；取数器签名扩为 `(code, deadline=None, ttl=None, refresh_epoch=None)`，由 `_call_refresh_handler` 以关键字下传（仅**调用帧** `TypeError` 回退到旧形状）。**`deadline` 管"预算"、`refresh_epoch` 管"新鲜度"**，二者正交（见 ADR-018）。**AC**：E2/S7/A10。
 
 ### ADR-010 新增 metrics.py（中可逆）
 **背景**：R8/R19/S10——tick 耗时、503、丢弃帧、缓存条目、冷却清单、CDP 窗口全不可观测；PRD 要求"仅用标准库日志与现有接口"。
@@ -910,7 +958,7 @@ MAX_CODES_PER_SUB=200 只是**单组**上限，MAX_DEDUP_CODES=2000 才是**活�
 **选项**：A 盘中照常重启（45s 无数据窗口无法消除，AC-S4 目标需放宽）；B 交易时段跳过、非交易时段照常（内存回收延后到盘后）；C 盘中不重启、仅靠 nav 阈值触发（`_MAX_PAGE_NAV_BEFORE_RECONNECT=30` 已有自愈路径）。
 **决策**：B（PRD §5 #5 倾向项）；同时把窗口状态机（`idle/restarting/unavailable`）暴露到 `/healthz` 并在 metrics 记录窗口时长。
 **理由**：C 依赖导航量，低流量下永不触发（这正是 watchdog 存在的理由，见其 docstring）；B 在"内存回收"与"盘中连续性"之间选后者——短线盘中 45s 无数据是不可接受的产品缺陷，而 7200s 周期内延后到收盘后回收，内存前提（AC-S9 ≤基线×1.5）仍成立（盘后 CDP 心跳降至 60s，负载低）。
-**影响**：`_cdp_memory_watchdog`（**位于 `server.py:881`，非 cdp_engine.py**，修 P2-2）增加 `_is_trading_hours()` 判断（顺延，不累积）；cdp_engine 只保留窗口状态机与页面数联动；页面数仍由 `CDP_STOCK_PAGES` 控制（默认 3，与内存总账联动）。**AC**：S4/S9/S10/R19/R20。
+**影响**：`_cdp_memory_watchdog`（**位于 `server.py:881`，非 cdp_engine.py**，修 P2-2）增加 `_is_trading_hours()` 判断（顺延，不累积）；cdp_engine 只保留窗口状态机与页面数联动；页面数仍由 `CDP_STOCK_PAGES` 控制（**env 驱动；2C2G 档位 = 4，+2 常驻 = 6 内容页**，与内存总账联动；v1.6 统一为 PSS 口径，见 §4.3 / §9.6）。**AC**：S4/S9/S10/R19/R20。
 
 ### ADR-013 SSE 队列字节计费：distinct 帧 × 深度（低可逆，修 P0-1）
 **背景**：P0-1——§2.2「每次入队累加 `len(frame)`」与 §4.2「同组共享同一引用」互斥；按前者计费，100 连接 × 14MB = 计 1.4GB，预算按构造必超、每 tick 无条件丢帧，AC-E5/A2 落空；而 `MAX_GROUPS` 界不住跨组帧内存，此预算是唯一护栏。
@@ -929,11 +977,11 @@ MAX_CODES_PER_SUB=200 只是**单组**上限，MAX_DEDUP_CODES=2000 才是**活�
 > **v1.4 反转登记 → v1.5 正式反转确认（取代 REV-DES-15 的"建议②"）**：批 2 详设评审曾决定"**预算耗尽也计入冷却账**"（理由：保留现口径、避免引入内部哨兵）。实现的最终口径**相反**：`_run_batch` 用内部标记 `_LOCAL_BUDGET` 逐码产出（**不新造 `FetchError.KINDS` 成员**，故并没有破坏 SAD 钉死的 `(results, errors)` 形状），`_process_chunk` 把它翻译成对外的 `'upstream_timeout'` 但**绝不写账**。反转理由：把"我们自己的预算耗尽"记成"上游连续失败 3 次"，会让**一个慢批把整条码池尾巴推进 120s 冷却**，而冷却又让下一批更快耗尽预算——自激正反馈。该口径与 `cache.py` 的 S1-1（本地等待预算不写负缓存）**逐字一致**。**AC-S6 的断言口径据此限定为"真实上游失败"**。**v1.5：编排层正式裁决"`_LOCAL_BUDGET` 不计入冷却账本"（PRD v0.5 §9.1③），本反转不再是"实现单方面偏离评审"，而是已确认口径**（代码位置：`stock_api.py:490-498` `_process_chunk` 命中 `_LOCAL_BUDGET` ⇒ 翻译后 `continue`；`:390-394` `_run_batch` 预算耗尽不建线程）。
 
 ### ADR-015 按订阅字段刷新（中可逆，v1.4 新增）
-**背景**：`_refresh_pool` 历史上**无条件**对 `_FIELD_HANDLERS` 的全部 3 个域（quote/fundflow/timeline）各刷一次。但组的 `fields` 是**订阅契约**：一个 `fields=["quote"]` 的组每 tick 仍付 3 倍上游成本，且容量模型把每码成本硬编码为 3 ⇒ ① 上游负载与订阅无关（浪费 2/3）；② `coverage_codes` 被低估（quote-only 组明明能覆盖 23 码，模型只给 7）⇒ 制造**不存在的容量不足**，把一个本可整池刷新的订阅降级成分片轮转。另有一个正确性面：`codes` 与 `fields` 若分两次加锁读，会与"组关闭"交错，得到**字段集已不再被订阅**的码池。
+**背景**：`_refresh_pool` 历史上**无条件**对 `_FIELD_HANDLERS` 的全部 3 个域（quote/fundflow/timeline）各刷一次。但组的 `fields` 是**订阅契约**：一个 `fields=["quote"]` 的组每 tick 仍付 3 倍上游成本，且容量模型把每码成本硬编码为 3 ⇒ ① 上游负载与订阅无关（浪费 2/3）；② `coverage_codes` 被低估（quote-only 组明明能覆盖 106 码——v1.4 口径 23——模型只给 71——v1.4 口径 7；数值按 v1.7 重标）⇒ 制造**不存在的容量不足**，把一个本可整池刷新的订阅降级成分片轮转。另有一个正确性面：`codes` 与 `fields` 若分两次加锁读，会与"组关闭"交错，得到**字段集已不再被订阅**的码池。
 **选项**：A 保持无条件 3 域（简单、容量模型与订阅解耦；代价是 3× 上游 + 容量低估）；B 按订阅字段并集刷新（成本与订阅成正比；代价是 `coverage_codes` 随字段数而变、C1 门限不再是常数）；C 按组分别刷新（每个组独立切片；代价是共享池被拆散、去重收益消失、上游成本回升）。
-**决策**：B。字段集 = **存活组订阅字段并集**（`_subscribed_fields()`，按 `_FIELD_HANDLERS` 顺序；只算**有连接**的组——僵尸组不得继续为无人消费的域付钱），且 **`codes` 与 `fields` 必须在同一次加锁中读出**（`_active_targets()`）。`_fetches_per_code(fields)` 与 `coverage_codes` 成为**订阅的函数**：盘中 1/2/3 域 ⇒ 23/11/7 码/周期。
+**决策**：B。字段集 = **存活组订阅字段并集**（`_subscribed_fields()`，按 `_FIELD_HANDLERS` 顺序；只算**有连接**的组——僵尸组不得继续为无人消费的域付钱），且 **`codes` 与 `fields` 必须在同一次加锁中读出**（`_active_targets()`）。`_fetches_per_code(fields)` 与 `coverage_codes` 成为**订阅的函数**：盘中 quote-only / 2 域 / 全 3 域 ⇒ **106 / 71 / 53** 码/周期（tick=4、coverage=213；v1.7 重标定）。
 **理由**：排除 A——"订阅什么就付出什么"是资源模型的底线，且 A 的容量低估会**错误地**把合法订阅推进降级路径（比多付上游更糟，因为它把可用的新鲜度当成不可用）。排除 C——去重池是跨组共享的单一账本（P1-1），按组拆分会同时破坏去重收益与池上限推导。"同一次加锁读 codes+fields"是把"字段集是订阅的函数"从**约定**升级为**结构保证**（P1-6）。
-**影响**：`_refresh_pool` 签名 `(codes, now=None, fields=None, tick=None, deadline=None)`；新增 `_subscribed_fields`/`_active_targets`/`_resolve_refresh_fields`/`_fetches_per_code`/`refresh_capacity`；C1 由 `3×n ≤ 170` 变为 `_fetches_per_code(fields)×n ≤ 23`；`coverage_codes` 出现在 201/200 响应（`refresh_capacity_codes`/`refresh_lag_ticks`/`capacity_warning`）。**AC**：A1/A3/E5/S10；AR-1/AR-6。
+**影响**：`_refresh_pool` 签名 `(codes, now=None, fields=None, tick=None, deadline=None)`；新增 `_subscribed_fields`/`_active_targets`/`_resolve_refresh_fields`/`_fetches_per_code`/`refresh_capacity`；C1 由 `3×n ≤ 170` 变为 `_fetches_per_code(fields)×n ≤ coverage`（v1.7：盘中 quote tick=4 ⇒ **213**；quote 每码成本 2）；`coverage_codes` 出现在 201/200 响应（`refresh_capacity_codes`/`refresh_lag_ticks`/`capacity_warning`）。**AC**：A1/A3/E5/S10；AR-1/AR-6。
 **何时改变选择**：若上游成本不再敏感（如引入稳定 CDN 边缘缓存）且**帧布局要求"每帧恒定三域"**（当前不要求：`fields` 是帧元数据、`items` 按订阅字段裁剪），可回到 A 以换取"容量常数化"。
 
 ### ADR-016 SSE 帧完整性契约：全码在位 + 显式陈旧/缺失/失败（低可逆，v1.4 新增）
@@ -942,6 +990,7 @@ MAX_CODES_PER_SUB=200 只是**单组**上限，MAX_DEDUP_CODES=2000 才是**活�
 **决策**：B + **last-known 结转**（`_carry_forward`/`_last_known`）。帧内：`items` **覆盖全部订阅码**（无数据为 `null`）、`codes_total`/`fields` 声明形状、`missing`+`missing_count` 标"本次确实没有值"、`stale`+`stale_count` 标"值来自上一 tick"、`errors` 标"上游失败 kind"。**三者互斥/正交互补**：`missing ∩ stale = ∅`；`errors` 可与前两者任一共存（某字段失败但整行有值）。收缩规则：`errors`/`stale` 只保留 `code ∈ items` 的条目。
 **理由**：B 把"一个含糊的缺席"拆成**三个可行动的状态**（等下一 tick / 显示旧值并弱化 / 报故障），而每个状态各自对应消费方的不同处置——这是 AC-A1 与值域三分在 SSE 侧的落点。排除 A/D（不解决不可判别）；排除 C（越出 W 级范围，且会同时改变丢帧与断线重连语义）。
 **影响**：`_build_frame` 输出契约扩展（🟠 STABLE **只增**：既有 `ts`/`items` 类型与含义不变；**但 `items` 由稀疏变稠密会增大帧字节**，`stream_frame_bytes` 的 23KB/码/域估算即按稠密帧标定）；新增 `_last_known`（**每 tick 按存活码池剪枝** ⇒ 上界 `MAX_DEDUP_CODES`）+ `stale` 元数据 + `_errors → snapshot['_errors'] → payload['errors']` 的**保留位（非股票项）**；`errors` 的值域 = `FetchError.KINDS ∪ {'tick_budget_exceeded'}`（后者为调度层错误，不入 `upstream_fail_total`）。**AC**：A1/A2/E5/E7；AR-7（`_` 前缀陷阱）。
+> **v1.7 补**：`quote` 负载内新增 `depth`（只增，见 **ADR-021**）；**发送层去重**（内容未变不发，见 **ADR-022**）使"本 tick 无新帧"成为"数据未变"的合法信号——消费方**不得**把"未收到帧"等同于"流中断"（心跳 `event: ping` 仍每 `STREAM_PING_INTERVAL=20s` 一次）。
 **何时改变选择**：若客户端体积成为硬约束（如移动端流量计费），可对 `stale` 码**只发字段级差分**——但那属新一轮的"增量帧"设计（W 级），须先改 PRD §6。
 
 ### ADR-017 股票代码归一化单一权威 `config.canonical_code`（低可逆，v1.4 新增）
@@ -951,7 +1000,45 @@ MAX_CODES_PER_SUB=200 只是**单组**上限，MAX_DEDUP_CODES=2000 才是**活�
 **理由**：排除 A——"同一数据两处定义"违反项目纪律（§编码纪律 #6），且 4 个模块各持一份正则会各自演化；排除 B——它把"哪些是 canonical 键"留成隐性知识，评审无法检查。C 让"一个股票一个身份"成为**可断言的性质**（`canonical_code(canonical_code(x)) == canonical_code(x)`），而不是纪律。
 **影响**：`config.py` 新增 `canonical_code` + `VALID_STOCK_CODE` + `_DOTTED_STOCK_CODE`；`server._parse_stock_codes`（入口折叠 + `requested` 原拼写序列 + `_rekey_batch_response` 回写）、`stream.create_group`/`patch_group`（折叠后去重 ⇒ 同一股票多种拼写只占一个名额；非法码 = **400**）、`stock_api._process_chunk`/`cached_batch`（canonical 键位 + 结果回写原拼写）、`cdp_engine._same_code`/`navigate_stock`（两侧都归一后比较）全部接入。**注意两条端锁定边界**：① 非法码值在**批量 HTTP 路径**仍是**逐码 `null`**（400 只给"缺 `?code=`"），只有**流端口建组/改组**把非法码当 400（入参校验，非数据）；② 响应键**保持客户端原拼写**（`_rekey_batch_response` 是纯改名，未发生重拼写时 body 逐字节不变）。**AC**：A6/A7/S4；PRD 🟠 STABLE。
 
-**ADR 汇总**：**17 条**（低可逆 **8**：001-005 + **013** + **016** + **017**；中可逆 **9**：006-012 + **014** + **015**）；高可逆决策（如具体常数值、日志文案、"tick 网格 vs 0.25×tick 下限"这类一个函数即可回滚的节拍规则）不记 ADR（tick 节拍落点见 §2.6）。
+### ADR-018 定时刷新新鲜度契约 `refresh_epoch`（低可逆，v1.7 新增）
+**背景**：L0 档把 quote 的 tick 压到 4s，而 quote 的 TTL 也是 4s（`ttl == tick`）。但一次刷新在**轮起点之后 δ s** 才写入 URL 缓存，下一轮（`t0+tick`）读到的条目年龄仅 `tick−δ`（< TTL）⇒ 被普通 TTL 判定命中 ⇒ **隔拍跳过**：名义 4s 的订阅实际每 8s 才真回源（实测报告确认"TTL==tick 即命中缓存"的相位缺陷）。更早（`_PER_FETCH_EST=2.2`，tick=8）时 TTL==tick==8s 同样存在，只是被更慢的节拍掩盖。
+**选项**：A 把最快域 TTL 设为 `< tick`（例如 3s）——用"更短 TTL"绕过相位，但把域 TTL 与节拍**耦合**，盘中/非盘中翻转或 tick 调整都要连带改 TTL，且 REST 路径会被迫接受更短的缓存寿命；B 定时刷新路径**无条件绕过缓存**（丢掉单飞/URL 缓存的并发保护与失败吸收，且同一码的 REST 请求也被牵连）；C 只对"`cache_policy(d)['ttl'] <= tick`"的域，把**轮起点**作为 `refresh_epoch` 交给缓存谓词，缓存拒绝 `write_time < refresh_epoch` 的条目。
+**决策**：C。域 TTL 保持单一权威（4s 就是 4s），只给**定时刷新**加一道"本轮起点"的地板；REST / prefetch 调用方不传 `refresh_epoch`（默认 `None`），逐字保持普通 TTL 语义。
+**理由**：排除 A——把"新鲜度"与"节拍"绑死会让"改 tick"变成"改 TTL"的隐式连带，违背 ADR-001 的单一权威；排除 B——它牺牲的是缓存存在的意义（并发单飞、失败吸收），而代价仅是一道地板。C 把差异限制在"谁在读"（调度读 vs 点读），不改任何 TTL 值。**TTL > tick 的慢域**（fundflow/timeline 在 4s tick 下）**刻意不设地板**——它们靠缓存**按域分拍**（4s tick 下每 8s 真回源），这正是与 tick 解耦的收益，强行每拍回源只会翻倍上游而不增新鲜度。
+**影响**：`cache.fetch_json(url, headers, ttl, encoding, deadline, refresh_epoch=None)` 增第 6 关键字形参；`cache._cache_fresh(entry, refresh_epoch)` 拒绝过旧条目；`stream._domain_refresh_epoch(domain, tick, now)` 判定并返回地板；`_call_refresh_handler` 以关键字下传（仅**调用帧** `TypeError` 回退）；取数器签名扩为 `(code, deadline=None, ttl=None, refresh_epoch=None)`，`fetch_cls_basic_info` 把 epoch 送到**阶段 1 与阶段 3**（阶段 2 sector 保持 TTL）。**可逆性判据**：撤回只需删地板（数行）——但它守护的是"名义 4s 必须真是 4s"这一对客户端的承诺，且失效是**静默减半**、极难从表象归因，故记 ADR。**AC**：A3/E5/S10；AR-1。
+**何时改变选择**：若上游提供"按版本/时间戳"的条件请求（ETag/Last-Modified），可改为版本比进而非时间地板。
+
+### ADR-019 上游传输层：keep-alive 连接池 + 进程内 DNS 缓存 + 启动预热（中可逆，v1.7 新增）
+**背景**：`fetch_json` 是唯一 HTTP 出口，但此前用 `urllib.request.urlopen` —— **每个请求新建 TCP+TLS 连接并重解析 DNS**。2C2G 实测单请求 ≈**340ms**（DNS ≈176ms＋握手 ≈78ms），DNS 还有 5.5% 概率 ~4s 解析器重试；50 码冷扇出 ≈**4.2s**，超过 0.8×tick 预算，直接与 SSE 刷新容量模型冲突。
+**选项**：A 保持 `urlopen`（实现最简，但每次付握手+DNS）；B 自建**每 `(scheme,host,port)` keep-alive 连接池** + **进程内 DNS TTL 缓存**，以 drop-in `urlopen` 保持既有可观测契约；C 引入第三方 HTTP 客户端（requests/httpx）——违反零依赖硬约束，排除。
+**决策**：B。连接复用（LIFO 取用、每 host 有界、空闲淘汰、锁外 IO）＋ DNS 结果 TTL 缓存（仍按 hostname 拨号，保 SNI/证书校验）＋ 启动 `warm_transport` 预热（**仅握手，不发业务请求**）。
+**理由**：握手与 DNS 是**每次请求的固定税**，与业务无关，复用即消除；换第三方库违反 PRD §6。池化必须保持 `urlopen` 的可观测契约（成功返回可 `read()` 体、4xx/5xx `HTTPError`、传输失败 `URLError`、跟随重定向），否则 `_classify` 与所有调用点都要改。**预热只填传输层**（池 + DNS），不产生上游数据负载，因此可安全地在启动 daemon 线程执行、不 gate 启动/`healthz`。
+**影响**：`cache._ConnectionPool` / `_DNSResolver` / `warm_transport` / 池化 `urlopen`；env `HTTP_POOL_MAX_PER_HOST=24` / `HTTP_POOL_IDLE_TTL=60` / `HTTP_DNS_CACHE_TTL=300` / `HTTP_WARM_CONNECTIONS=1` / `HTTP_WARM_TIMEOUT=2.0`；`config.warm_hosts()` 从 SSE 热路径 URL 派生预热 host（URL 常量是唯一权威）。**实测**：单请求 340ms → **139ms p50 / 167ms max**，DNS 170ms → **15.8ms**，`x-quote.cls.cn` 上的 4s 重试尾**消除**。**池上限必须 ≥ `BATCH_MAX_WORKERS`**（24 ≥ 20），否则批扇出会排队在池上、使容量模型的 worker 数不可达（BUG-SSE-DEPTH-01 的耦合）。**AC**：E1/E2/S7。
+**何时改变选择**：若上游切到 HTTP/2 或引入边缘缓存/CDN，池化收益下降，可回到更简单的传输。
+
+### ADR-020 上游双 wire 格式：身份键与线路拼写分离（低可逆，v1.7 新增）
+**背景**：`x-quote.cls.cn/quote/stock/{basic,volume,detail}` 对**两种拼写**各有偏好：沪/深接受小写前缀形（`sh600519`），**北交所只接受点号大写形（`430047.BJ`）**；用错拼写上游**不报错**——返回 `HTTP 200` + 全 null 的"空壳"（basic）或空 `data`（volume）。历史上北交所报价因此**整类空白**，而沪/深一直正常，极易被误判为"该股无数据"。
+**选项**：A 只用一种拼写（无法同时服务沪/深与北交所）；B 在每个调用点就地格式化（N 份实现漂移，且"身份键"与"线路拼写"混淆 ⇒ 同一股票可铸出多个池/缓存/账本键）；C **身份键 `canonical_code` 不变**（池/缓存/账本/CDP 一律用它），另立**线路拼写**单一权威 `upstream_secu_code`，**只有 URL 构造**做转换。
+**决策**：C。
+**理由**：排除 A（北交所不可用）；排除 B（一个股票多个身份违反编码纪律 #6，是 P1-6 根因）。C 让"上游方言"成为**构造 URL 时的一次转换**，身份不下沉任何方言。配套必须有**空壳防御**：既然用错拼写是 `200` 而非错误码，任何只信 `code == 200` 的取数都会把空壳缓存并推流 ⇒ `_basic_info_is_valid` 要求关键字段（`secu_name`/`last_px`）非空，否则记 `upstream_error`。
+**影响**：`config.upstream_secu_code(code)`（沪/深返回 canonical，`bj*` 返回 `NNNNNN.BJ`）；所有个股上游 URL 改经它；`stock_api._basic_info_is_valid`（空壳 ⇒ `upstream_error`，不缓存/不进帧）；`depth` 对空 `data`/全 0 同样返回 `None`。**AC**：A6/A7/E9/S4；**AR-15（空壳语义）**。
+
+### ADR-021 五档盘口并入 `quote` 负载（中可逆，v1.7 新增）
+**背景**：短线订阅需要五档盘口，且希望它与实时价**同一帧、同一节拍**到达。若把 `depth` 做成新的订阅字段/独立帧，会新增帧类型与连接语义；若做成独立端点，客户端要为同一只股票做两次请求、两次对齐。
+**选项**：A `depth` 作为**新订阅字段**（新增帧布局与全字段计价，`items` 形状与 `fields` 契约扩张）；B 并入 `quote` 负载，即 `items[code].quote.depth`（**只增一个键**）；C 独立 `/stock/depth` 端点与独立帧（客户端两路对齐，帧数翻倍）。
+**决策**：B。
+**理由**：`depth` 是**对 quote 的增补数据**，非独立域语义——它与 quote 同源、同拍、同缓存条目：`fetch_cls_basic_info` 阶段 1 拿到 quote 后，阶段 3 把 depth 附加进同一结果，于是 **quote 的终点缓存命中天然带着 depth**（零额外上游调用）。选项 A 会把它抬成与 quote 平级的字段，改变 `fields` 枚举与帧形状（超出"只增"的边界）；选项 C 让客户端为一次行情做两次对齐。**空值语义必须诚实**：空 `data`、20 个价位/量字段全 0（指数没有盘口）、非普通股/未知码 ⇒ **不出现 `depth` 键**（绝不伪造全 0 假档）。
+**影响**：新增 `depth` 域（L0 / dedup / `cache_max=500`）；`fetch_cls_stock_depth`（非致命，失败**绝不**连累 quote）；`quote` 每码稳态成本 **1 → 2**（`_FIELD_FETCH_CALLS['quote']=2`），因此 coverage 与 C1 门限按新成本重算；帧字节增大（depth ≈322B/码，quote×50 帧 ≈58.9KB）；`refresh_epoch` 送达阶段 1 与阶段 3。**AC**：A1/A3/E5/S10。
+**何时改变选择**：若出现"只要盘口不要行情"的纯 depth 订阅，或盘口需要**独立于 quote 的节拍**，则应回到选项 A（独立字段），但那需要新的帧契约。
+
+### ADR-022 SSE 帧发送层去重（中可逆，v1.7 新增）
+**背景**：tick 网格钉的是**轮起点**（`t0 + k×tick`），而帧在**轮末**离开（`_broadcast`），故两帧到达间隔 = `tick − dur_k + dur_{k+1}`：一个 3.5s 的冷轮后接 0.1s 的暖轮，会让两帧只隔 ~0.6s，而第二帧**内容未变**（缓存命中帧）。这在 4s tick 下尤其明显，且让客户端把"心跳式重复帧"误读为"有新数据"。
+**选项**：A 每 tick 无条件发（实现最简；重复帧污染"新数据"信号）；B **按内容摘要去重**——剔除每帧必变的 `ts` 后哈希，与上一帧相同则不重发；新连接（`sent_any=False`）**强制首发**当前帧；C 用时间窗口/最小间隔抑制（脆弱：会延迟真实变化）。
+**决策**：B。
+**理由**：排除 A（重复帧是伪信号）；排除 C（延迟真实变化不可接受）。B 从**源头**消除伪信号——同一内容绝不在一条流上连续出现两次，且它**只少发、不迟发**：变化仍在该 tick 发出，尚未收到任何帧的新连接由 `sent_any` 强制喂一帧而不必等下一个变化。**代价**：消费方必须把"本 tick 没有帧"理解为"数据未变"，而不是"流断了"（心跳 `event: ping` 每 20s 一次，仍可判活）。
+**影响**：`_frame_signature(frame)`（剔除前导 `ts` 后的 blake2b 16 字节摘要，O(1) 状态、固定长度比较）/ `SubscriptionGroup.last_sig` / `_SSEConn.sent_any`；`last_push_ts` **仅在真的发出帧时**刷新（去重跳过/目标全关不得冒充一次推送）；`_reserve_for` 为落后客户端丢帧仍是既有例外（该连接已在帧契约之外）。**AC**：E5/A1/A2；BUG-冷启动-01。
+
+**ADR 汇总**：**22 条**（低可逆 **10**：001-005 + **013** + **016** + **017** + **018** + **020**；中可逆 **12**：006-012 + **014** + **015** + **019** + **021** + **022**）；高可逆决策（如具体常数值、日志文案、"tick 网格 vs 0.25×tick 下限"这类一个函数即可回滚的节拍规则）不记 ADR（tick 节拍落点见 §2.6）。
 
 ---
 
@@ -966,14 +1053,15 @@ MAX_CODES_PER_SUB=200 只是**单组**上限，MAX_DEDUP_CODES=2000 才是**活�
 | 有界队列与丢弃策略 | `queue.Queue(maxsize=8)` + `Full/Empty` | 不自研无锁环形缓冲（锁序风险） |
 | 缓存容器与 LRU | `collections.OrderedDict`（`move_to_end` / `popitem`） | 不引 cachetools |
 | 时间与时区 | `time`、`datetime(timezone.utc)` + 8h（CST） | 不引 pytz/zoneinfo 依赖数据 |
-| 上游调用 | `urllib.request` + `bytes.decode(encoding)`（`fetch_json` 新增 `encoding` 形参，GBK 上游用 `encoding='gbk'`） | 不引 requests / 不引 chardet（编码由域显式指定，见 §2.3 D-5） |
+| 上游调用 | `urllib.request.Request` + `bytes.decode(encoding)`（`fetch_json` 新增 `encoding`/`deadline`/`refresh_epoch` 形参，GBK 上游用 `encoding='gbk'`） | 不引 requests / 不引 chardet（编码由域显式指定，见 §2.3 D-5） |
+| 上游传输复用（v1.7） | 自建 `_ConnectionPool`（`http.client.HTTP(S)Connection`，每 host keep-alive）+ `_DNSResolver`（`socket.getaddrinfo` TTL 缓存）+ `warm_transport`（启动预热）；池化 `urlopen` 保持 stdlib 可观测契约（`HTTPError`/`URLError`/重定向） | 不引 requests/httpx/urllib3（零依赖；ADR-019） |
 | CDP 客户端 | 现有 `cdp_engine`（`websocket` 为**可选**运行时依赖，CDP 模式才需要；非 CDP 路径零依赖） | 不引 playwright/selenium |
 | 观测 | 新增 `metrics.py`（`threading.Lock` + dict）+ `logging` | 不引 prometheus_client |
 | 测试 | `unittest`（`python -m unittest discover -s tests -v`） | 不引 pytest |
 
 > ⚠️ 既有依赖说明：`cdp_engine.execute_js()` 内 `import websocket` 为**函数内延迟导入**，仅 CDP 模式使用；本架构不改该状态，且**不将其提升为硬依赖**。
 
-**tech-stack.json 已更新于 `doc/arch/tech-stack.json`（v1.4）**：含 `architectureRules`——`importRestrictions.denylist` 固化"零第三方库"红线；`allowlist` 补入 `websocket`（仅函数内延迟导入，修 P2-7）；`layerIsolation`/`fileStructure` 与 §2.6/§3 的模块划分一致，供 `code-developer` 自验与 `check-arch-compliance.sh` 校验。**帧计费（`_Frame`/refs/`stream_queue_bytes`）归 stream 层，cache.py 不得承载**——由现有 `layerIsolation`（cache.py 禁 import stream/server/stock_api/market_api）覆盖；**feed 缓存机制归 cache 层、`socket` 已在 allowlist**（D-3）。
+**tech-stack.json 已更新于 `doc/arch/tech-stack.json`（v1.7）**：含 `architectureRules`——`importRestrictions.denylist` 固化"零第三方库"红线；`allowlist` 补入 `websocket`（仅函数内延迟导入，修 P2-7）；`layerIsolation`/`fileStructure` 与 §2.6/§3 的模块划分一致，供 `code-developer` 自验与 `check-arch-compliance.sh` 校验。**帧计费（`_Frame`/refs/`stream_queue_bytes`）归 stream 层，cache.py 不得承载**——由现有 `layerIsolation`（cache.py 禁 import stream/server/stock_api/market_api）覆盖；**feed 缓存机制归 cache 层、`socket` 已在 allowlist**（D-3）；**v1.7：HTTP 连接池/DNS 缓存同属 cache 层**（仍是 stdlib `http.client`/`socket`，不新增依赖）。
 
 **v1.4 对 tech-stack.json 的两处实质变更（审计实测得到，非版本号联动）**：
 1. **`allowlist` = 实测 import 闭包**。逐模块扫描 `china_finance_rss/*.py` 的模块级 import 后，`allowlist` 遗漏了 **`hashlib` / `html` / `xml`**（三者均来自 `utils.py`：`cls_sign_params` 的 `hashlib`、HTML 实体反转义的 `html.unescape`、RSS/OPML 生成的 `xml.etree.ElementTree`）。它们是**标准库**，缺失会让 `check-arch-compliance.sh` 对 `utils.py` 报假阳性。同时 `itertools` 在包内**无任何引用**（保留无害，已标注为历史项）。`websocket` 仍是唯一"函数内延迟导入"的特例。
@@ -987,6 +1075,12 @@ MAX_CODES_PER_SUB=200 只是**单组**上限，MAX_DEDUP_CODES=2000 才是**活�
      "reason": "cdp_engine 只允许依赖 config/metrics，禁止反向依赖调用方（含 stock_api）—— 与 stock_api → cdp_engine 构成单向边" }
    ```
    > 另：`namingRules.fetch` 已覆盖"按码取数器签名为 `fetch_*(code, deadline=None)`"；v1.4 起实现实为 `fetch_*(code, deadline=None, ttl=None)`（`ttl` 为第 3 可选形参），**`namingRules` 的措辞已同步放宽为"至少含 `(code, deadline=None)`"**，不要求穷举后续可选参数。
+
+**v1.7 对 tech-stack.json 的实质变更（审计实测得到，非版本号联动）**：
+1. `backend.push` 描述补 **`quote` 负载内 `depth`（五档，只增；空/全 0/指数 ⇒ 键不出现）** 与**发送层去重**语义；`backend.cache` 补 **HTTP keep-alive 连接池 + 进程内 DNS TTL 缓存 + 启动预热**（仍是 stdlib `http.client`/`socket`，`optionalRuntimeDependencies` 不变）。
+2. `namingRules.config` 补 **上游线路拼写一律经 `config.upstream_secu_code`**（沪/深前缀、北交所点号 `430047.BJ`；与身份键 `canonical_code` 分离，禁止本地拼装），与 `canonical_code` 并列为两条"单一权威"。
+3. `namingRules.fetch` 措辞随实现扩为 `(code, deadline=None, ttl=None, refresh_epoch=None)`（仍只要求"至少含 `(code, deadline=None)`"）；`architectureRules.metrics` 补 `upstream_fetch_total` 的域键含 **`depth`**。
+4. `version: 1.6 → 1.7`。`allowlist`/`layerIsolation`/`fileStructure`/`importRestrictions` 均不变（传输层复用 stdlib）。
 
 ## 7. 待决策、风险与假设
 
@@ -1002,6 +1096,7 @@ MAX_CODES_PER_SUB=200 只是**单组**上限，MAX_DEDUP_CODES=2000 才是**活�
 | Q6 | AC-S3 模式 B 的 P95 口径 | **v1.5 重标（PRD v0.5 裁决）**：目标由「≤3s」改为**高请求密度 ≤5s / 低请求密度 ≤10s**（前提：探测阶梯**封顶 5s** + `NEG_TTL=5s`）。由 §2.3 D-1 论证可达：持续黑洞稳态 = 10s 周期、慢占比 ≈50% ⇒ 高密度 P95≈5s、低密度退化为周期上界 ≈10s；**封顶值 / `NEG_TTL` 任一分量变动必须连带重标本 AC**；"6–10s 慢而未死"上游恢复延迟 ≤600s 为**已登记权衡**（§2.3 D-1 / AR-13） | §2.3 D-1 / §4.1 / AR-9 / AR-13 / §9.5 |
 | **N1（v1.4 发现 → v1.5 关闭）** | **JSON 单体/面板/工具端点在"整体降级"时的状态码**（原冲突：实现 503 vs PRD AC-A5 的 200） | **已裁决（关闭）：维持 HTTP 200 + error 客体**——「原来旧版本怎么返回就怎么返回，因为已经有业务系统在使用旧版本接口」⇒ 与 PRD AC-A5 一致（PRD v0.5 已固化"503 仅准入拒绝与 `/healthz`"）。**代码落地**：`_json_payload_has_data` 已删、`_send_json_shape` 恒 200；`http_503_total` 计数点 4→3。**§8 A5 由 ⚠️ 改 ✅；AR-12 关闭** | §2.4 / §3.1 关闭登记 / §8 A5 / §9.5 |
 | **N2（新，P7b 发现）** | **SSE 帧 `items` 由稀疏变稠密**（缺数据从"缺席"改为 `null` + `missing`），属语义补全但会改变既有客户端的遍历假设 | 归入 🟠 STABLE「只增」的边界情形：**建议按"只增"处理**（既有键类型/含义未变；`missing` 明示"本来就没有值"），但须与 N1 一同记入变更日志，并同步**流端口 API 文档**（`/stream/quote/<sid>` 的帧 schema 目前无正式对外文档） | §2.5 C-5 / §3.1 例外 3 |
+| **N3（新，v1.7 P7b）** | **两项「只增」对外变更须记变更日志**：① SSE `items[code].quote` 内新增 **`depth`（五档盘口）**——空 dict/全 0（指数）/非普通股/未知码 ⇒ **不出现该键**；② `POST`/`PATCH /stream/subscriptions` 响应新增 **`refresh_capacity_codes`/`refresh_lag_ticks`/`capacity_warning`** | 归入 🟠 STABLE「只增」（既有键类型/含义不变）：**按"只增"处理**，**须记入变更日志并同步流端口 API 文档**；帧字节随之增大（3 域×50 ≈2.0MB） | §2.5 C-5 / §3.1 例外 5·6 / §4.2 |
 
 **CDP 标注契约同步项（Q2）——⚠️ 状态更正：health 负载 + 首页 CDP 列已在代码落地，仅 `API.md` 待同步**
 
@@ -1019,31 +1114,35 @@ MAX_CODES_PER_SUB=200 只是**单组**上限，MAX_DEDUP_CODES=2000 才是**活�
 
 | # | 风险 | 等级 | 缓解 |
 |---|------|------|------|
-| AR-1 | **SSE tick 内 `_active_codes()`（可达 2000）全量刷新超 tick 预算**（40 chunk；按订阅字段串行计可达 6000 次取数） | 高 | **针对 `_active_codes()`**：§2.2 R-6 分片轮转（每 tick 只刷 `\|slice\| ≤ coverage_codes` 的切片 ⇒ ≤23 取数 ≤ `coverage = 23`，其余读终点缓存）；`stream_refresh_lag_ticks` 可观测；tick 预算 0.8×tick + degraded。**v1.4 数字更正**：`coverage` 由 `≈170` 重标定为 **23**（`_PER_FETCH_EST` 0.3→2.2 实测校准），`coverage_codes` 由 `≈56` 变为 **23/11/7**（1/2/3 域，按订阅字段），故 200 码 × 3 域的 lag ≈ 29 tick ≈ 232s（盘中）——**这是容量模型的预期行为，不是缺陷**。**帧完整性口径（修 P2-N2，v1.4 补 last-known）**：warm 码不降级；冷码以 `null` 出现在帧内 `missing` 中（不再"缺席"），≤lag tick 内首次取到数据；AC-A1 以 warm 稳态 + 200 帧窗口为前提。（原"池上限=200"缓解对准 prefetch 池、对 `_active_codes()` 无效；原"≤coverage≈213 切片"单位错误，均已在 P1-1/P1-N1 改） |
+| AR-1 | **SSE tick 内 `_active_codes()`（可达 2000）全量刷新超 tick 预算**（40 chunk；按订阅字段串行计可达 6000 次取数） | 高 | **针对 `_active_codes()`**：§2.2 R-6 分片轮转（每 tick 只刷 `\|slice\| ≤ coverage_codes` 的切片 ⇒ 切片取数 ≤ `coverage = 213`，其余读终点缓存）；`stream_refresh_lag_ticks` 可观测；tick 预算 0.8×tick + degraded。**v1.7 数字更正**：`coverage` 重标定为 **213**（盘中 quote tick=4；`_PER_FETCH_EST` 2.2→**0.3**、`BATCH_MAX_WORKERS` 8→**20**、`HTTP_POOL_MAX_PER_HOST` 16→**24**、`quote` 每码成本 1→**2**），`coverage_codes` = **106 / 71 / 53**（quote / 2 域 / 全 3 域，盘中），故 **50 码 × 3 域回 C1（lag=0）**；200 码 × 3 域的 lag ≈ 4 tick ≈ 16s（盘中）。v1.7 前（coverage=23、slice=7）同一订阅 lag ≈ 29 tick ≈ 232s。**帧完整性口径（修 P2-N2，v1.4 补 last-known）**：warm 码不降级；冷码以 `null` 出现在帧内 `missing` 中（不再"缺席"），≤lag tick 内首次取到数据；AC-A1 以 warm 稳态 + 200 帧窗口为前提。（原"池上限=200"缓解对准 prefetch 池、对 `_active_codes()` 无效；原"≤coverage≈213 切片"单位错误，均已在 P1-1/P1-N1 改） |
 | AR-2 | 命中率 ≥90% 仅为 SAD 设计目标，PRD 未列为验收项 | 中 | 纳入 `/healthz` `cache_hit_ratio` 观测项（**非 AC**）；P6c 作为主指标之一；<84% 时走 PRD 修订 |
 | AR-3 | 负缓存半开探测的"恢复感知延迟"与探测误判 | 中 | ADR-003 论证：`NEG_TTL=5s`（守 PRD ≤5s）、探测预算 `_probe_budget` **阶梯 2→4→5 封顶**（**v1.5：`_PROBE_BUDGET_CAP=5.0`**；v1.4 起不再是恒定 2s）+ `_HISTORY_AGE=600s` 老化；`negative_cache_size`/`fail_count` 可观测；`NEG_TTL`/`PROBE_TIMEOUT` env 可调（`_HISTORY_AGE` / `_PROBE_BUDGET_CAP` 不可，见 AR-13） |
 | AR-4 | `_run_batch` 返回值改 `(results, errors)` 是**内部签名破坏性变更** | 中 | 全仓 grep 调用点 + 存量用例回归；errors 缺失时组装点容忍空 dict。**v1.4 边界澄清**：该二元组只存在于**管道层内部**，对外的 handler 签名与响应形状未变（§2.4 职责边界） |
-| AR-5 | Chrome ≈750MB + 进程内 ≈268MB 在 2C2G 上余量薄 | 中 | `MAX_GROUPS`(CPU) / 队列字节预算(内存) / CDP 页面数三者联动；`cache_max` 独立 LRU；AC-S9 24h 采样 |
-| AR-6 | **TTL / prefetch 间隔收紧导致上游请求量上升**（修 P2-N3 + P3b 评审校正**幻影数据**）：① feed 300s→30s（盘中）⇒ 5 源请求量 ×10；② prefetch 有效间隔（现状代码 = `max(常量, tier 基值)`）→ 目标（`cache_policy(d)['pool_refresh']`），逐域：**fundflow `max(25, L1=8)=25`→8（×3.1）、timeline `max(30,8)=30`→8（×3.8）、announcement `max(60, L4=300)=300`→30（**×10**，且 tier **L4→L3**）、f10 `max(60, L4=300)=300`→300（**无变化**）**；**`basic_info 120→8（×15）` 为幻影，已删除**——无 basic_info prefetch loop，`_BASIC_INFO_POOL_REFRESH` 是**死常量**（无任何 import/引用，随常量删除） | 中 | 上游为行情/新闻站，量级可承受；URL 缓存同域 L3 限流；负缓存挡故障期；**新增每域 fetch 计数 `upstream_fetch_total{domain}` 入 metrics**（Q3⑤），P6c 以该计数核对"上游负载增幅 ≤ 可接受阈值"。**v1.4 方向的抵消项**：§2.2 R-6 改为**按订阅字段刷新**（ADR-015）后，SSE 侧的上游成本只与"实际被订阅的域"成正比——quote-only 组从 3×降到 1×，故上表的 ×3.1/×3.8 只对**三域全订**的组成立；单域组反而**下降**。P6c 应按 `upstream_fetch_total{domain}` 的**实测**分摊核对，不要用"订阅组数 × 3 域"外推 |
+| AR-5 | Chrome 按 **PSS 口径**：典型 `250+6×60≈`**610MB** / 保守 `250+6×150=`**1150MB**（+ 进程内 ≈268MB 上界）在 2C2G 上**保守规划余量薄**（v1.6 统一口径 / P2-4，见 §4.3） | 中 | `MAX_GROUPS`(CPU) / 队列字节预算(内存) / CDP 页面数三者联动；`cache_max` 独立 LRU；AC-S9 24h 采样 |
+| AR-6 | **TTL / prefetch 间隔收紧导致上游请求量上升**（修 P2-N3 + P3b 评审校正**幻影数据**）：① feed 300s→30s（盘中）⇒ 5 源请求量 ×10；② prefetch 有效间隔（现状代码 = `max(常量, tier 基值)`）→ 目标（`cache_policy(d)['pool_refresh']`），逐域：**fundflow `max(25, L1=8)=25`→8（×3.1）、timeline `max(30,8)=30`→8（×3.8）、announcement `max(60, L4=300)=300`→30（**×10**，且 tier **L4→L3**）、f10 `max(60, L4=300)=300`→300（**无变化**）**；**`basic_info 120→8（×15）` 为幻影，已删除**——无 basic_info prefetch loop，`_BASIC_INFO_POOL_REFRESH` 是**死常量**（无任何 import/引用，随常量删除） | 中 | 上游为行情/新闻站，量级可承受；URL 缓存同域 L3 限流；负缓存挡故障期；**新增每域 fetch 计数 `upstream_fetch_total{domain}` 入 metrics**（Q3⑤），P6c 以该计数核对"上游负载增幅 ≤ 可接受阈值"。**v1.4 方向的抵消项**：§2.2 R-6 改为**按订阅字段刷新**（ADR-015）后，SSE 侧的上游成本只与"实际被订阅的域"成正比——quote-only 组从 3×降到 1×，故上表的 ×3.1/×3.8 只对**三域全订**的组成立；单域组反而**下降**。P6c 应按 `upstream_fetch_total{domain}` 的**实测**分摊核对，不要用"订阅组数 × 3 域"外推。**v1.7 增项**：① `depth` 并入使 quote 组每码每 tick **多 1 次**上游调用（`upstream_fetch_total{domain}` 新增 **`depth`** 键）；② L0=4s 使 quote 节拍减半，但 `refresh_epoch` 保证**每拍真回源**（不再隔拍）⇒ 名义请求量 ≈"50 码 × 2 调 × 1/4s ≈ 25 call/s"（深度并入报告 4A 档实测 quote 7.34 + depth 6.33 ≈ 13.7 call/s，低于模型——URL 缓存/去重池/负缓存吸收部分，属良性余量）；③ 传输池化把单请求成本 340ms → 139ms，抵消频次上升的延迟压力 |
 | AR-7 | `stream._refresh_pool` 若漏过滤 `_` 前缀键，会把 `_errors` 当股票塞进帧 | 中 | 列为详设必测项（契约陷阱点）；`_refresh_pool` 加单测断言 |
-| AR-8 | 池上限升到 `MAX_DEDUP_CODES=2000` + `cache_max` 独立后，端点数据缓存内存需实测 | 中 | `cache_max` 独立 LRU + `cache_entries` 指标；§4.3 估算 ≈268MB（L1 为 3 域 + `_last_known`）；AC-S9 采样 |
+| AR-8 | 池上限升到 `MAX_DEDUP_CODES=2000` + `cache_max` 独立后，端点数据缓存内存需实测 | 中 | `cache_max` 独立 LRU + `cache_entries` 指标；§4.3 估算 ≈268MB（L1 为 3 域 + `_last_known` + **v1.7 depth ≤500×~1KB≈0.5MB**）；AC-S9 采样 |
 | AR-9 | AC-S3 模式 B 的**分档 P95**（高密度 ≤5s / 低密度 ≤10s）依赖"探测预算封顶 5s + `NEG_TTL=5s` 稳态周期 + 请求密度"，绝对分位数需实测 | 中 | 封顶 5s 后稳态周期 = 10s、慢占比 ≈50% ⇒ 高密度 P95≈5s、低密度≈周期上界 10s（v1.5 重标）；需按 PRD AC-S3 **高/低密度两轮分别采集**（不得合并）；首次冷窗口一次/URL；**P6c 实测校准**（Q6 / 与 AR-13 同批） |
 | AR-10 | 负缓存改造使存量用例 `test_fetch_json_leader_failure_does_not_stampede` 语义变更，与 PRD §9「51 用例全绿」冲突 | 中 | §3 tests 行**显式登记改写**；声明"**51 条基线中 1 条按新语义更新并通过，其余 50 条全绿**"（新语义断言：leader 失败后 follower 不触网、`err=8`、`max_active=1`，负缓存窗口内 <1ms 失败）；PRD §9 的"51 全绿"表述**待编排层同步**（P1-7） |
 | **AR-11（v1.4 新）** | **单帧余量准入把"满配等价组"容量从 9 收到 8**：一个"9 个 200 码 × 3 域组"的订阅集合现在被 **400 拒绝**（`subscription frames would exceed …`）。而按**码**看，9×200 = 1800 ≤ `MAX_DEDUP_CODES=2000`、每组 200 ≤ `MAX_CODES_PER_SUB=200` ⇒ 客户端会认为"参数都合法却被拒" | 中 | ① 400 理由串**必须**给出 `STREAM_QUEUE_BYTES_BUDGET` 具体值（已如此），便于客户端自证预算；② 这是 `MAX_GROUPS`/码上限之外的**第三条**建组失败轴 ⇒ 与 N1/N2 同批记入变更日志；③ 若运维调大 `STREAM_QUEUE_BYTES_BUDGET`，容量按 `floor(B/F_max) − 1` **自动**重算（无硬编码常数）；④ 该风险**不可通过调 `MAX_GROUPS` 缓解**（`MAX_GROUPS` 是 CPU 护栏） |
 | **AR-12（v1.4 新 → v1.5 关闭）** | ~~降级状态码与 PRD AC-A5 冲突未裁决~~（§2.4 / §7.1 N1） | ~~高（裁决阻塞）~~ **已关闭** | **N1 裁决落地**：业务降级维持 **200**（§2.4 逐格一致）、代码回退已落地（`_json_payload_has_data` 删除、`_send_json_shape` 恒 200）、PRD v0.5 已同步、§8 A5 改 ✅ ⇒ **文档-代码静默分叉消除，测试基线不再阻塞**。残留动作（非阻塞）：AC-A5 回归**须含"业务降级不得返回 503"断言**（§9.5 遗留 1） |
 | **AR-13（v1.4 新 → v1.5 更新）** | **`_PROBE_BUDGET_CAP=5.0` 与 `_HISTORY_AGE=600s` 同为 AC-S3 分档 P95 的隐含参数**：封顶值决定稳态档位（5s ⇒ 高密度 P95≈5s；调大到 ~10s 会把慢占比推到 67% ⇒ P95≈10s、直接违反分档）；老化窗口决定"慢而未死（需 6–10s）"上游的恢复延迟上界（≈600s）。**任一分量与 `NEG_TTL` 变动必须连带重标 AC-S3 分档** | 中 | ① `_PROBE_BUDGET_CAP`/`_HISTORY_AGE` 均为 **cache.py 的机制常量**（不经 env），改动须走代码变更 + **重跑 AC-S3 模式 B 校准**（与 `NEG_TTL`/`PROBE_TIMEOUT` 的性质不同——后两者 env 可调且 `config.md` 要求覆盖后重跑校准）；② 量化依据见 §2.3 D-1 推导与 §4.1；③ "慢而未死"上游的出现频度与高/低密度两档 P95 **待 P6c 实测**（Q6）；④ **不缓解项**：不靠调小 `_HISTORY_AGE` 来"加速恢复"——那会把 10s 全预算探测变成常驻高频事件，直接违反分档 P95 |
+| **AR-14（v1.7 新）** | **上游传输层与容量模型的耦合**：若 `HTTP_POOL_MAX_PER_HOST < BATCH_MAX_WORKERS`，批扇出会**排队在连接池上**，使容量模型的 worker 数不可达（BUG-SSE-DEPTH-01）；keep-alive 复用还引入"服务端已关闭空闲连接"的失效路径 | 中 | ① 默认 `24 ≥ 20` 并登记为**耦合约束**（改 `BATCH_MAX_WORKERS` 必须连带核 `HTTP_POOL_MAX_PER_HOST`）；② 池统计 `_pool.stats{reuse,new,stale,evicted,ephemeral}` 可观测；③ 失效连接**丢弃并重试一次**（仅对**复用**连接生效，真失败不重试） | 
+| **AR-15（v1.7 新）** | **上游"HTTP 200 + 空壳"错误语义**：x-quote 对错误 `secu_code` 拼写返回 `200 + code:200` 的空壳（basic 全 null / volume 空 `data`），若取数只信 `code == 200`，会把空壳**缓存并推流**为"成功但全空"的行情（北交所历史症状） | 中 | ① 关键字段非空校验（`_basic_info_is_valid` 要求 `secu_name`/`last_px` 至少一个非空，否则 `upstream_error`）；② `depth` 空 `data`/全 0 ⇒ `None`（不伪造）；③ 线路拼写经 `upstream_secu_code` 单一权威（ADR-020）；`upstream_fail_total{upstream_error}` 可观测 |
 
 ### 7.3 设计假设（变更即需重评架构）
 
 1. **上游库模式不变**：`fetch_json` 仍是唯一取数入口，读多写少、无外部存储（违反 → 缓存分层设计失效）。
 2. **部署拓扑不变**：单进程、主/流双端口、单机 2C2G、无多副本（违反 → 内存中 `_groups`/缓存/负缓存无法跨副本共享，需重新设计）。
 3. **单进程时钟单调性**：帧时序断言（A1/A2）依赖进程内单调时钟（PRD 已排除时钟回拨）。
-4. **SSE 语义不变**：全量快照帧、丢旧保新、不做增量 diff；**同组帧对象共享同一引用**（违反 → §4.2 distinct 帧计费与 §2.5 帧共享失效）。
+4. **SSE 语义不变**：全量快照帧、丢旧保新、不做增量 diff；**同组帧对象共享同一引用**（违反 → §4.2 distinct 帧计费与 §2.5 帧共享失效）。**v1.7 补（ADR-022）**：帧**发送层去重**（内容未变不发）⇒ 消费方必须把"本 tick 没有新帧"理解为**数据未变**，而不是流中断（心跳 `event: ping` 每 `STREAM_PING_INTERVAL=20s` 一次，仍可判活）；新连接仍被强制喂一帧（`sent_any`）。
 5. **`MAX_CODES_PER_SUB=200` 为单组上限、`MAX_DEDUP_CODES=2000` 为活跃码总上界**；**去重池跨组共享**（违反 → §4.3 池上限推导失效）。
-6. **覆盖条件 C1（修 P1-N1；v1.4 按实现重标定）**：`_refresh_pool` 对**存活组订阅字段并集**（按 `_FIELD_HANDLERS` 顺序）串行取数，单周期取数能力 `coverage = 23 取数次数/周期`（`coverage_codes = 23 / 11 / 7`，1/2/3 域；见 §2.1 INV-1b），**单位是取数次数而非码**，且**每码成本 = `_fetches_per_code(fields)`（不再是常数 3）**。**"典型 1-2 组 × ≤200 码"并不满足 C1**（200 码 × 3 域 ⇒ 600 取数 ≫ 23）⇒ **默认场景即走 §2.2 R-6 分片轮转**，池内陈旧度 ≤ `ceil(N_active/coverage_codes)×L1`（3 域 200 码 ⇒ lag=29 ≈ 232s）。**AC-A3 的 L1×(1+抖动) 口径仅对 C1 成立的码保证**；violation 由 `stream_refresh_lag_ticks` 暴露。**帧完整性**（AC-A1）以 warm 码 + 200 帧窗口为前提，冷码以 `null` 出现在 `missing` 中并在 ≤lag tick 内进入（修 P2-N2；v1.4 补 last-known/stale）。
+6. **覆盖条件 C1（修 P1-N1；v1.7 按实现重标定）**：`_refresh_pool` 对**存活组订阅字段并集**（按 `_FIELD_HANDLERS` 顺序）串行取数，节拍 `tick = tick_interval(fields)` = **订阅域最短 tier TTL**（盘中 quote→L0=4s），单周期取数能力 `coverage = 213 取数次数/周期`（tick=4；`coverage_codes = 106 / 71 / 53`，quote / 2 域 / 全 3 域；见 §2.1 INV-1b），**单位是取数次数而非码**，且**每码成本 = `_fetches_per_code(fields)`（quote 每码 2 次：basic_info + depth）**。**50 码 × 3 域满足 C1**（4×50=200 ≤ 213 ⇒ lag=0）；更大订阅（如 200 码 × 3 域）走 §2.2 R-6 分片轮转（lag≈4 tick ≈ 16s），池内陈旧度 ≤ `ceil(N_active/coverage_codes)×tick`。**AC-A3 的「该域 tier TTL×(1+抖动)」口径仅对 C1 成立的码保证**；violation 由 `stream_refresh_lag_ticks` 暴露。**帧完整性**（AC-A1）以 warm 码 + 200 帧窗口为前提，冷码以 `null` 出现在 `missing` 中并在 ≤lag tick 内进入（修 P2-N2；v1.4 补 last-known/stale）。
 7. **编码是域的确定属性**：同一 URL 不会以两种编码出现（违反 → `fetch_json` 缓存键需含 `encoding`，见 §2.3 D-5）。
-8. **股票代码拼写可归一（v1.4 新，ADR-017）**：任意入口的码都经 `config.canonical_code` 折叠为**小写交易所前缀**（`sh600519`/`sz000001`/`bj430047`），且**响应键回写客户端原拼写**（`_rekey_batch_response`）。下游所有键位（去重池 / 终点缓存 / URL 缓存 / `_fail_ledger` / CDP `SecuCode` 比对）**只认 canonical 形**。违反后果：同一股票铸出多个身份 ⇒ 去重与冷却账失效、上游取数翻倍、CDP 精确比对接不上（P1-6 根因）。**边界**：非法码值在**批量 HTTP 路径**是逐码 `null`（不是 400）；在**流端口建组/改组**是 400（入参校验）。
+8. **股票代码拼写可归一（v1.4 新，ADR-017）**：任意入口的码都经 `config.canonical_code` 折叠为**小写交易所前缀**（`sh600519`/`sz000001`/`bj430047`），且**响应键回写客户端原拼写**（`_rekey_batch_response`）。下游所有键位（去重池 / 终点缓存 / URL 缓存 / `_fail_ledger` / CDP `SecuCode` 比对）**只认 canonical 形**。违反后果：同一股票铸出多个身份 ⇒ 去重与冷却账失效、上游取数翻倍、CDP 精确比对接不上（P1-6 根因）。**边界**：非法码值在**批量 HTTP 路径**是逐码 `null`（不是 400）；在**流端口建组/改组**是 400（入参校验）。**v1.7 补**：canonical 是**身份键**，上游**线路拼写**另经 `upstream_secu_code`（沪/深前缀、北交所点号 `430047.BJ`），二者分离（ADR-020）。
 9. **`_last_known` 的上界依赖"每 tick 按存活码池剪枝"（v1.4 新）**：结转表在 `_push_once` 每轮按 `codes` 重建，无活跃组时整表清空。违反（例如改成"只在码离开时删除"）⇒ 该表无界增长，且会把已不在池中的码的旧值继续喂回帧（对象引用被永久钉住，内存不随订阅收缩回收）。
+10. **`refresh_epoch` 只由 SSE 调度路径传入（v1.7 新，ADR-018）**：`fetch_json(..., refresh_epoch=None)` 的默认值保证 REST / prefetch 调用方**逐字保持普通 TTL 语义**；只有 `_refresh_pool` 对"`ttl <= tick`"的最快域传轮起点。违反（例如让 REST 也传 epoch）⇒ REST 缓存退化为"每次必回源"，失去并发单飞与失败吸收。**生产 handler 必须接受 `refresh_epoch` 关键字**（`_call_refresh_handler` 只在**调用帧** `TypeError` 时回退，单测钉死）。
+11. **上游"HTTP 200 + 空壳"是错误语义（v1.7 新，ADR-020）**：错误 `secu_code` 拼写返回 `200 + code:200` 的空壳而非错误码。因此任何个股取数**必须**做关键字段非空校验（`_basic_info_is_valid`）——违反 ⇒ 空壳被缓存并推流为"成功但全空"的行情（AR-15）。
 
 ---
 
@@ -1057,9 +1156,15 @@ MAX_CODES_PER_SUB=200 只是**单组**上限，MAX_DEDUP_CODES=2000 才是**活�
 | 2.2 inflight 显式上界 + 立即 503 | R2 | E8/S5 |
 | 2.2 组数上限（CPU）/ 队列字节预算（内存）/ 内存总账 | R7 | E7/E5/S9 |
 | 2.2 **distinct 帧引用计数计费（P0-1）+ `refs` 加锁与生命周期排空（P1-N2）** | R7 | E5/E7/A2 |
-| 2.2 **分片轮转刷新针对性约束 `_active_codes()`（R-6/AR-1）；切片按取数次数计量 `\|slice\| ≤ coverage_codes`（P1-N1；v1.4 重标定为 23/11/7，按订阅字段）** | R7/R8 | A3/E5/S10 |
+| 2.2 **分片轮转刷新针对性约束 `_active_codes()`（R-6/AR-1）；切片按取数次数计量 `\|slice\| ≤ coverage_codes`（P1-N1；v1.7 重标定为 106/71/53，按订阅字段；coverage=213）** | R7/R8 | A3/E5/S10 |
 | **2.2 单帧余量准入 `Σ F_g + max F_g ≤ B`（v1.4，S2-2/P1-4；`stream_frame_bytes` 单一来源）** | R7 | E5/E7/A2/A7 |
 | **2.2 按订阅字段刷新 `_subscribed_fields`/`_active_targets`（v1.4，ADR-015；P1-6 同锁读 codes+fields）** | R12/R7 | A1/A3/E5 |
+| **2.2 tick 订阅驱动 `tick_interval(fields)` = 订阅域最短 tier TTL（v1.7：L0=4s；无订阅回落 L1）** | R8/R12 | A3/E5/S10 |
+| **2.2 定时刷新新鲜度地板 `refresh_epoch`（v1.7，ADR-018；最快域每拍真回源，REST 逐字不变）** | R12/R8 | A3/E5/S10 |
+| **2.3 上游传输层：keep-alive 连接池 + 进程内 DNS TTL 缓存 + 启动预热 `warm_transport`（v1.7，ADR-019；实测 340ms→139ms、DNS 170ms→15.8ms）** | R9/R13 | E1/E2/E3/S7 |
+| **2.3 上游线路拼写 `upstream_secu_code`（沪/深前缀、北交所点号）+ 空壳防御 `_basic_info_is_valid`（v1.7，ADR-020；`200 + 空壳` ⇒ `upstream_error`）** | R18/R14 | A6/A7/E9/S4 |
+| **2.3 `depth` 五档域并入 `quote` 负载（v1.7，ADR-021；非致命、空/全 0 ⇒ 无 `depth` 键；quote 每码成本 1→2）** | R12/R14 | A1/A3/E5/S10 |
+| **2.5 帧发送层去重 `_frame_signature`/`sent_any`（v1.7，ADR-022；内容未变不发、新连接强制首发）** | R8 | A1/A2/E5 |
 | 2.2 LRU 真实化 + 双触发清扫 | R3/R11 | E6/E9 |
 | 2.2 管理体 5s 预算 | R6/R17 | S7 |
 | 2.3 负缓存 + **五段式 fetch_json**（正缓存 → **deadline 闸门** → 负缓存门禁 → leader → follower）+ **探测预算阶梯 2→4→5 封顶 + `_HISTORY_AGE` 老化（P1-2/v1.5）** | R9/R10 | S3 |
@@ -1085,16 +1190,16 @@ MAX_CODES_PER_SUB=200 只是**单组**上限，MAX_DEDUP_CODES=2000 才是**活�
 
 | AC | 状态 | 设计落点 / 说明 |
 |----|------|----------------|
-| E1/E2/E3 | ✅ | §4.1 延迟分解；取数器 deadline 贯通 |
+| E1/E2/E3 | ✅ | §4.1 延迟分解；取数器 deadline 贯通；**v1.7：上游传输层池化（单请求 340ms→139ms、DNS 170ms→15.8ms），批扇出 ≤20 并发** |
 | E4 | ⚠️ | §4.2（Q1）：可断言口径 = 错误率 0 + P99 劣化 ≤20%；命中率 ≥90% **为观测项非 AC**，待 P6c 校准 |
 | E5 | ✅ | §4.2 distinct 帧共享 + 入队 ≤1s |
 | E6 | ✅ | §2.2 LRU + 双触发清扫 + 上限 |
 | E7 | ✅ | §2.2/§4.2 **distinct 帧 × 深度字节预算**（原 P0-1 已修） |
 | E8 | ✅ | §2.2 inflight=40 + 立即 503；**流端口显式 `max_inflight=MAX_STREAM_CONNS+10=110`**（v1.4，否则 100 连接上限被主端口默认 40 掩盖） |
 | E9 | ✅ | §2.1 `longhu` 域（L4≥300s）+ §2.3 D-5 GBK 编码 + 计数口径（原 P1-4 已修） |
-| A1 | ✅ | §2.5 C-5 帧契约（**v1.4：items 覆盖全部订阅码**；warm 码含 last-known 结转不降级；冷码以 `null` 现于 `missing`）+ 帧对象同组共享 + 200 帧窗口前提 |
+| A1 | ✅ | §2.5 C-5 帧契约（**v1.4：items 覆盖全部订阅码**；warm 码含 last-known 结转不降级；冷码以 `null` 现于 `missing`）+ 帧对象同组共享 + 200 帧窗口前提；**v1.7：`quote` 负载内新增 `depth`（只增；空/全 0/指数 ⇒ 键不出现）** |
 | A2 | ✅ | §2.2 丢旧保新 + 预算"不丢最新" + 单帧余量准入（v1.4） |
-| A3 | ⚠️ | §2.1 INV-1b 明确**条件 C1**（`_fetches_per_code(fields) × N_active ≤ coverage = 23 取数次数/周期` ⇔ `N_active ≤ coverage_codes` = **23/11/7**（1/2/3 域））；**典型 1-2 组 × ≤200 码即不满足 C1**，走 §2.2 R-6 分片轮转（`stream_refresh_lag_ticks` 3 域 200 码 ≈ 29 tick ≈ 232s）（P1-1/P1-N1/v1.4 已修，仍待实测） |
+| A3 | ⚠️ | §2.1 INV-1b 明确**条件 C1**（`_fetches_per_code(fields) × N_active ≤ coverage = 213 取数次数/周期`（盘中 quote tick=4）⇔ `N_active ≤ coverage_codes` = **106/71/53**（quote/2 域/全 3 域））；**50 码 × 3 域满足 C1（lag=0）**；更大订阅（如 200 码 × 3 域）走 §2.2 R-6 分片轮转（`stream_refresh_lag_ticks` ≈ 4 tick ≈ 16s）（P1-1/P1-N1/v1.7 重标定，仍待实测） |
 | A4 | ✅ | §2.3 负缓存 + 过期=拒读+回源一次（**v1.4：条目过期只失效门禁、保留作失败历史**；`deadline` 本地耗尽不写负缓存） |
 | A5 | ✅ | §2.4 错误客体/值域边界 + `/cls/hotplate` 分区口径（P2-3② 已统一）；**v1.5 N1 关闭：业务降级恒 200 + error 客体，与 AC-A5 逐格一致**（§7.1 N1）；真实 503 仅准入拒绝与 `/healthz` ⇒ 本条**可作为测试基线**，回归须含"业务降级不得返回 503"断言 |
 | A6 | ✅ | §2.3 D-2 分块保序 + `_run_batch` 保一对一 + **`_process_chunk` 归一化后按原拼写回写（v1.4，别名不丢、重复拼写不重复回源）** |
@@ -1110,17 +1215,17 @@ MAX_CODES_PER_SUB=200 只是**单组**上限，MAX_DEDUP_CODES=2000 才是**活�
 | S6 | ✅ | §2.3 D-6 码级冷却 120s（**4 元条目**），批量与 prefetch 共用（P1-5 已修）；**v1.4：仅"真实上游失败"入账——本地预算耗尽（`_LOCAL_BUDGET`）不计（ADR-014 v1.4 反转）** |
 | S7 | ✅ | §2.3 D-3 超时矩阵（31s→5s；**v1.4 补阶梯探测、follower 等待余量、端到端 `deadline`**） |
 | S8 | ✅ | §2.6 专用执行器 + **有界准入**（stale 可达可测，P1-3 已修）+ **`_HealthBatch` 准入位恰好释放一次、在飞 ≤25**（v1.4） |
-| S9 | ✅ | §4.3 资源上界表 + 进程内存 ≈268MB（L1=3 域 + `_last_known`，修 P2-N5/v1.4） |
+| S9 | ✅ | §4.3 资源上界表 + 进程内存 ≈268MB（L1=3 域 + `_last_known`，修 P2-N5/v1.4）；**v1.6 内存总账统一为 PSS 口径**（Chrome = 基线 250MB + `N×60`（典型）/ `N×150`（保守）MB，N=6 内容页；**RSS 禁止跨进程求和**，§9.6） |
 | S10 | ✅ | §2.6 计分板（**冷却清单**可枚举、healthz 精确 schema，P2-6 已补）；**v1.4 补：`http_503_total` 计数点、`snapshot()` 零值恒定发布、`code_cooldown_list` 发布节流；v1.5 该计数点由四收敛为三** |
 | S11 | ✅ | **不改动 + 断言依据**（§3.1）：`_register_conn` 重连 + `push_loop` 下一 tick 全量快照 + `STREAM_GROUP_IDLE_TTL=300s` |
 
-**覆盖声明**：30 条 AC 全部有设计落点（E7/E9/S6/S11 的原缺口已补齐，见上表）；其中 **5 条标注 ⚠️**：E4（命中率降为观测项，Q1）、A3（条件 C1 不成立时降级，P1-1）、A8（TTL 口径同步，Q3）、S3（模式 B 分档 P95 待 P6c 校准，Q6）、S4（CDP 契约同步：代码已落地、`API.md` 待同步，Q2）。**v1.5：A5 由 ⚠️ 改 ✅**（N1 裁决关闭——业务降级恒 200，与 AC-A5 逐格一致；§7.1 N1）。**测试方法与阈值**由 task-decomposer→tester 阶段落实，本 SAD 保证"机制存在且可断言"。**v1.4 的"A5 裁决未落地前不得进入基线"前置约束已随 N1 关闭解除**；AC-A5 回归**须含"业务降级不得返回 503"断言**（§9.5 遗留 1）。
+**覆盖声明**：30 条 AC 全部有设计落点（E7/E9/S6/S11 的原缺口已补齐，见上表）；其中 **5 条标注 ⚠️**：E4（命中率降为观测项，Q1）、A3（条件 C1 不成立时降级，P1-1）、A8（TTL 口径同步，Q3）、S3（模式 B 分档 P95 待 P6c 校准，Q6）、S4（CDP 契约同步：代码已落地、`API.md` 待同步，Q2）。**v1.5：A5 由 ⚠️ 改 ✅**（N1 裁决关闭——业务降级恒 200，与 AC-A5 逐格一致；§7.1 N1）。**测试方法与阈值**由 task-decomposer→tester 阶段落实，本 SAD 保证"机制存在且可断言"。**v1.4 的"A5 裁决未落地前不得进入基线"前置约束已随 N1 关闭解除**；AC-A5 回归**须含"业务降级不得返回 503"断言**（§9.5 遗留 1）。**v1.7**：设计点矩阵新增 5 行（订阅驱动节拍 / `refresh_epoch` / 上游传输层 / 线路拼写+空壳防御 / `depth` 并入 / 发送层去重），30 条 AC 的**覆盖状态不变**（⚠️ 仍 5 条：E4/A3/A8/S3/S4），A3/E1-E3/A1 的**数值与口径**已按 `coverage=213`、`BATCH_MAX_WORKERS=20`、`_PER_FETCH_EST=0.3` 与传输层实测重标（见 §9.7）。
 
 ---
 
 ## 9. 修订摘要
 
-> ⚠️ **§9.1-§9.3 是历史修订记录**（分别落地 REV-ARCH / 二轮复审 / P3b 详设评审的 SAD 侧动作），其中若干**数字口径已被后续实测或裁决推翻**（最典型：`coverage≈170` / `coverage_codes≈56` / "恒定 2s 探测" / "探测阶梯升到 10s" / "降级 503" / "`_LOCAL_BUDGET` 反转未确认"）。**§9.4（v1.4，P7b 契约同步）与 §9.5（v1.5，裁决落地收尾同步）是最新且唯一的现行口径**；两者冲突时以 **§9.5 为准**（§9.5 覆盖 §9.4 的三处表述：§2.4 降级状态码、§2.3 探测阶梯封顶、ADR-014 反转的"已确认"状态）。
+> ⚠️ **§9.1-§9.3 是历史修订记录**（分别落地 REV-ARCH / 二轮复审 / P3b 详设评审的 SAD 侧动作），其中若干**数字口径已被后续实测或裁决推翻**（最典型：`coverage≈170` / `coverage_codes≈56` / "恒定 2s 探测" / "探测阶梯升到 10s" / "降级 503" / "`_LOCAL_BUDGET` 反转未确认" / **v1.4 的 `_PER_FETCH_EST=2.2`、`coverage=23`、`coverage_codes=23/11/7`、`quote` 稳态成本 1**）。**§9.4（v1.4）、§9.5（v1.5）、§9.6（v1.6）与 §9.7（v1.7，P7b 契约同步第二轮）是最新且唯一的现行口径**；冲突时以**编号最大者为准**：§9.7 覆盖 §9.4 的**容量常量与数值**（`_PER_FETCH_EST` 2.2→0.3、`BATCH_MAX_WORKERS` 8→20、`coverage` 23→213、`coverage_codes` 23/11/7→106/71/53）、`quote` 稳态成本（1→2）、tick 口径（L1 固定→订阅域最短 TTL）、以及 §2.6 的"帧间隔"不变式表述；§9.6 覆盖 §4.3 / R20 / ADR-012 / AR-5 / S9 的**内存口径**；§9.5 覆盖 §9.4 的三处表述（§2.4 降级状态码、§2.3 探测阶梯封顶、ADR-014 反转的"已确认"状态）。
 
 ### 9.1 v1.1（依据 REV-ARCH-20260915-001）
 
@@ -1328,5 +1433,118 @@ AR-6 校正后（供 P6c 校准）：`fundflow max(25,8)=25→8（×3.1）` · `
 
 ---
 
-*SAD v1.5 完 · 供 review-expert 复审（复核 §9.5 裁决落地收尾同步的准确性，尤以 §2.4 降级状态码恒 200、§2.3 D-1 探测阶梯封顶 5s 与 AR-12 关闭为重点）与 task-decomposer 承接（`stream.md` / `server.md` / `cache.md` 的 P7b 侧已各自同步；`API.md` 待同步 `/stock/basic_info` CDP 标注）*
+### 9.6 v1.6（P2-4 内存口径统一：以容器内实测统一 CDP 页面内存记账）
+
+> **性质**：本轮**不是设计轮**，也**未改任何机制**。只解决 **P2-4**（代码审查 `doc/review/最新代码审查_r1.md`）：SAD `R20`/`§4.3` 的「每页 150MB+」与 `doc/deploy/*.yml` 注释的「50-100MB/tab」表面冲突。**结论：两份文档都没写错，冲突的是度量口径**。范围严格限定为 `doc/arch/SAD.md` + `doc/arch/tech-stack.json` 版本号/规则条目；**未改 `doc/deploy/*.yml`（无写权限，编排层另行处理）、未改代码、未改详设/PRD**。
+
+**一、口径统一的实测依据（容器内实测）**
+
+| 口径 | 每页实测 | 与哪份文档吻合 |
+|------|---------|---------------|
+| **RSS**（单进程常驻集） | 161–196MB（均值 **172**） | SAD 原「150MB+」 ✓ |
+| **PSS**（份额化后） | 49–83MB（均值 **59.5**） | `doc/deploy/*.yml`「50-100MB/tab」 ✓ |
+| **`Pss_Anon`**（私有匿名） | 37.5–48.8MB（均值 **43**） | — |
+
+- **差异根源**：每个 chromium 进程都映射约 110–190MB 共享代码页，RSS 在每个进程各记一份 ⇒ **跨进程求和用 RSS 会虚高约 3.2×**（实测 SUM RSS 2209MiB vs 容器实际 cgroup 687.5MiB）。
+- **固定基线 ≈250MB（PSS）**：browser-main + GPU + network + storage + zygote + 约 **91MB 的 Omnibox webui 渲染进程**（纯浏览器内部 UI，任何「N×每页」模型都覆盖不到）。
+- **容器实测**：`MemUsage 545.5 MiB / 1.5 GiB`；cgroup 原始 **687.5 MiB**；**峰值 769.8 MiB（51%）**。
+- **页面配置**：`CDP_STOCK_PAGES=4`（compose 默认）+ 2 常驻 = **6 个内容页**（另有 2 个 webui renderer）。
+
+**二、新口径表述（唯一权威，落在 §4.3）**
+
+> `Chrome 总内存 ≈ 250MB(PSS) 基线 + N × 每页`；**典型** `250 + N×60MB`、**保守规划** `250 + N×150MB`；**跨进程求和必须用 PSS/`Pss_Anon`，禁止用 RSS**（虚高 ~3.2×）。
+
+**三、SAD 落点**
+
+| 落点 | 改动 |
+|------|------|
+| **§4.3 内存总账** | 新增「Chrome 内存总账（v1.6 统一口径）」段：记账口径 + 实测表 + 基线 250MB + 典型/保守公式 + **RSS≠PSS** 声明 + 测量局限 |
+| **§4.3 资源上界表** | `CDP 页面` 行：`CDP_STOCK_PAGES`(默认3) → **env 驱动；2C2G 部署档位 = 4**（+2 常驻 = **6 内容页**）；`进程内存` 行补口径注 |
+| **§1.2 R20** | 「每页 150MB+」标注为 **RSS 口径**，并指向 §4.3 的 PSS 校准 |
+| **ADR-012 影响** | 页面数默认口径 `3` → **env 驱动（2C2G=4，6 内容页）** |
+| **§7.2 AR-5 / §8 S9** | 同步新口径（Chrome 典型 **610MB** / 保守 **1150MB**；进程内 268MB 为上界） |
+
+**四、判定（对 `mem_limit 1.5g`）**：**实测稳态余量充足（≈0.8–1.0GB）**，但**按保守上界（Chrome 1150MB + 进程内 268MB ≈ 1418MB）规划余量偏薄**——**与 SAD 原「余量薄」结论一致**（保守上界超过「2C2G 参考 ≤1.2GB」的典型参考线，该线仅适用**典型口径**，硬约束以 `mem_limit 1.5g` 为准），不改变任何既有内存护栏（`STREAM_QUEUE_BYTES_BUDGET` / 单帧余量准入 / `MAX_GROUPS`）的必要性。
+
+**五、测量局限（如实登记）**：① 实测为**空闲/复用态**（容器 CPU ≈1%，池页停在同标的，JS 堆仅 11–13MB），**活跃抓取时单页会更高**；② 峰值样本仅覆盖约 **5 分钟**，**未跨 `CDP_RESTART_INTERVAL=7200s` 长周期**；③ **renderer ≠ tab**（webui renderer 为浏览器内部 UI，与订阅内容页两套命名不可混算）。**「保守规划余量薄」的结论在活跃态只会更保守成立。**
+
+**六、tech-stack.json 动作**：`version: 1.5 → 1.6`；`infrastructure.deployment` 与 `backend.cdp` 补**内存记账口径注**（PSS/RSS + 页面数 env 驱动），供 code-developer / `check-arch-compliance.sh` 对齐。`allowlist`/`layerIsolation`/`fileStructure`/`namingRules`/`importRestrictions` 均不变。
+
+**七、本轮遗留（交编排层）**：**`doc/deploy/*.yml` 注释**建议补一行口径说明（「50-100MB/tab 为 **PSS 份额化**口径；RSS 口径见 SAD §4.3」），以消除跨文档表面冲突——**本 agent 无该目录写权限，由编排层处理**。
+
+**本轮版本**：SAD v1.5 → **v1.6**；`doc/arch/tech-stack.json` 同步 `version: 1.6`。**约束保持**：Python 3 标准库零依赖、`layerIsolation`、文件结构（扁平包 + 唯一新增 `metrics.py`）均未放宽。**未改代码、未改详设、未改 PRD、未改 `doc/deploy/*.yml`。**
+
+---
+
+### 9.7 v1.7（P7b 契约同步第二轮：以**代码为准**回写多轮实现）
+
+> **性质**：本轮**不是设计轮**——机制已由多轮实现钉死。只做一件事：把实现跑出来的最新行为回写到 SAD。范围严格限定为 `doc/arch/SAD.md` + `doc/arch/tech-stack.json`；**未改代码、未改详设、未改 PRD**。每条均**先读代码确认再落笔**；"任务描述与代码不符"处以**代码为准**并在下表标注。
+>
+> 复核基线（实测行数）：`config.py`(487) / `stream.py`(1615) / `cache.py`(937) / `stock_api.py`(1435) / `server.py`(1553) / `metrics.py`(185)；参考实测：`doc/tester/SSE性能修复复测_测试报告_r1/r2.md`、`SSE五档并入_测试报告_r1.md`、`refresh_epoch每拍真刷新_测试报告_r1.md`。
+
+**一、同步条目（逐项：代码证据 → SAD 落点）**
+
+| # | 项 | 代码证据（本轮实测） | SAD 落点 |
+|---|----|---------------------|---------|
+| 1 | **L0 档 + 订阅驱动节拍** | `config._trading_tiers()` 盘中 `{L0:4,L1:8,L2:12,L3:30,L4:300}`、非盘中 `{L0:120,L1:120,L2:120,L3:180,L4:300}`；`DOMAIN_MATRIX['quote']=('L0',...)`、新增 `['depth']=('L0',...)`；`stream.tick_interval(fields)` = `min(tiers[cache_policy(d)['tier']] for d in domains)`，无订阅回落 `_trading_tiers()['L1']` | §2.1 矩阵 + L0 说明 / §2.2 R-6 / §2.6 / §3 config·stream 行 / §4.3 / §7.3#6 / §8 / ADR-001 |
+| 2 | **容量常量重标定** | `config.BATCH_MAX_WORKERS=20`（env）、`config.STREAM_PER_FETCH_EST=0.3`（env，`stream._PER_FETCH_EST` 读它）、`config.HTTP_POOL_MAX_PER_HOST=24` | §2.1 INV-1b / §2.2「不选其他」/ §4.1 / §4.3 / §7.2 AR-1 / §8 A3 |
+| 3 | **容量数值** | `refresh_capacity(4,·)=213`、`refresh_capacity(8,·)=426`、`refresh_capacity(120,·)=6400`；`_FIELD_FETCH_CALLS={'quote':2,'fundflow':1,'timeline':1}` ⇒ `coverage_codes(4)` = **106**（quote）/ 71（2 域）/ **53**（3 域）；`test_stream.py:1222` 断言 `coverage==213`、`coverage_codes==106` | §2.1 INV-1b / §4.3 自洽推导 / §7.3#6 / §8 A3 / ADR-015 |
+| 4 | **`refresh_epoch`** | `cache.fetch_json(url, headers=None, ttl=None, encoding='utf-8', deadline=None, refresh_epoch=None)`（`cache.py:707`）；`_cache_fresh(entry, refresh_epoch)`（`:127-146`）拒 `write_time < refresh_epoch`；`stream._domain_refresh_epoch`（`:619`；`ttl <= tick` 才返回地板）；`_call_refresh_handler`（`:646`）关键字下传；`_FIELD_FETCH_CALLS['quote']=2` | §2.1 INV-1b / §2.2 R-6 / §2.3 D-2 / §3 cache·stock_api 行 / §7.3#10 / §8 / **ADR-018（新）** |
+| 5 | **tick 不变量订正** | `_tick_sleep_seconds` docstring（`stream.py:983-1015`）明示"真实不变量 = **轮起点→轮起点 ≥ 1 tick**"，并记载"帧间隔 ≥ tick"被证伪（3.5s 冷轮 + 0.1s 暖轮 ⇒ ~0.6s 间隔） | §2.6 tick 观测 / §7.3#4 / ADR-022 |
+| 6 | **上游传输层** | `cache._ConnectionPool`（`:420`，keep-alive/每 host 有界/空闲淘汰/失效丢弃重试一次/锁外 IO）、`_DNSResolver`（`:315`，256 条/`HTTP_DNS_CACHE_TTL=300`）、`warm_transport`（`:669`，仅握手）、池化 `urlopen`（`:627`）；`config.warm_hosts()` 由 `_SSE_HOT_PATH_URLS` 派生；`server.main` daemon 线程调 `warm_transport`（`server.py:1509`） | §3 cache·server 行 / §4.1 / §4.3 / §6 / §7.2 AR-14 / **ADR-019（新）** |
+| 7 | **上游双 wire 格式** | `config.upstream_secu_code`（`:170`）：`bj*` → `NNNNNN.BJ`，其余 → canonical；`_STOCK_DEPTH_URL='.../quote/stock/volume'`；docstring 记载"错拼写返回 basic 全 null / volume 空 data" | §2.4 空壳防御 / §3 stock_api 行 / §7.3#8/#11 / §7.2 AR-15 / **ADR-020（新）** |
+| 8 | **空壳防御** | `_BASIC_INFO_KEY_FIELDS=('secu_name','last_px')` + `_basic_info_is_valid`（`stock_api.py:942-955`）；`fetch_cls_basic_info` 对 `code==200 且非空壳` 才收，否则 `FetchError('upstream_error')` 并 `upstream_fail_total{upstream_error}`（`:995-1002`） | §2.4 空壳防御 / §3 stock_api 行 / §7.3#11 / §7.2 AR-15 / ADR-020 |
+| 9 | **`depth` 五档域** | `DOMAIN_MATRIX['depth']=('L0',1.0,1.0,'dedup',500)`；`fetch_cls_stock_depth`（`stock_api.py:1053`，REST/无 sign、空 `data`/全 0 ⇒ `None`、非致命）；`fetch_cls_basic_info` 阶段 3 附加 `depth`（`:1026-1035`） | §2.1 矩阵 / §3 config·stock_api 行 / §4.3 depth 缓存行 / §2.5 C-5 补充 / §7.2 AR-15 / §8 S10 / **ADR-021（新）** |
+| 10 | **SSE 帧契约「只增」** | `_build_frame`（`stream.py:495-555`）元数据 `codes_total`/`fields`/`items`（全码）/`missing`/`missing_count` + 条件 `errors`/`stale`/`stale_count`（v1.4 已落 SAD）；**v1.7 新点**：`depth` 嵌在 `items[code].quote` 内（非新顶层键） | §2.5 C-5 / §3.1 例外 5 / §7.1 N3 / §8 A1 / ADR-016·021 |
+| 11 | **帧发送层去重** | `_frame_signature`（`stream.py:563`，剔 `ts` 的 blake2b 16 字节）、`SubscriptionGroup.last_sig`、`_SSEConn.sent_any`；`_broadcast`（`:857-909`）内容未变且无新连接 ⇒ `continue`（不刷新 `last_push_ts`） | §2.5 C-5 补充 / §2.6 / §3 stream 行 / §7.3#4 / §8 / **ADR-022（新）** |
+| 12 | **资源与内存（确认 v1.6 仍准确）** | `config.stock_nav_page_names()` 实时读 `CDP_STOCK_PAGES`（默认 3）；`docker-compose.yml` 设 `=4`，+2 常驻 = 6 内容页；**记账口径 RSS vs PSS、基线 250MB(PSS) 未变** | §4.3 / §1.2 R20 / ADR-012 / §7.2 AR-5 / §8 S9（**无变更，仅复核**） |
+| 13 | **可观测性（确认 v1.4/v1.5 仍准确）** | `metrics.snapshot()` 零值恒定（`_DEFAULTS`/`_KNOWN` 互锁 `assert`，`metrics.py:34-55`）、锁内浅拷贝（dict `.copy()` + list `list(v)`）/锁外深克隆（`:146-173`）；`upstream_fetch_total` 的**域键新增 `depth`**（`stock_api.py:1085`），指标名本身不变 | §2.6 计分板（`{domain}` 补 `depth`）/ §8 S10（**口径确认 + depth 键**） |
+| 14 | **错误语义（确认 v1.5 仍准确）** | `_send_json_shape` 恒 `_send_json` ⇒ 200（`server.py:1173-1186`）；`_json_payload_has_data` 全仓无引用；`http_503_total` **3 计点**：`server.py:1071`(/healthz)、`server.py:1390`(`_reject_503`)、`stream.py:1517`(流端口) | §2.4 / §2.6 / §3.1 / §8 A5·S10（**无变更，仅复核**） |
+| 15 | **准入与 backlog** | `BoundedThreadPoolServer.__init__(..., max_inflight=None)`（`server.py:1368`），`make_stream_server` 传 `MAX_STREAM_CONNS+10=110`（`stream.py:1606`）；`request_queue_size = LISTEN_BACKLOG`（`server.py:1366`，默认 128，`server.activate()` 同时作用于主/流端口） | §3 server·stream 行 / §4.3 / §8 E8（**已有 v1.4 登记，补 backlog 口径**） |
+
+**二、ADR 动作**
+
+| 动作 | ADR | 可逆性 | 说明 |
+|------|-----|--------|------|
+| **新增** | **ADR-018 定时刷新新鲜度契约 `refresh_epoch`** | 低可逆 | 把"tick 与缓存 TTL 解耦"落成"最快域每拍真回源"；撤回只需删地板，但失效是**静默减半**、难归因 |
+| **新增** | **ADR-019 上游传输层池化 + DNS 缓存 + 预热** | 中可逆 | keep-alive 池 + `_DNSResolver` + `warm_transport`；保持 `urlopen` 可观测契约，不引第三方库 |
+| **新增** | **ADR-020 上游双 wire 格式：身份键与线路拼写分离** | 低可逆 | `canonical_code`（身份）与 `upstream_secu_code`（线路）分离；配套空壳防御 |
+| **新增** | **ADR-021 五档盘口并入 `quote` 负载** | 中可逆 | 只增 `depth` 键；空/全 0 ⇒ 键不出现（不伪造）；quote 每码成本 1→2 |
+| **新增** | **ADR-022 SSE 帧发送层去重** | 中可逆 | 内容摘要（剔 `ts`）相同不重发、新连接强制首发；把"无新帧 = 数据未变"变成合法信号 |
+| **补正** | ADR-001 / 009 / 015 / 016 | — | 001 补 L0/depth；009 补 `refresh_epoch` 与 deadline 正交；015 补 coverage=213、coverage_codes=106/71/53；016 补 depth 与发送去重 |
+| **不新增** | 内存口径（PSS/RSS） | — | v1.6 已立（ADR-012/§4.3），本轮复核无变更 |
+
+**ADR 汇总更新**：17 条 → **22 条**（低可逆 8 → **10**：+018/+020；中可逆 9 → **12**：+019/+021/+022）。
+
+**三、tech-stack.json 动作**：`version: 1.6 → 1.7`；`backend.push` 补 `depth`（只增、缺失键语义）与发送去重；`backend.cache` 补 HTTP 连接池 + DNS 缓存 + 预热（仍 stdlib，依赖清单不变）；`namingRules.config` 补 **`upstream_secu_code` 为线路拼写单一权威**；`namingRules.fetch` 措辞随实现扩为 `(code, deadline=None, ttl=None, refresh_epoch=None)`（仍只要求"至少含 `(code, deadline=None)`"）；`architectureRules.metrics` 补 `upstream_fetch_total` 域键含 `depth`。`allowlist`/`layerIsolation`/`importRestrictions`/`fileStructure` 均不变。
+
+**四、发现的「描述-代码不符」（一律以代码为准，已在本轮 SAD 落点更正）**
+
+| # | 描述 | 代码事实 | 处理 |
+|---|------|---------|------|
+| 1 | v1.4/v1.6 SAD 写 `quote` 属 **L1（8s）**、无 L0 档 | `_trading_tiers()` 有 **L0=4s**，`quote`/`depth` 均 **L0** | §2.1 更正 + §9.7#1；**SAD 侧旧值作废** |
+| 2 | v1.4/v1.6 SAD 写 `_PER_FETCH_EST=2.2`、`BATCH_MAX_WORKERS=8`、`coverage=23`、`coverage_codes=23/11/7` | 实现为 **0.3 / 20**（`HTTP_POOL_MAX_PER_HOST=24`）；`coverage=213`、`coverage_codes=106/71/53` | §2.1 INV-1b 整体重写 + §4.3/§7.2/§7.3/§8 同步 |
+| 3 | v1.4 SAD 写 `_FIELD_FETCH_CALLS['quote']=1`（"quote 稳态 1"） | 实现为 **2**（depth 并入后 basic_info + depth 每拍各一次） | §2.1 INV-1b 更正；这是 `coverage_codes(3 域)` 由 71 降到 53 的原因 |
+| 4 | v1.4 SAD 写"`stream.py:214` `_subscribed_fields`"等行号 | 行号已随代码演进漂移（`_subscribed_fields` 在 `:238`、`_active_targets` 在 `:259`、`_build_frame` 在 `:495`） | 本轮仅更正正文引用到的行号；**不再逐行维护行号**（以符号名为准） |
+| 5 | 任务描述"单请求 340ms→139ms"与 `cache.py:280` 注释"DNS ~176ms" | 实测报告（r1）：修复前 340ms（DNS **176ms** + 握手 78ms）→ 修复后 **139ms p50 / 167ms max**，DNS 域查询 **15.8ms**；部署注释写 170ms | 采信实测 15.8ms；170 vs 176 为不同轮次的 DNS 测量口径差异，SAD 统一记 **"170ms → 15.8ms"**（与任务描述一致）并在 §4.1 / ADR-019 注明 ≈176ms 的机内明细 |
+| 6 | 任务描述"4s DNS 尾部消除" | 实测仅在 **`x-quote.cls.cn`**（SSE 热路径）消除；`data.10jqka.com.cn`（`/ths/longhu` / `/market/margin`）**仍有 4s DNS 尾**（非 SSE 路径，不影响 L0 节拍） | §4.1 如实登记该边界（不写成"全上游消除"） |
+| 7 | 任务描述"帧体积：单帧实测 50 码 3 域 ≈2MB" | 实测 4B 档 3 域×50：**avg 1,960,294B / max 2,015,725B**；r2（depth 并入前、worker=16）为 1.44MB | 采信 ≈**2.0MB**（quote 帧 58.9KB，depth 占 ≈27%）；`STREAM_FRAME_BYTES_PER_FIELD=23KB` 仍是保守上界（实测 ≈13KB/码/域），**不改常量** |
+| 8 | 任务描述"BATCH_MAX_WORKERS 8 → 20" | 中间轮次曾为 **16**（r2 报告：coverage=341/113），最终代码为 **20** | SAD 只记**终值 20**；§9.7 备注中间值，避免与 r2 报告混淆 |
+| 9 | 任务描述"帧发送层去重（内容未变不发）" | 与 v1.4 §2.6 的"网格化后帧间隔永短于一个 tick，不可能出现短促连发"**冲突** | §2.6 已订正为「轮起点→轮起点 ≥ 1 tick」；短促帧由去重消除（ADR-022） |
+
+**五、本轮遗留（交编排层/后续轮次）**
+
+| # | 事项 | 性质 |
+|---|------|------|
+| 1 | **N3**：`depth` 嵌入 `quote` + create/patch 容量元数据 ⇒ 记变更日志 + 补流端口帧 schema 文档 | 登记（§7.1 N3） |
+| 2 | **AC 回归补强**：`coverage`/`coverage_codes` 断言已由 `test_stream.py` 钉死（213/106）；3 域 50 码「回 C1（lag=0）」需在**盘中**部署复测确认（`SSE五档并入 r1` 的 12.33s 是 worker=16 旧口径） | 测试落地 |
+| 3 | **传输层耦合**：`HTTP_POOL_MAX_PER_HOST(24) ≥ BATCH_MAX_WORKERS(20)` 为隐含约束，改其一须核另一（AR-14） | 登记 |
+| 4 | **`data.10jqka.com.cn` 的 4s DNS 尾**（longhu/margin，非 SSE 路径）未消除 | 观察 / 下轮 |
+| 5 | **§7.1 N2 / `API.md` `/stock/basic_info` CDP 标注**（v1.4/v1.5 遗留，未变） | 契约同步（编排层） |
+
+**本轮版本**：SAD v1.6 → **v1.7**；`doc/arch/tech-stack.json` 同步 `version: 1.7`（**内容有实质变更**：push/cache 描述 + namingRules 线路拼写权威 + fetch 签名措辞 + metrics 域键 `depth`）。**约束保持**：Python 3 标准库零依赖（传输层复用 stdlib `http.client`/`socket`）、`layerIsolation`、文件结构（扁平包 + 唯一新增 `metrics.py`）均未放宽。**未改代码、未改详设、未改 PRD。**
+
+---
+
+*SAD v1.7 完 · 供 review-expert 复审（复核 §9.7 容量重标定（`coverage=213` / `coverage_codes=106/71/53` / `quote` 每码 2 次）、L0 档与订阅驱动节拍、`refresh_epoch`、上游传输层与双 wire 格式、`depth` 并入与发送层去重为重点）与 task-decomposer 承接（`stream.md` / `server.md` / `cache.md` / `stock_api.md` 的 P7b 侧需按 v1.7 复核；`API.md` 待同步 `/stock/basic_info` CDP 标注与 `depth` 契约）*
 

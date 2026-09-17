@@ -3,12 +3,14 @@
 Single authority for TTL / pool limits / endpoint cache limits / upstream
 encoding (:func:`cache_policy`), the trading-hours time source, and every
 env-registered IO/resource budget.  Imports stdlib only (``os`` / ``re`` /
-``datetime``) and never imports a ``china_finance_rss`` module (layerIsolation).
+``datetime`` / ``urllib.parse``) and never imports a ``china_finance_rss``
+module (layerIsolation).
 """
 
 import os
 import re
 from datetime import datetime, timezone, timedelta
+from urllib.parse import urlsplit
 
 # Env-based configuration
 PORT = int(os.getenv('PORT', '8053'))
@@ -36,6 +38,56 @@ LISTEN_BACKLOG = int(os.getenv('LISTEN_BACKLOG', '128'))
 # Negative-cache gate / half-open probe budgets (SAD §2.3 D-1, cache.md §2.1)
 NEG_TTL = int(os.getenv('NEG_TTL', '5'))
 PROBE_TIMEOUT = int(os.getenv('PROBE_TIMEOUT', '2'))
+
+# Upstream HTTP transport (cache.fetch_json — the sole HTTP egress).  A
+# kept-alive connection removes the per-request TCP+TLS handshake and the DNS
+# lookup (measured 340ms/request → 48ms reused on the 2C2G node).  These bound
+# the per-host pool, evict idle sockets, and cache name→address lookups.
+# HTTP_POOL_MAX_PER_HOST is per (scheme, host, port); excess concurrent
+# requests use short-lived connections rather than blocking.  Must stay
+# >= BATCH_MAX_WORKERS: a narrower pool would queue the batch fan-out on the
+# pool itself and make the capacity model's worker count unreachable
+# (BUG-SSE-DEPTH-01).  24 leaves headroom over the 20-wide batch phase.
+HTTP_POOL_MAX_PER_HOST = int(os.getenv('HTTP_POOL_MAX_PER_HOST', '24'))
+HTTP_POOL_IDLE_TTL = float(os.getenv('HTTP_POOL_IDLE_TTL', '60'))
+HTTP_DNS_CACHE_TTL = float(os.getenv('HTTP_DNS_CACHE_TTL', '300'))
+
+# Process-start transport pre-warm (`cache.warm_transport`).  The first refresh
+# of a cold process is otherwise fully cold — empty connection pool and empty
+# DNS cache — so a 50-code quote fan-out pays every TCP/TLS handshake and name
+# lookup at once (measured ≈4.2 s, over the 0.8×tick budget).  Pre-dialing one
+# connection per SSE hot-path host (and thereby filling `_DNSResolver`) removes
+# that one-off cost.  Warming dials transport only — it issues no business
+# request.  The timeout bounds a single dial; warming runs on a startup daemon
+# thread and can never gate startup or `/healthz`.
+HTTP_WARM_CONNECTIONS = int(os.getenv('HTTP_WARM_CONNECTIONS', '1'))
+HTTP_WARM_TIMEOUT = float(os.getenv('HTTP_WARM_TIMEOUT', '2.0'))
+
+# SSE refresh capacity model — the two calibration inputs behind
+# `stream.refresh_capacity` (BR-STR-16).  Registered here (config.md §1.1 env
+# 注册中心) so the model can be retuned per deployment without a code change;
+# `stock_api`/`stream` read them once at import and keep their module-level
+# names (`BATCH_MAX_WORKERS` / `_PER_FETCH_EST`) unchanged.
+#
+# BATCH_MAX_WORKERS: bounded parallelism of one batch phase — both
+# `stock_api._run_batch` and the per-field phase in `stream._refresh_pool`.
+# 20 is aligned with HTTP_POOL_MAX_PER_HOST (24, so the fan-out never queues
+# on the per-host pool) and is sized by the SSE capacity model: at the
+# quote-driven tick=4, coverage = int(0.8 × 4 × 20 / 0.3) = 213 fetch-calls,
+# so 50 codes × 4 calls/code = 200 fit one C1 refresh (BUG-SSE-DEPTH-01: at
+# 16 workers coverage_codes was 42 < 50, forcing a 2-tick C2 shard and a
+# 12.33 s cold first frame).  The upstream tolerated 48 concurrent in the r5
+# measurement (no throttling observed).
+BATCH_MAX_WORKERS = int(os.getenv('BATCH_MAX_WORKERS', '20'))
+# STREAM_PER_FETCH_EST: serial-equivalent seconds one upstream REST call
+# occupies one batch worker.  Recalibrated (r5) to the pool-warmed path:
+# `cache.fetch_json` keep-alive pooling + cached DNS took single-request
+# latency to 139 ms p50 / 167 ms max (from 340 ms), so 0.3 leaves ≈2.2×
+# headroom for concurrency queueing, upstream jitter and a cold first call.
+# The previous 2.2 priced the pre-pooling cold path and over-estimated the
+# per-call cost ≈16×, capping SSE coverage so 50 codes could not refresh
+# within one 8 s tick.
+STREAM_PER_FETCH_EST = float(os.getenv('STREAM_PER_FETCH_EST', '0.3'))
 
 # Stream push (SSE) limits — 2C2G budget: 100 conns, 2000 dedup codes
 MAX_STREAM_CONNS = int(os.getenv('MAX_STREAM_CONNS', '100'))
@@ -84,8 +136,8 @@ _DOTTED_STOCK_CODE = re.compile(r'^(\d{6})\.(SH|SZ|BJ)$', re.IGNORECASE)
 def canonical_code(code):
     """Return the canonical stock code, or ``None`` when ``code`` is invalid.
 
-    Canonical form is the lowercase exchange-prefixed spelling the upstream
-    ``secu_code`` parameter uses: ``sh600519`` / ``sz000001`` / ``bj430047``.
+    Canonical form is the **internal identity key** — the lowercase
+    exchange-prefixed spelling: ``sh600519`` / ``sz000001`` / ``bj430047``.
     Accepted inputs (case-insensitive, surrounding whitespace stripped):
 
       * ``sh600519`` / ``SH600519``
@@ -97,6 +149,12 @@ def canonical_code(code):
     cache/pool/ledger key must go through this helper so one stock cannot mint
     two identities.
 
+    This key is deliberately **not** always the upstream wire spelling:
+    x-quote accepts the prefixed form for SH/SZ but the dotted ``430047.BJ``
+    form for BSE, so URL construction goes through :func:`upstream_secu_code`.
+    Keeping the identity fixed while only URL construction converts is what
+    lets one stock stay one pool/cache/ledger key.
+
     Frozen interface: ``server.py`` / ``stream.py`` consume it by this name.
     """
     if not isinstance(code, str):
@@ -107,6 +165,35 @@ def canonical_code(code):
         return f'{dotted.group(2).lower()}{dotted.group(1)}'
     lowered = text.lower()
     return lowered if VALID_STOCK_CODE.match(lowered) else None
+
+
+def upstream_secu_code(code):
+    """Return the ``secu_code`` spelling x-quote.cls.cn actually accepts.
+
+    Upstream accepts **two different formats**, measured against
+    ``https://x-quote.cls.cn/quote/stock/{basic,volume,detail}``:
+
+      * **Shanghai / Shenzhen** — the lowercase exchange-prefixed form, i.e.
+        the canonical code itself: ``sh600519`` / ``sz000001``.  The dotted
+        form (``600519.SH``) returns an all-null "empty shell" (basic) or an
+        empty ``data`` dict (volume).
+      * **Beijing (北交所 / BSE)** — the dotted, uppercase-suffixed form
+        ``430047.BJ`` / ``832000.BJ``.  The prefixed form (``bj430047``)
+        returns that same all-null shell, which is why every BSE quote used to
+        arrive blank while SH/SZ stayed healthy.
+
+    ``code`` is the internal canonical form (:func:`canonical_code` — the
+    pool/cache/ledger identity key, whose value domain is unchanged).  This
+    helper is the **single authority** for the upstream spelling, so the
+    conversion lives only in URL construction and the identity never forks.
+    An unrecognised input is returned verbatim (ingress already validates).
+    """
+    canon = canonical_code(code)
+    if canon is None:
+        return code
+    if canon.startswith('bj'):
+        return f'{canon[2:]}.BJ'
+    return canon
 
 
 # Batch limits
@@ -152,6 +239,14 @@ _ANNOUNCEMENT_HEADERS = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.cl
 _BASIC_INFO_BASE_URL = 'https://x-quote.cls.cn/quote/stock/basic'
 _BASIC_INFO_HEADERS = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.cls.cn/stock'}
 
+# Five-level order book REST API (direct access, no CDP / no sign).
+# `field=five` selects the 21-field five-band payload; the same endpoint
+# without it serves volume aggregates.  `secu_code` must be the upstream wire
+# spelling from `upstream_secu_code` (prefixed `sh600519` for SH/SZ, but the
+# dotted `430047.BJ` for BSE — the prefixed BSE form returns an empty dict).
+_STOCK_DEPTH_URL = 'https://x-quote.cls.cn/quote/stock/volume'
+_STOCK_DEPTH_HEADERS = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.cls.cn/stock'}
+
 # Stock detail REST API (direct access, no CDP needed)
 _STOCK_DETAIL_BASE_URL = 'https://x-quote.cls.cn/quote/stock/detail'
 _STOCK_DETAIL_HEADERS = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.cls.cn/stock'}
@@ -159,6 +254,33 @@ _STOCK_DETAIL_HEADERS = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.cl
 # Company info REST API (needs in-browser auth via CDP evaluate_fetch)
 _COMPANY_INFO_BASE_URL = 'https://x-quote.cls.cn/quote/stock/company_info'
 _COMPANY_INFO_HEADERS = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.cls.cn/stock'}
+
+# SSE hot-path upstream URLs: the domains a quote/fundflow/timeline subscription
+# refreshes every tick.  `warm_hosts()` derives the transport keys from these
+# constants, so moving an upstream can never leave the warm list stale.
+_SSE_HOT_PATH_URLS = (
+    _BASIC_INFO_BASE_URL, _STOCK_DEPTH_URL, _STOCK_DETAIL_BASE_URL,
+    _FUNDFLOW_BASE_URL, _TIMELINE_BASE_URL,
+)
+
+
+def warm_hosts():
+    """Distinct ``(scheme, host, port)`` of the SSE hot-path upstreams.
+
+    Derived from ``_SSE_HOT_PATH_URLS`` (the URL constants are the single
+    authority), deduped, in a stable order.  Consumed by ``cache.warm_transport``
+    so the pre-warm follows the configured upstreams instead of a host literal.
+    """
+    seen, out = set(), []
+    for url in _SSE_HOT_PATH_URLS:
+        parsed = urlsplit(url)
+        key = (parsed.scheme, parsed.hostname,
+               parsed.port or (443 if parsed.scheme == 'https' else 80))
+        if key not in seen:
+            seen.add(key)
+            out.append(key)
+    return tuple(out)
+
 
 # 同花顺 data center APIs (public, no auth)
 _TENJQKA_HEADERS = {
@@ -215,14 +337,9 @@ def stock_nav_page_names():
 # int there would be a dead setting an operator could not act on (P2-9).
 # 'n/a' literals are kept in the matrix for 1:1 SAD reading; cache_policy
 # normalises them to None (BR-CFG-11).
-# HTTP response compression (server._send_text).  Responses below the
-# minimum size are sent raw (compression overhead not worth it); gzip
-# applies only when the client advertises Accept-Encoding: gzip.
-GZIP_MIN_BYTES = int(os.getenv('GZIP_MIN_BYTES', '1024'))
-GZIP_COMPRESSLEVEL = int(os.getenv('GZIP_COMPRESSLEVEL', '1'))  # speed over ratio (CPU cost under 2-core stress)
-
 DOMAIN_MATRIX = {
-    'quote':        ('L1', 1.0, 1.0, 'dedup', 2000),                  # stock/data, basic_info, 实时价
+    'quote':        ('L0', 1.0, 1.0, 'dedup', 2000),                  # stock/data, basic_info, 实时价
+    'depth':        ('L0', 1.0, 1.0, 'dedup', 500),                   # 五档盘口 (与 quote 同拍)
     'fundflow':     ('L1', 1.0, 1.0, 'dedup', 2000),
     'timeline':     ('L1', 1.0, 1.0, 'dedup', 2000),
     'plate':        ('L2', 1.0, 1.0, 'fixed:200', 'n/a'),             # cls/hotplate, cls/plate (URL cache)
@@ -234,6 +351,12 @@ DOMAIN_MATRIX = {
     'f10':          ('L4', 1.0, 1.0, 'dedup', 500),
     'sector':       ('L4', 'override:604800', 'n/a', 'fixed:2000', 2000),  # 7d 行业名
 }
+
+# HTTP response compression (server._send_text).  Responses below the
+# minimum size are sent raw (compression overhead not worth it); gzip
+# applies only when the client advertises Accept-Encoding: gzip.
+GZIP_MIN_BYTES = int(os.getenv('GZIP_MIN_BYTES', '1024'))
+GZIP_COMPRESSLEVEL = int(os.getenv('GZIP_COMPRESSLEVEL', '1'))  # speed over ratio (CPU cost under 2-core stress)
 
 # Only domains whose upstream is not utf-8 declare an encoding here.
 _DOMAIN_ENCODING = {'longhu': 'gbk'}
@@ -293,14 +416,20 @@ def _trading_tiers(now=None):
     """Return dict of tier base TTLs for the given (or current) trading status.
 
     Tiers (short-line trading priority):
+      L0  最快    个股五档+实时价 (quote, depth) — 上游盘中 3s 一跳的物理下限
       L1  极实时  个股行情 (fundflow, timeline, basic_info)
       L2  实时    板块轮动 (hotplate, plate)
       L3  准实时  新闻快讯 (telegraph, kuaixun, flash)
       L4  参考    静态日更 (f10, margin) — unchanged
+
+    L0 is 4s in-session (≈1.3× the upstream's measured 3.0s tick, so a 4s
+    poll still sees every upstream change while halving the 8s waste).  Off
+    hours it is pinned to the L1 baseline (120s) so a non-trading session never
+    pays extra upstream requests for a market that is not moving.
     """
     if _is_trading_hours(now):
-        return {'L1': 8, 'L2': 12, 'L3': 30, 'L4': 300}
-    return {'L1': 120, 'L2': 120, 'L3': 180, 'L4': 300}
+        return {'L0': 4, 'L1': 8, 'L2': 12, 'L3': 30, 'L4': 300}
+    return {'L0': 120, 'L1': 120, 'L2': 120, 'L3': 180, 'L4': 300}
 
 
 def _resolve_int_factor(spec, base):

@@ -23,7 +23,10 @@ services:
       - MAX_WORKERS=20                # 2核下 20 workers 已到 CPU 92% 上限（压测实证）
       - MAX_INFLIGHT=40               # = 2× MAX_WORKERS（满则 503 load shed）
       # ── CDP 浏览器池（内存受限，降半）────────────────────
-      - CDP_STOCK_PAGES=4             # 2GB 总内存，CDP chromium ~50-100MB/tab；4 tab ≈ 200-400MB
+      - CDP_STOCK_PAGES=4             # 2GB 总内存；口径见 SAD §4.3：每页 PSS 典型 60MB / RSS 172MB，
+                                      # 另加固定基线 250MB(PSS，含 Omnibox webui ≈91MB)；
+                                      # 4 stock + 2 常驻(finance/quotation) = 6 内容页
+                                      # ⇒ 典型 ≈610MB / 保守 ≈1150MB
                                       # 不影响热点股（短线用户关注标的有限）
       - CDP_RESTART_INTERVAL=7200     # 2h 定期重启 CDP 防内存泄漏
       # ── HTTP 压缩（跨公网带宽节省）────────────────────────
@@ -41,7 +44,10 @@ services:
     mem_limit: 1.5g                   # 给 OS 留 500MB（系统 + 文件页缓存）
     mem_reservation: 256M
     dns:
-      - 223.5.5.5                     # 阿里 DNS（就近）
+      # 国内解析器优先：223.5.5.5 实测 14ms；8.8.8.8 为 170ms 且 5.5% 概率
+      # 触发 ~4s 重试（保留为最后兜底，勿置首）。
+      - 223.5.5.5
+      - 223.6.6.6
       - 8.8.8.8
     logging:
       driver: json-file

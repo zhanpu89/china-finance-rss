@@ -1,7 +1,8 @@
 # cdp_engine.py 详细设计
 
-> **版本** v1.2 · **状态** 已契约同步（P7b：以 `china_finance_rss/cdp_engine.py` 实现为准回写）· **日期** 2026-09-16 · **作者/产出** task-decomposer
-> 本版修订（P7b 契约同步，**只改文档、不改代码**）：① `get_data` 以 `_last_data_ts` 老化（**时钟缺失 = 陈旧**）；`_reconnect` 同时清 `_last_data`/`_last_data_ts`；② `navigate_stock` 快路径与锁后兜底改用带 max-age 的 `_fresh_secu_code_locked`，导航锁 `acquire(timeout)` 限时；③ 新增 `_evict_stalest_last_data_locked`（硬上限淘汰**同步清** `_last_data_ts`/`_key_last_seen`/`_api_urls`）；④ 重启窗口**异常兜底**（`ensure_chrome`/`full_chrome_restart` 必然收口终态）；⑤ `CDP_RESTART_THROTTLE` 改由 config 注册；⑥ **§2.1 A′ 收口**：`fetch_cls_f10` 五出口全部 `cdp_unavailable`（含"有数据但不匹配"），修正 v1.1 `REV-DES-18` 的 `None` 例外。
+> **版本** v1.3 · **状态** 已契约同步（P7b 传输层批次：以 `china_finance_rss/cdp_engine.py` 实现为准回写）· **日期** 2026-09-17 · **作者/产出** task-decomposer
+> **v1.3 变更（以代码为准）**：① `/proc/{pid}/cmdline` 读取改为 `with open(...)`（**修复每次探测泄漏一个 fd**）——`_chrome_pids_by_flag` 逐 PID 读 cmdline，旧写法在 OOM 循环/高频 watch 下会耗尽进程 fd；② 补记 `_chrome_pids_by_flag`/`_kill_chrome_on_port` 的防御面（`/proc` 不可读、PID 竞态消失、`pkill` 兜底）。**§2/§3/§4 的 P7b 口径（窗口终态保证 / `_last_data_ts` 老化 / 对称淘汰 / 限时导航锁 / `CDP_RESTART_THROTTLE` 源自 config）不变。**
+> 本版（v1.2 P7b 契约同步，**只改文档、不改代码**）：① `get_data` 以 `_last_data_ts` 老化（**时钟缺失 = 陈旧**）；`_reconnect` 同时清 `_last_data`/`_last_data_ts`；② `navigate_stock` 快路径与锁后兜底改用带 max-age 的 `_fresh_secu_code_locked`，导航锁 `acquire(timeout)` 限时；③ 新增 `_evict_stalest_last_data_locked`（硬上限淘汰**同步清** `_last_data_ts`/`_key_last_seen`/`_api_urls`）；④ 重启窗口**异常兜底**（`ensure_chrome`/`full_chrome_restart` 必然收口终态）；⑤ `CDP_RESTART_THROTTLE` 改由 config 注册；⑥ **§2.1 A′ 收口**：`fetch_cls_f10` 五出口全部 `cdp_unavailable`（含"有数据但不匹配"），修正 v1.1 `REV-DES-18` 的 `None` 例外。
 > 沿用 v1.1：REV-DES-20260915-002（REV-DES-18 / REV-DES-19）
 > 模块路径 `china_finance_rss/cdp_engine.py` · 归属 **基础设施（CDP 客户端）· 仅依赖 config/metrics**
 > 上游 SAD `doc/arch/SAD.md` **v1.3**（§2.3 D-4 CDP 降级 / §2.4 R18 防御取数 / §2.6 `cdp_restart_window` / §3 cdp_engine 行 / ADR-005/012）
@@ -178,6 +179,20 @@ def navigate_stock(self, stock_code, timeout=15, tabs=('fund_flow', 'f10')) -> b
 
 > **`_navigate_lock` 是 `RLock`**：`fetch_cls_f10`/`_navigate_f10` 的外层限时获取与本函数内部获取可**同线程重入**，不会自死锁。
 
+### 2.7 Chrome 进程探测 `_chrome_pids_by_flag(flag)` / `_kill_chrome_on_port(port)`（v1.3）
+
+```python
+def _chrome_pids_by_flag(flag) -> list[int]:
+    """返回 cmdline 含 flag 的 PID；/proc 不可读/单条读失败 ⇒ 静默跳过。"""
+
+def _kill_chrome_on_port(port) -> None:
+    """SIGKILL 绑定该调试端口的 Chrome，并以 pkill -f 兜底，最后 sleep(0.5)。"""
+```
+
+- **fd 泄漏修复（v1.3）**：`/proc/{pid}/cmdline` 一律经 `with open(path, 'rb') as f:` 读取——**保证即使解码/判断抛错也立刻关闭 fd**。旧的无 `with` 写法在每次 `ensure_chrome`/`full_chrome_restart`/watchdog 都会为每个存活 PID 泄漏一个 fd；OOM 崩溃循环下探测频繁，fd 会单调累积。
+- **防御面**：`os.listdir('/proc/')` 整体包 `try/except Exception`；非数字条目跳过；**单条 `open` 的 `OSError`/`IOError`（PID 在枚举与打开之间消失）静默跳过**（内核侧竞态，不是错误）。
+- **杀进程兜底**：`os.kill(pid, SIGKILL)` 的 `OSError` 被吞；随后 `subprocess.run(['pkill','-f', flag], timeout=5)` 作为 `/proc` 不可见进程的兜底；整体包 `try/except Exception`。
+- **不新增线程/定时器**（BR-CDP-12 不变）。
 ---
 
 ## 3. 数据结构
@@ -280,6 +295,7 @@ CDPPage._api_urls:      dict   # key -> 原始 URL（主动 re-fetch 注册表�
 | **BR-CDP-17** | **导航锁限时（P7b / P1-2）**：只经 `_acquire_navigate_lock(timeout)` 获取 `_navigate_lock`；`timeout ≤ 0` 或等待超预算 ⇒ `False`（调用方降级，不 park 线程与准入位）。`fetch_cls_f10` / `_navigate_f10` 与 `navigate_stock` 的获取可**同线程重入**（RLock）。 | P1-2 / AC-S1 |
 | **BR-CDP-18** | **`fetch_cls_f10` 的 A′ 语义（P7b 最终态）**：五条失败出口（engine 未就绪 / 无导航页 / 预算耗尽 / 全失败或全 `page_data=None` / **有数据但不匹配**）**全部** `cdp_unavailable`——**没有静默 `None` 的失败路径**。`stock_api.md §5.9/§10#15` 与本节逐字一致。 | AC-S4 A′ / P1-6 |
 | **BR-CDP-19** | **重启窗口终态保证（P7b）**：`restarting` 必然收敛到 `idle` 或 `unavailable`（`ensure_chrome` 的 `except Exception` + `full_chrome_restart` 的 `finally` + 节流分支"不改状态"三者共同保证）。⇒ `watchdog_restart_skip_reason()` 不会被永久钉在 `'already_restarting'`。 | AR-12 / R19 |
+| **BR-CDP-20** | **进程探测的 fd 与竞态纪律（v1.3）**：`/proc/{pid}/cmdline` **必须**经 `with open(...)` 读取（正常/异常路径都关 fd）；`/proc` 枚举失败、单条 `open` 因 PID 消失而 `OSError`/`IOError` 一律静默跳过；`kill` 的 `OSError` 吞掉并以 `pkill -f` 兜底。**禁止**裸 `open` 不关闭。 | AC-S9（24h fd/资源总账不单调增长）/ 2c2g OOM 恢复 |
 
 ---
 
@@ -634,6 +650,28 @@ def navigate_stock(self, stock_code, timeout=15, tabs=('fund_flow', 'f10')):
         self._navigate_lock.release()
 ```
 
+### 5.8 `_chrome_pids_by_flag`（v1.3 / BR-CDP-20）
+
+```python
+def _chrome_pids_by_flag(flag):
+    """返回 cmdline 含 flag 的 PID；fd 必定关闭、竞态静默。"""
+    pids = []
+    try:
+        for entry in os.listdir('/proc/'):
+            if not entry.isdigit():
+                continue
+            try:
+                with open(f'/proc/{entry}/cmdline', 'rb') as f:   # ★ v1.3：with 修复 fd 泄漏
+                    cmdline = f.read().decode('utf-8', errors='replace')
+                if flag in cmdline:
+                    pids.append(int(entry))
+            except (OSError, IOError):                            # PID 已消失 / 读失败 ⇒ 跳过
+                pass
+    except Exception:
+        pass
+    return pids
+```
+
 ---
 
 ## 6. 错误处理
@@ -653,6 +691,7 @@ def navigate_stock(self, stock_code, timeout=15, tabs=('fund_flow', 'f10')):
 | **`ensure_chrome` 内逃逸异常** | `except Exception` ⇒ `log.exception` + `_mark_unavailable()`（BR-CDP-19） | 窗口收口 `unavailable`（`/healthz` 可见），守护重启仍可用 |
 | **`full_chrome_restart` 内逃逸异常** | `finally` 复查 `state == 'restarting'` ⇒ `_mark_unavailable()` | 同上；**不存在卡在 `restarting`** |
 | `fetch_cls_f10` 取到数据但**不匹配** | 由 `stock_api` 侧 `_raise_cdp_unavailable()`（BR-CDP-18） | `_errors[code]='cdp_unavailable'`（**不再**静默 `None`） |
+| **`/proc` 枚举失败 / 单条 cmdline 读取失败（v1.3）** | `_chrome_pids_by_flag` 静默跳过（`OSError`/`IOError`）；fd 由 `with open(...)` 保证关闭 | 探测退化为"未找到该 PID"，`pkill -f` 兜底仍执行；**不泄漏 fd**（BR-CDP-20） |
 
 **降级路径总览**：`page_data → None` 是 A/A′ 两类端点降级的**唯一信号源**；形态由端点形状决定（A=error 客体，A′=逐码 null + `_errors`，D-4/ADR-005）。
 
@@ -698,6 +737,7 @@ def navigate_stock(self, stock_code, timeout=15, tabs=('fund_flow', 'f10')):
 | **CDP-T17** `navigate_stock` max-age 与限时锁（P7b） | ① `basic_info.secu_code` 匹配但 `_last_data_ts` 已 >600s（或缺失）⇒ **不**走快路径（`navigate_stock` 仍执行导航）；② `_navigate_lock` 被他线程长持 ⇒ `_acquire_navigate_lock(timeout)` 返回 False、`navigate_stock` 返回 False（**不无限等待**）；③ 锁后 `remaining < 2` 走同一 max-age 兜底 | BR-CDP-16/17 / P1-2/P1-3 |
 | **CDP-T18** 窗口终态保证（P7b） | ① patch `Popen` 抛异常 ⇒ `ensure_chrome()` 返回 False 且 `state=='unavailable'`（**非** `restarting`）；② patch `ensure_chrome` 在 `full_chrome_restart` 内抛异常 ⇒ `finally` 后 `state=='unavailable'`；③ 节流分支返回 False ⇒ 状态**不变** | BR-CDP-19 / R19 |
 | **CDP-T19** env 注册（P7b） | `cdp_engine._CHROME_RESTART_THROTTLE is config.CDP_RESTART_THROTTLE`；全仓 grep `cdp_engine.py` **无** `os.getenv` | BR-CFG-16 / §10#11 |
+| **CDP-T20** 进程探测不泄漏 fd（v1.3 / BR-CDP-20） | ① patch `os.listdir('/proc/')` 返回不可读 PID 条目 ⇒ `_chrome_pids_by_flag` 不抛、返回 `[]`；② 反复调用 N 次后用 `resource`/`len(os.listdir('/proc/self/fd'))` 或计数打桩断言 **fd 数不随调用次数增长**（`with open` 已关闭）；③ `/proc/{pid}/cmdline` 含 flag 的条目被正确返回 | AC-S9（fd 不单调增长）|
 
 ---
 
@@ -719,6 +759,7 @@ def navigate_stock(self, stock_code, timeout=15, tabs=('fund_flow', 'f10')):
 | **`navigate_stock` max-age + 限时锁（BR-CDP-16/17）** | **AC-S1**（CDP 慢不拖垮准入）/ **P1-2/P1-3** |
 | **A′ 五出口无静默 `None`（BR-CDP-18）** | **AC-S4 A′** / AC-A10（失败可辨识） |
 | **窗口终态保证（BR-CDP-19）** | **AC-S4**（降级可验证）/ **AC-S10**（`cdp_restart_window` 不误报） |
+| **进程探测 fd 纪律（v1.3 / BR-CDP-20）** | **AC-S9**（24h 资源总账：fd 不因探测单调增长） |
 
 ---
 
@@ -741,6 +782,7 @@ def navigate_stock(self, stock_code, timeout=15, tabs=('fund_flow', 'f10')):
 | 13 | **P7b · `navigate_stock` 快路径 max-age + 限时锁** | SAD §2.4 R18 未细化 | 快路径与锁后兜底均经 `_fresh_secu_code_locked`；导航锁 `acquire(timeout)`（BR-CDP-16/17） | 无 max-age ⇒ 过期快照永久命中、页面再不重新导航；无界 `acquire` 会 park 请求线程与准入位（CDP 慢 ⇒ 整站 503） |
 | 14 | **P7b · 窗口异常兜底** | SAD 未定义异常路径 | `ensure_chrome` 的 `except Exception → _mark_unavailable()` + `full_chrome_restart` 的 `finally` 兜底（BR-CDP-19） | `which`/`Popen` 在 2c2g OOM 下会抛错，且 `ensure_chrome` 也被 `_reconnect`/`_ensure_ws` 从心跳线程调用 ⇒ 逃逸异常会同时杀死心跳线程并把窗口钉在 `restarting` |
 | 15 | **P7b · `CDP_RESTART_THROTTLE` 来源** | SAD §3 cdp_engine 行未列该 env | 改读 `config.CDP_RESTART_THROTTLE`（config 注册，默认 15）（§1.3 / BR-CFG-16） | 避免"同一 env 两处定义、一处生效"；`config.md §10#13` 已同步登记 |
+| 16 | **v1.3 · `/proc` 探测 fd 泄漏** | SAD 未定义进程探测实现 | `_chrome_pids_by_flag` 的 cmdline 读取改 `with open(...)`（BR-CDP-20，§2.7/§5.8） | 旧的无 `with` 写法为每个存活 PID 泄漏一个 fd；OOM 崩溃循环/高频探测下 fd 单调累积，最终探测与 CDP 连接一起失败 |
 
 ---
 
@@ -759,6 +801,7 @@ def navigate_stock(self, stock_code, timeout=15, tabs=('fund_flow', 'f10')):
 - [x] **v1.2（P7b）**：`get_data` 老化（缺失=陈旧）/ `_reconnect` 双表同清 / `_evict_stalest_last_data_locked` 对称清理（§2.5/§3.5/§4 BR-CDP-13..15/§5.6/§6/CDP-T14..T16）
 - [x] **v1.2（P7b）**：`navigate_stock` max-age 快路径 + 锁后兜底 + `_acquire_navigate_lock` 限时（§2.6/§4 BR-CDP-16/17/§5.7/CDP-T17）
 - [x] **v1.2（P7b）**：重启窗口终态保证（`ensure_chrome` except + `full_chrome_restart` finally，§3.2/§4 BR-CDP-19/§5.5/CDP-T18）；`CDP_RESTART_THROTTLE` 改由 config 注册（§1.3/CDP-T19）
+- [x] **v1.3**：`_chrome_pids_by_flag` 的 `/proc/{pid}/cmdline` 改 `with open(...)`（修复 fd 泄漏；§2.7/BR-CDP-20/§5.8/§6/CDP-T20/§9/§10#16）
 
 ---
 
@@ -769,3 +812,4 @@ def navigate_stock(self, stock_code, timeout=15, tabs=('fund_flow', 'f10')):
 | v1.0 | 2026-09-15 | 首版（批次 2 数据层） |
 | v1.1 | 2026-09-15 | 按 `doc/review/数据层三模块_详细设计评审_专家版.md`（REV-DES-20260915-002）修订：**P2 REV-DES-18**（§2.1 A′ 与 stock_api 统一 `page_data=None`=取数失败）；**P2 REV-DES-19**（模块加载发布初始 idle 快照，BR-CDP-5/§5.1/§5.4/§10#10 同步）。**既有公开签名与状态机不变** |
 | v1.2 | 2026-09-16 | **P7b 契约同步（以 `cdp_engine.py` 实现为准）**：`get_data` 以 `_last_data_ts` 老化（缺失=陈旧）·`_reconnect` 双表同清·`_evict_stalest_last_data_locked` 对称清理·`navigate_stock` max-age 快路径/锁后兜底/限时导航锁·`_same_code` 归一·重启窗口异常兜底（终态保证）·`CDP_RESTART_THROTTLE` 改由 config 注册·**A′ 收口为五出口全 `cdp_unavailable`**（修正 REV-DES-18）。新增 BR-CDP-13..19、CDP-T14..T19、§10#11..15。**未改代码** |
+| v1.3 | 2026-09-17 | **P7b 传输层批次契约同步（以 `cdp_engine.py` 实现为准）**：`_chrome_pids_by_flag` 的 `/proc/{pid}/cmdline` 改 `with open(...)`（**修复 fd 泄漏**）·补记 `/proc` 不可读/PID 竞态/pkill 兜底防御面。新增 BR-CDP-20、CDP-T20、§2.7、§5.8、§10#16。**未改代码** |

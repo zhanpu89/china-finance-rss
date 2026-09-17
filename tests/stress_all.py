@@ -51,8 +51,8 @@ GLOBAL_ENDPOINTS = {
 def fetch_json(url, timeout=30):
     start = time.time()
     try:
-        resp = urllib.request.urlopen(url, timeout=timeout)
-        body = resp.read()
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            body = resp.read()
         elapsed = time.time() - start
         data = json.loads(body)
         return elapsed, 200, data
@@ -261,9 +261,9 @@ def wait_for_server(url, timeout=120):
     start = time.time()
     while time.time() - start < timeout:
         try:
-            resp = urllib.request.urlopen(url, timeout=5)
-            if resp.status == 200:
-                return True
+            with urllib.request.urlopen(url, timeout=5) as resp:
+                if resp.status == 200:
+                    return True
         except:
             pass
         time.sleep(2)

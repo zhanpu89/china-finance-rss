@@ -7,11 +7,54 @@
 
 - 批次 1：**基础层三模块**（config / cache / metrics）→ ✅ 完成（均 v1.1）
 - 批次 2：**数据层三模块**（stock_api / market_api / cdp_engine）→ ✅ 完成（均 **v1.1**，已按评审修订）
-- 批次 3：**上层两模块**（server / stream）→ ✅ 评审闭环（v1.1）→ ✅ P7b 契约同步（v1.2）→ ✅ **v1.3 收尾（`server.md` N1 回退）**
-- **本次（v1.3 收尾契约同步）**：把 N1 回退 / AC-S3 裁决 / `_LOCAL_BUDGET` 裁决**以代码为准**回写 `server.md` / `cache.md` / `config.md` / `market_api.md`（+ 本文件）——**未改代码、未改 SAD/PRD/其他详设**
-- 版本（**以各文档头部为准，已核对**）：`config.md` / `cache.md` / `market_api.md` / `server.md` = **v1.3**；`stock_api.md` / `stream.md` / `cdp_engine.md` / `metrics.md` = **v1.2**
+- 批次 3：**上层两模块**（server / stream）→ ✅ 评审闭环（v1.1）→ ✅ P7b 契约同步（v1.2）→ ✅ v1.3 收尾（`server.md` N1 回退）
+- **本次（r5 容量/冷启动契约同步）**：把多轮实现的真实行为**以代码为准**回写 `stream.md`（→ **v1.3**）/ `stock_api.md`（→ **v1.3**）/ `server.md`（→ **v1.4**）（+ 本文件）——**未改代码、未改 SAD/PRD/其他详设**
+- 版本（**以各文档头部为准，已核对**）：`config.md` = **v1.4**（前轮）· `cache.md` = **v1.4**（前轮）· `server.md` = **v1.4** · `stream.md` = **v1.3** · `stock_api.md` = **v1.3** · `market_api.md` = **v1.3** · `metrics.md` / `cdp_engine.md` = **v1.2**
 - 路径：纯后端（无前端/小程序 → Step 4 跳过）
 - 门禁：每份含 9 节（职责/契约/数据结构/业务规则/伪代码/错误处理/并发安全/测试要点/AC 追溯）+ 偏差标注 + 自检；§3 为 yaml 代码块
+
+## ★ r5 契约同步（`stream.md` v1.3 / `stock_api.md` v1.3 / `server.md` v1.4 · 以代码为准）
+
+> 范围：**只改** `doc/detailed/{stream,stock_api,server}.md` + 本文件。**未改代码、未改其他文档。**
+> 触发：r5 容量重标定（连接池后重测）+ 冷启动去重/唤醒 + `depth` 域落地后，三份文档仍为旧口径。
+
+### 1. `stream.md` → **v1.3**（8 组同步项 → §11.4；偏差 28→**33**；测试 43→**48**）
+
+| 主题 | 代码实况（`stream.py`） | 同步结论 |
+|------|----------------------|---------|
+| `tick_interval(fields=None)` | `L584-616`：无域 ⇒ `_trading_tiers()['L1']`；否则 `min(tiers[cache_policy(d)['tier']] for d in domains)` | 节拍 = **最短订阅域 tier**（quote/depth=L0 盘中 **4s**）；`push_loop` 一轮算一次下传 `_push_once(t0, tick=)` → `_refresh_pool(..., tick=)` |
+| `_PER_FETCH_EST` | `= config.STREAM_PER_FETCH_EST`（默认 **0.3**） | v1.2 的 2.2 作废 |
+| `BATCH_MAX_WORKERS` | `= config.BATCH_MAX_WORKERS` = **20** | v1.2 的 8 作废 |
+| `_FIELD_FETCH_CALLS` | `{'quote': 2, 'fundflow': 1, 'timeline': 1}` | quote = basic + depth |
+| 容量实值 | `coverage = int(0.8×tick×20/0.3)` | tick4 **213** / tick8 **426** / tick120 **6400**；`coverage_codes` tick4 quote **106** / 3 域 **53** |
+| `refresh_epoch` | `_domain_refresh_epoch`（`ttl ≤ tick` ⇒ 本轮起点）+ `_call_refresh_handler`（纯增量 kwarg；仅调用帧 TypeError 降级） | 设定 tick 的域每拍真回源；慢域 `None` 交错 |
+| 帧去重 | `_frame_signature`（blake2b 排 `ts`）+ 组级 `last_sig` + 连接级 `sent_any`；`last_push_ts` 仅真发送刷新 | 内容未变不发；未首发连接强制补发 |
+| 空闲唤醒 / 冷首轮 | `_wake_event`/`_idle_sleeping`/`_wake_pending`/`_last_round_idle` + `_first_refresh_done`；`create_group`/`_serve_sse` 调 `_wake_push_loop()` | 仅空轮等待可打断；冷首轮不计 degraded/slip |
+| 不变量订正 | `_tick_sleep_seconds` 注释（`L1000-1009`） | 真实不变量 = **轮起点→轮起点 ≥ 1 tick**（非帧到达间隔）；帧到达间隔 = `tick−dur_k+dur_{k+1}` |
+| 帧契约只增 | `fetch_cls_basic_info` 附带 `result['depth']` | `items[code].quote` 可含 **`depth`（21 字段，L0 同拍）** |
+| **⚠️ 发现的口径不符** | §4.2 **BR-STR-9** 原写"**先 `put_nowait` 成功、再 `_frame_acquire`**"，与代码（**先 `_frame_acquire` 后 `put_nowait`**，二次 Full ⇒ `_frame_release` 回滚）及本文件 §2.5/§5.4/§6.3#2/§7.5#4 **自相矛盾** | 已按代码更正 BR-STR-9；`sent_any`/`last_sig`/`depth`/`hashlib`/`cache_policy` 补入数据结构与 import 面 |
+
+### 2. `stock_api.md` → **v1.3**（6 组同步项 → §10#21..26；偏差 20→**26**；测试 29→**39**）
+
+| 主题 | 代码实况（`stock_api.py`） | 同步结论 |
+|------|--------------------------|---------|
+| `fetch_cls_stock_depth` | `L1053-1102`：`_STOCK_DEPTH_URL?secu_code=…&field=five`；**空 dict / 20 档全 0 ⇒ `None`**；失败非致命（不 raise） | 新增 `depth` 域取数器 + `_depth_store` + `_DEPTH_VALUE_FIELDS` + `_DOMAIN_STORES['depth']` + `_basic_depth_*` |
+| `fetch_cls_basic_info` 三阶段 | `L958-1040`：阶段1 basic（致命）/ 阶段2 sector（非致命）/ **阶段3 depth**（非致命，只增 `result['depth']`） | 三阶段；阶段 1/3 传 epoch，阶段 2 留 TTL |
+| 空壳防御 | `_basic_info_is_valid` + `_BASIC_INFO_KEY_FIELDS=('secu_name','last_px')` | `code:200` 但全空 / `data:{}` ⇒ **`upstream_error`**（不写缓存、不进阶段 2/3） |
+| `upstream_secu_code` | **9 处**调用点（`_announcement_url` / fundflow / timeline / detail / basic p1 / basic p2 / depth / fundflow direct / timeline direct） | URL 构造全量应用；**北交所点号形 `430047.BJ`**；池/缓存/账本键仍 canonical |
+| `BATCH_MAX_WORKERS` | `= config.BATCH_MAX_WORKERS` = **20** | v1.2 的 8 作废 |
+| `refresh_epoch` | `_call_fetcher`/`_fetch_one`/`_run_batch`/`_process_chunk`/`_handle_cached_batch` + 3 handler 全贯通；终点缓存命中追加 `written >= refresh_epoch` | 全链路；`None` 逐字不变 |
+| **⚠️ 发现的口径不符** | ① §5.1 import 块仍含 `socket` / `Request,urlopen` / `VALID_STOCK_CODE`，且 URL 仍写 `secu_code={stock_code}`；代码已迁移 | 已按代码更正 import 面与全部 URL；② 任务清单称"**10 处** x-quote URL"，实为 **9 处** `upstream_secu_code(` 调用点（announcement 签名 URL 被 REST + direct 两处复用） |
+
+### 3. `server.md` → **v1.4**（4 组同步项 → §11.4；偏差 29→**31**；测试 43→**45**）
+
+| 主题 | 代码实况（`server.py`） | 同步结论 |
+|------|----------------------|---------|
+| `main()` 预热线程 | `L1509`：`threading.Thread(target=warm_transport, daemon=True).start()`（`cache.warm_transport`；主机 `config.warm_hosts()`） | 新增 daemon 线程；**不阻塞启动/`/healthz`，失败静默**（总函数） |
+| gzip 协商 | `_accepts_gzip`（`L541-568`，RFC 9110：`gzip;q=0` 拒绝、`GZIP`/`*` 接受）；`_send_text`（`L1249-1283`）gzip + `Vary` | `Vary: Accept-Encoding` 在 **`gzipped or cache`** 时无条件发（含 `cache=False` 的 gzip）；`GZIP_MIN_BYTES=1024`/`GZIP_COMPRESSLEVEL=1` |
+| 已核对**无漂移** | 状态码（业务恒 200；`http_503_total` 计数点 3）、`_send_json` 无 `status`、`_json_payload_has_data` 已删、`_cache_age` 用 `urlparse`、`_parse_stock_codes`/`_rekey_batch_response`、4 面板 `quote` 域、longhu `broker_idx` 无条件自增、`request_queue_size=LISTEN_BACKLOG`、`BoundedThreadPoolServer(..., max_inflight=None)` | 与 v1.3 已同步口径一致，仅补 v1.4 两项 + 线程账 +9 |
+
+**本轮销账**：v1.2 遗留的 `stream.md` 容量/去重类偏差、`stock_api.md` 的 import/URL/depth 类偏差、`server.md` 的 warm/gzip 类偏差**全部落笔**。**仍待编排层（不在本 agent 范围）**见下方「跨模块契约同步项」。
 
 ## ★ v1.3 收尾契约同步（N1 回退 + AC-S3 裁决 + `_LOCAL_BUDGET` 裁决 · 以代码为准）
 
@@ -49,7 +92,7 @@
 
 ## P7b 契约同步摘要（`server.md` → v1.2（★ 后由 v1.3 / N1 修订两处）/ `stream.md` → v1.2 · 以代码为准）
 
-> ★ **历史快照（v1.2 时点）**：下表"error-only ⇒ 503 / `_send_json(..., status=200)`"两条**已由 v1.3 / N1 回退**（见上「v1.3 收尾契约同步」§1）；其余条目仍有效。
+> ★ **历史快照（v1.2 时点）**：下表"error-only ⇒ 503 / `_send_json(..., status=200)`"两条**已由 v1.3 / N1 回退**（见「v1.3 收尾契约同步」§1）；**"容量模型 `2.2` / `coverage=23` / `coverage_codes` 23·11·7"已由 r5 复标定为 `0.3` / 213·426·6400 / tick4 **106·53**，且节拍改为最短订阅域 tier**（见上「r5 契约同步」§1 / `stream.md` §11.4）；其余条目仍有效。
 
 > 依据：各批次落地 `>>DOC_SYNC` 标记。**仅改 `doc/detailed/{server,stream}.md` + 本文件**；未改代码、未改其他文档。
 
@@ -60,7 +103,7 @@
 | 帧格式（对外契约） | `{ts, codes_total, fields, items(全码, 可 null), missing, missing_count, errors?, stale?, stale_count?}`；`_build_frame` **仅 `codes` 为空**返回 `None` |
 | last-known | `_carry_forward`/`_last_known`/`_clear_last_known`：未刷新码带旧值并标 `_stale`；池缩即裁剪 |
 | `_refresh_pool` | 新签名 `(codes, now=None, fields=None, tick=None, deadline=None)`；按**订阅字段并集**刷新（`_subscribed_fields`/`_active_targets`/`_resolve_refresh_fields`）；超预算跳过剩余字段并标 `tick_budget_exceeded` |
-| **容量模型（关键数值）** | `_PER_FETCH_EST=2.2`、`_FIELD_FETCH_CALLS['quote']=1` ⇒ **coverage=23**；`coverage_codes` = **1/2/3 域 → 23/11/7**；C1 门限 = `_fetches_per_code(fields)×n ≤ coverage` |
+| **容量模型（关键数值）** | ~~`_PER_FETCH_EST=2.2`、`_FIELD_FETCH_CALLS['quote']=1` ⇒ coverage=23；coverage_codes 1/2/3 域 → 23/11/7~~ **（v1.2 历史；r5 复标定见上「r5 契约同步」§1：`0.3` / quote=2 / 213·426·6400 / tick4 106·53）**；C1 门限 = `_fetches_per_code(fields)×n ≤ coverage` |
 | 节拍 | 整 tick 网格滑移 `k=int((now−t0)//tick)+1`；异常退避 1/2/4…封顶 8 tick；**`_TICK_MIN_SLEEP_FRACTION` 已删** |
 | lag gauge | 空池发布 0（`_push_once` 空池分支）；C1 ⇒ 0；C2 ⇒ `ceil(n/|slice|)` |
 | 准入 | `projected + largest ≤ budget`（单帧余量 ⇒ 满配组容量 **9→8**）；超限 400 `_FRAME_BUDGET_ERR`；`MAX_GROUPS=200` 超限 400 |
@@ -103,7 +146,7 @@
 | 模块 | 核心接口变更 | 关键约束落实 |
 |------|-------------|-------------|
 | `server.md` | `_guard(fn, *, shape, requested, dropped, rss_info, feed_url)`（4 shape）；`_JSON_SHAPES`（14 项 + `assert`）；`_handle_stock_batch(parsed, handler, write_body)` 透传 `dropped`；`_get_or_fetch_feed` 双检；`build_health_payload(base_url, check_sources)`（签名不变）；`BoundedThreadPoolServer._max_inflight = MAX_INFLIGHT`；`_cache_age` 接 policy；`_plate_ttls()`；`_send_error(msg, write_body)` | `_guard`×14 JSON + 5 RSS + healthz；feed 双检（miss→per-path lock→**二次 get**→fetch→put）；healthz `BoundedSemaphore(MAX_HEALTH_INFLIGHT=5)` 有界准入（stale 可达）+ check=0 零上游 + 精确 schema（既有 4 键 + `stale`/`metrics`/`policy`/`cdp`）；plate `_STAGGER=max(3, ttl//4)` 三档保留；longhu 走 `fetch_json(encoding='gbk')`×2 URL（L4=300）；dropped 单组装点；503 计数 |
-| `stream.md` | `codes→frozenset`、`fields→tuple`；`_build_frame(snapshot, codes, fields)`（**签名变更**）；`_Frame{payload,size,sid,refs}` + `_frame_bytes_lock` + `_frame_acquire/release` + `_reserve_for` + `_drain_conn_queue` + `_pop_oldest_frame`；`_refresh_pool(codes, now=None)` 分片轮转；`_release_conn(conn=None)`；`create_group` 校验 `MAX_GROUPS`；`_read_json_body` 5s | distinct 帧计费（`stream_queue_bytes` = Σ refs>0 帧字节，只计一次）；关闭/入队竞态双时序收口（put 后复检 `closed`）；确定性丢弃（`_group_bytes` 最大组 × 最满连接 × 队首）+ 先腾位后入队（不丢最新）；分片 `|slice| ≤ coverage_codes`（盘中 56 / 非盘 853，游标键 `stream_refresh`）+ `cached_batch` 并帧 + lag 指标；**跳过 `_` 前缀键（AR-7）**；`MAX_GROUPS` 400 |
+| `stream.md` | `codes→frozenset`、`fields→tuple`；`_build_frame(snapshot, codes, fields)`（**签名变更**）；`_Frame{payload,size,sid,refs}` + `_frame_bytes_lock` + `_frame_acquire/release` + `_reserve_for` + `_drain_conn_queue` + `_pop_oldest_frame`；`_refresh_pool(codes, now=None)` 分片轮转；`_release_conn(conn=None)`；`create_group` 校验 `MAX_GROUPS`；`_read_json_body` 5s | distinct 帧计费（`stream_queue_bytes` = Σ refs>0 帧字节，只计一次）；关闭/入队竞态双时序收口（put 后复检 `closed`）；确定性丢弃（`_group_bytes` 最大组 × 最满连接 × 队首）+ 先腾位后入队（不丢最新）；分片 `|slice| ≤ coverage_codes`（★ v1.0 历史：盘中 56 / 非盘 853；**r5 后为随 tick/字段动态值**，见上「r5 契约同步」§1）游标键 `stream_refresh` + `cached_batch` 并帧 + lag 指标；**跳过 `_` 前缀键（AR-7）**；`MAX_GROUPS` 400 |
 
 ## v1.1 修订摘要（数据层三模块，REV-DES-20260915-002）
 
@@ -195,8 +238,10 @@
    - 返回体可能含保留键 `_errors`（失败码非空时）⇒ `_refresh_pool` **必须跳过 `_` 前缀键**（AR-7 陷阱点；否则把 `_errors` 当股票塞进帧）。
    - `_FIELD_HANDLERS = {'quote': handle_cls_basic_infos, 'fundflow': handle_cls_fundflow, 'timeline': handle_cls_timeline}` **不变**。
 2. **分片轮转（AR-1 / INV-1b）在 `stream.py` 实现**，stock_api 只提供原语与常量：
-   - `stock_api.BATCH_MAX_WORKERS = 8`（计算 coverage 用）。
-   - ⚠️ **P7b 覆盖（以代码为准）**：`coverage = max(1, int(0.8 × tick × BATCH_MAX_WORKERS / _PER_FETCH_EST))`，`_PER_FETCH_EST=2.2` ⇒ **coverage=23 取数次数/周期**（与 tick 无关）；`coverage_codes = coverage // _fetches_per_code(fields)` ⇒ **1/2/3 域 = 23/11/7 码/周期**。旧口径 `≈170 / ≈56`（`per_fetch=0.3` + quote 记 2 次调用）**已作废**（BUG-P6C-06 重标定；见 `stream.md` §3.3/§10#21）。
+   - `stock_api.BATCH_MAX_WORKERS = config.BATCH_MAX_WORKERS = 20`（计算 coverage 用）。
+   - ⚠️ **r5 覆盖（以代码为准）**：`coverage = max(1, int(0.8 × tick × BATCH_MAX_WORKERS / _PER_FETCH_EST))`，`_PER_FETCH_EST = config.STREAM_PER_FETCH_EST = 0.3` ⇒ **coverage = tick4 213 / tick8 426 / tick120 6400**（随 tick **线性增长**，非恒值）；`coverage_codes = coverage // _fetches_per_code(fields)`（`_FIELD_FETCH_CALLS['quote']=2`：basic + depth）⇒ **tick4 quote-only 106 / 3 域 53**。旧口径 `≈170/≈56` 与 v1.2 的 `23/23·11·7` **均已作废**（BUG-P6C-06 + BUG-SSE-DEPTH-01；见 `stream.md` §3.3/§10#15·#21）。
+   - ★ **节拍 + wire 拼写（v1.3）**：`tick_interval(fields)` = 最短订阅域 tier（quote/depth L0 盘中 **4s**；无订阅 L1）；URL 构造一律 `config.upstream_secu_code`（SH/SZ 前缀形；**BSE 点号形 `430047.BJ`**），池/缓存/账本键仍 canonical。
+   - ★ **`refresh_epoch`（v1.3）**：`stream._refresh_pool(..., now=本轮起点)` 对"设定 tick 的域"传入新鲜度下限 ⇒ 每拍真回源；`stock_api` 全链路透传（终点缓存命中追加 `written >= epoch`，`cache.fetch_json` 第 6 位形参）。
    - 条件 `C1: _fetches_per_code(fields) × N_active ≤ coverage ⇔ N_active ≤ coverage_codes` 成立 → 整池一周期刷新（**lag=0**）；否则分片：`|slice| ≤ coverage_codes`。
    - 游标：`stock_api._prefetch_slice(pool=None? ...)` **仅适用于有 pool 的域**；stream 的活跃码集来自 `_active_codes()`（非 pool），故 stream 用 **同一 round-robin 语义**自行维护游标键 `'stream_refresh'`（可复用 `_prefetch_rotate` 的思路；如需公共游标可调 `_prefetch_advance('stream_refresh', ...)`，该函数按 key 通用）。
    - 未进切片的码：`data = stock_api.cached_batch(field_domain, rest_codes)`（无网络读终点缓存）；
@@ -235,14 +280,14 @@
 
 | # | 文档 | 状态 |
 |---|------|------|
-| 1 | `doc/detailed/config.md` | ✅ **v1.3（批次 1 → v1.1 → P7b v1.2 → AC-S3 裁决 v1.3）**（`PROBE_TIMEOUT` 脚注更正：阶梯封顶 = `cache._PROBE_BUDGET_CAP=5.0`；§10#18；默认值/env 面零变更） |
-| 2 | `doc/detailed/cache.md` | ✅ **v1.3（批次 1 → v1.1 → P7b v1.2 → AC-S3 裁决 v1.3）**（新增 `_PROBE_BUDGET_CAP=5.0`；阶梯 `2→4→5`；`REQUEST_TIMEOUT` 降为"冷/老化全预算探测"；§10#11 重写 + §10#18；T-CACHE-4·4c·4d·21 期望值更正） |
+| 1 | `doc/detailed/config.md` | ✅ **v1.4（批次 1 → v1.1 → P7b v1.2 → AC-S3 v1.3 → ★ 传输/容量 env v1.4）**（`PROBE_TIMEOUT` 脚注更正：阶梯封顶 = `cache._PROBE_BUDGET_CAP=5.0`；★ v1.4 补登 `BATCH_MAX_WORKERS=20`/`STREAM_PER_FETCH_EST=0.3`/`HTTP_POOL_*`/`HTTP_DNS_CACHE_TTL`/`HTTP_WARM_*`、L0 档 + `quote`→L0 + `depth` 域、`upstream_secu_code`、`warm_hosts()`；§10#19..23）**——**版本以文档头部为准** |
+| 2 | `doc/detailed/cache.md` | ✅ **v1.4（批次 1 → v1.1 → P7b v1.2 → AC-S3 v1.3 → ★ 传输层 v1.4）**（`_PROBE_BUDGET_CAP=5.0`；阶梯 `2→4→5`；★ v1.4：`_ConnectionPool` + `_DNSResolver` + `cache.urlopen` 打桩缝 + `warm_transport` + `fetch_json` 第 6 位 `refresh_epoch`（BR-CACHE-31）；§10#21）**——**版本以文档头部为准** |
 | 3 | `doc/detailed/metrics.md` | ✅ v1.2（批次 1 → P7b） |
-| 4 | `doc/detailed/stock_api.md` | ✅ **v1.2（批次 2 → P7b；已含 `_LOCAL_BUDGET` 不入冷却账）** |
+| 4 | `doc/detailed/stock_api.md` | ✅ **v1.3（批次 2 → P7b v1.2 → ★ r5 契约同步 v1.3）**（depth 域 + 三阶段 basic_info + 空壳防御 + `upstream_secu_code` 全量应用 + `BATCH_MAX_WORKERS=20` + `refresh_epoch` 贯通；偏差 26·测试 39） |
 | 5 | `doc/detailed/market_api.md` | ✅ **v1.3（批次 2 → v1.1 → P7b v1.2 → AC-S3 裁决 v1.3）**（BR-MKT-11 封顶更正为 `_PROBE_BUDGET_CAP`；§10#9；§12 变更记录） |
 | 6 | `doc/detailed/cdp_engine.md` | ✅ v1.2（批次 2 → P7b） |
-| 7 | `doc/detailed/server.md` | ✅ **v1.3（批次 3 → P7b v1.2 → ★ N1 回退 v1.3）**（`_guard`×14 表驱动 + `_send_json_shape`（**恒 200**）、**`_json_payload_has_data` 已删**、**业务降级 = 200 + error 体**、`_send_json` 无 `status`、`http_503_total` 计数点 3、降级体可缓存、healthz 有界准入 + `_HealthBatch`(+`settle()`)、feed 双检、码归一 `_parse_stock_codes`/`_rekey_batch_response`、margin 400、`_FANOUT_WAIT_BUDGET`、`_base_url` 加固、面板 cache-age=`quote`、longhu 席位配对自增、`request_queue_size=LISTEN_BACKLOG`；对照表 §11.3，偏差 29 项） |
-| 8 | `doc/detailed/stream.md` | ✅ **v1.2（批次 3 → P7b 契约同步）**（帧 schema 全码 + `missing`/`stale`/`errors`、last-known 结转、`_refresh_pool` 5 参 + 字段并集 + tick 预算、**coverage=23 / coverage_codes 23·11·7**、整 tick 网格 + 异常退避、lag C1/空池=0、准入 cap 单帧余量（9→8）、fail-closed 字段、canonical_code、`Connection: close`） |
+| 7 | `doc/detailed/server.md` | ✅ **v1.4（批次 3 → P7b v1.2 → N1 回退 v1.3 → ★ r5 契约同步 v1.4）**（`_guard`×14 表驱动 + `_send_json_shape`（**恒 200**）、**`_json_payload_has_data` 已删**、**业务降级 = 200 + error 体**、`_send_json` 无 `status`、`http_503_total` 计数点 3、降级体可缓存、healthz 有界准入 + `_HealthBatch`(+`settle()`)、feed 双检、码归一 `_parse_stock_codes`/`_rekey_batch_response`、margin 400、`_FANOUT_WAIT_BUDGET`、`_base_url` 加固、面板 cache-age=`quote`、longhu 席位配对自增、`request_queue_size=LISTEN_BACKLOG`；★ **v1.4 新增 gzip 协商 `_accepts_gzip`+`Vary` 与 `main()` `warm_transport` 预热线程**；对照表 §11.3·§11.4，偏差 31 项·测试 45） |
+| 8 | `doc/detailed/stream.md` | ✅ **v1.3（批次 3 → P7b v1.2 → ★ r5 契约同步 v1.3）**（帧 schema 全码 + `missing`/`stale`/`errors`、last-known 结转、`_refresh_pool` 5 参 + 字段并集 + tick 预算、整 tick 网格 + 异常退避、lag C1/空池=0、准入 cap 单帧余量（9→8）、fail-closed 字段、canonical_code、`Connection: close`；★ **v1.3：节拍=最短订阅域（quote L0 4s）、`coverage` 213/426/6400、`coverage_codes` tick4 **106/53**、`refresh_epoch` 每拍真回源、帧发送层去重（`_frame_signature`/`sent_any`）、空闲唤醒 + 冷首轮豁免、`quote` 可含 `depth`**；偏差 33 项·测试 48） |
 | 9 | `doc/detailed/编码规范.md` | ⏳ 待生成 |
 | 10 | `doc/detailed/项目规则.md` | ⏳ 待生成 |
 
@@ -252,7 +297,9 @@
 >
 > ✅ **交付/编码前置提醒（P7b 更新）**：`config.md` §2.4 的 `CACHE_TTL`/`CACHE_JITTER`/`feed_cache`/`MAX_FEED_CACHE_SIZE`/`_trading_tiers` 常量删除**已随代码落地**（`config.py` 已无 `CACHE_TTL`；`server.py` 消费点全部改读 `cache_policy`）——本项**销账**。
 >
-> ⚠️ **跨模块契约同步项（编排层执行；★ v1.3 更新）**：① `feeds[].status` 三处取值修正（`/stock/data`→`configured`、`/stock/basic_info`→`configured`、`/stock/f10`→`requires_chrome_cdp`）需同步 healthz 负载 + 首页 CDP 列 + `API.md`；② `POST /stream/subscriptions` 的 `MAX_GROUPS=200` 超限 **400** + v1.2 新增 **`_FRAME_BUDGET_ERR` 400**（流端口 API 文档 + 变更日志）；③ `BoundedThreadPoolServer` 的 `max_inflight` 形参、**流端口显式 110**（`server.md` §10#11 · `stream.md` §10#13，编排层已批准）；④ **v1.2 新增对外行为**（★ v1.3 已剔除 error-only ⇒ 503）：~~error-only payload ⇒ 503~~ **（N1 回退：业务端点恒 200 + error 体，**无需外部同步**）**、`/healthz` 缺 `status`/含 `error` ⇒ 503、4 面板 `max-age` 8/120、`/market/margin` 非法参数 ⇒ **400**、SSE 帧新增 `missing`/`stale`/`errors` 元数据与 null 占位 —— 仍须 API 文档 + 变更日志同步；⑤ **SAD 措辞回改**：`handle_cls_*` 返回"组装 dict"（非 `(results, errors)`）+ INV-1b 覆盖数值（170/56 → 23/23·11·7）—— 由 system-architect 承接；★ ⑥ **v1.3 新增（AC-S3 裁决）**：`cache._PROBE_BUDGET_CAP=5.0`（阶梯封顶，**机制常量非 env**）与"P95 ≈ 5s / 单请求 ≤15s"的量化口径若需写入 SAD §2.3 D-1，由 system-architect 回填（`cache.md` §10#11·#18 / `config.md` §2.3·§10#18 已按实现钉死）。
+> ⚠️ **跨模块契约同步项（编排层执行；★ v1.3 更新）**：① `feeds[].status` 三处取值修正（`/stock/data`→`configured`、`/stock/basic_info`→`configured`、`/stock/f10`→`requires_chrome_cdp`）需同步 healthz 负载 + 首页 CDP 列 + `API.md`；② `POST /stream/subscriptions` 的 `MAX_GROUPS=200` 超限 **400** + v1.2 新增 **`_FRAME_BUDGET_ERR` 400**（流端口 API 文档 + 变更日志）；③ `BoundedThreadPoolServer` 的 `max_inflight` 形参、**流端口显式 110**（`server.md` §10#11 · `stream.md` §10#13，编排层已批准）；④ **v1.2 新增对外行为**（★ v1.3 已剔除 error-only ⇒ 503）：~~error-only payload ⇒ 503~~ **（N1 回退：业务端点恒 200 + error 体，**无需外部同步**）**、`/healthz` 缺 `status`/含 `error` ⇒ 503、4 面板 `max-age` 8/120、`/market/margin` 非法参数 ⇒ **400**、SSE 帧新增 `missing`/`stale`/`errors` 元数据与 null 占位 —— 仍须 API 文档 + 变更日志同步；⑤ **SAD 措辞回改**：`handle_cls_*` 返回"组装 dict"（非 `(results, errors)`）+ INV-1b 覆盖数值（170/56 → ~~23/23·11·7~~ **213/426/6400；coverage_codes tick4 106/53**，见上「r5 契约同步」）—— 由 system-architect 承接；★ ⑥ **v1.3 新增（AC-S3 裁决）**：`cache._PROBE_BUDGET_CAP=5.0`（阶梯封顶，**机制常量非 env**）与"P95 ≈ 5s / 单请求 ≤15s"的量化口径若需写入 SAD §2.3 D-1，由 system-architect 回填（`cache.md` §10#11·#18 / `config.md` §2.3·§10#18 已按实现钉死）。
+>
+> ★ **v1.4 新增（r5 契约同步 · 编排层执行）**：⑦ **`API.md` / README / 变更日志同步**：① SSE 帧 `items[code].quote` 新增 **`depth`**（五档盘口 21 字段）＋ 既有 `missing`/`stale`/`errors` 元数据与 null 占位；② 主端口 JSON/HTML 响应新增 **gzip**（`Content-Encoding: gzip` + `Vary: Accept-Encoding`，`Accept-Encoding` 协商；`gzip;q=0` 不压缩）；③ 建组 400（`MAX_GROUPS` / `_FRAME_BUDGET_ERR`）与 `refresh_capacity_codes`（tick4 quote 106 / 3 域 53）容量元数据；④ `feeds[].status` 三处取值修正（`/stock/data`→`configured`、`/stock/basic_info`→`configured`、`/stock/f10`→`requires_chrome_cdp`）。⑧ **SAD 回填（system-architect）**：§2.1 INV-1b / §2.2 R-6 覆盖数值改为 `coverage = int(0.8×tick×BATCH_MAX_WORKERS/_PER_FETCH_EST)`（r5：**213/426/6400**；`coverage_codes` tick4 **106/53**）、补 **L0 档**（quote/depth 盘中 4s）、`depth` 域、`upstream_secu_code`（wire 拼写）、`_refresh_pool` 的 `refresh_epoch` 与帧发送层去重；`config.md`/`cache.md`/`stream.md`/`stock_api.md`/`server.md` **已按实现钉死**。
 
 ## v1.1 修订摘要（批次 3 · REV-DES-20260915-002）
 

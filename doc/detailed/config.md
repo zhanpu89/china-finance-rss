@@ -1,6 +1,7 @@
 # config.py 详细设计
 
-> **版本** v1.3 · **状态** 已契约同步（P7b + AC-S3 裁决回写：以 `china_finance_rss/config.py` / `cache.py` 实现为准）· **日期** 2026-09-16 · **作者/产出** task-decomposer
+> **版本** v1.4 · **状态** 已契约同步（P7b 传输层 + L0/depth + env 注册表补全：以 `china_finance_rss/config.py` 实现为准）· **日期** 2026-09-17 · **作者/产出** task-decomposer
+> **v1.4 变更（以代码为准）**：① **新增 L0 档**：`_trading_tiers()` 盘中 `{'L0':4,'L1':8,'L2':12,'L3':30,'L4':300}`，非盘中 `L0=120`；② **`quote` 由 L1 → L0**；**新增 `depth` 域**（L0、`pool_max='dedup'`、`cache_max=500`，与 quote 同拍）；③ **新增 `upstream_secu_code(code)`**（**单一权威**）：内部 canonical → 上游 wire 形（沪/深 = 前缀形 `sh600519`；北交所 = 点号大写形 `430047.BJ`）；`canonical_code` 的内部身份语义不变；④ **env 注册表补全**（§2.3 新增 7 项 + §2.7 全量表）；⑤ 新增 `_STOCK_DEPTH_URL`/`_STOCK_DEPTH_HEADERS`、`_SSE_HOT_PATH_URLS`、`warm_hosts()`；⑥ `DOMAIN_MATRIX` 现 **12 域**（原 11）。
 > **v1.3 变更（AC-S3 裁决 · 收尾契约同步）**：① `PROBE_TIMEOUT` 脚注更正——**阶梯封顶不再是 `REQUEST_TIMEOUT`**：`cache._probe_budget` 以 `cache._PROBE_BUDGET_CAP=5.0` 封顶（序列 `2→4→5`），`REQUEST_TIMEOUT(10s)` 仅用于"无失败历史 / 已老化"两支的全预算探测（§2.3 注 + §10#18）。**`PROBE_TIMEOUT` 默认值 2 不变**（仍是阶梯首级）。
 > 本版修订（P7b 契约同步，**只改文档、不改代码**）：① 新增 §2.6 **`canonical_code(code)`（冻结接口）**——股票代码归一的唯一权威（`strip + lower + 点号形映射`）；② `_is_trading_hours` 支持**休市日**（env `TRADING_HOLIDAYS`，默认空）；③ 新增 env `LISTEN_BACKLOG(128)` / `TRADING_HOLIDAYS('')` / `CDP_RESTART_THROTTLE(15)`；④ `DOMAIN_MATRIX.cache_max` 语义钉死为**终态/feed 缓存上限**，URL-cache-only 域（`plate`/`margin`/`news_url`/`longhu`）一律 `'n/a'`→`None`；⑤ §2.4 删除清单**已全部落地**（实现态），`VALID_STOCK_CODE` 保留但仅由 `canonical_code` 内部消费（`utils.py` 死 import 已删）。
 > 沿用 v1.1：REV-DES-04/06/07/08 + 逆向建议 2（删常量前置条件）+ 编排层裁决 #1/#2/#6 + 偏差 D-4/D-5 登记
@@ -16,7 +17,9 @@
 1. **全系统 TTL / 池刷新间隔 / 池上限 / 端点缓存上限 / 上游编码的单一权威来源** → `cache_policy(domain, now=None)`。
 2. **交易时段时间源** → `_is_trading_hours(now=None)` / `_trading_tiers(now=None)`（保留为唯一时间源）；支持**休市日**（env `TRADING_HOLIDAYS`）。
 3. **股票代码归一的唯一权威** → `canonical_code(code) -> str | None`（§2.6，**冻结接口**）：把 `sh600519` / `600519.SH` 两种可接受拼写折叠成同一 canonical 形，使同一只股票不会铸出两个池键 / 缓存键 / 上游 URL。
-4. **env 注册中心** → 所有 IO 预算 / 资源上限经 `os.getenv` 注册，默认值不变（兼容）。
+4. **上游 wire 形拼写的唯一权威（P7b）** → `upstream_secu_code(code) -> str`（§2.8）：把内部 canonical 身份转成 x-quote 实际接受的 `secu_code`（沪/深 = `sh600519`；北交所 = `430047.BJ`）。**身份固定、只有 URL 构造转换**。
+5. **env 注册中心** → 所有 IO 预算 / 资源上限经 `os.getenv` 注册，默认值不变（兼容）。
+6. **SSE 热路径主机派生** → `warm_hosts()`（§2.9）：从 URL 常量派生 `(scheme, host, port)` 供 `cache.warm_transport` 预热，移动上游不会使预热清单过期。
 
 ### 1.2 明确不做
 
@@ -62,14 +65,14 @@ def cache_policy(domain: str, now: float | None = None) -> dict:
 
 | 参数 | 类型 | 必填 | 默认 | 语义 |
 |------|------|------|------|------|
-| `domain` | `str` | 是 | — | `DOMAIN_MATRIX` 的键（§3.1 全表，共 11 个域） |
+| `domain` | `str` | 是 | — | `DOMAIN_MATRIX` 的键（§3.1 全表，共 **12** 个域） |
 | `now` | `float \| None` | 否 | `None` | epoch 秒；交易时段判定注入点。`None` → 使用当前时钟（`time.time()` 语义） |
 
 **返回**：每次调用**新建**的 dict（不得返回共享对象，调用方不得原地修改）。键集合固定（不得增删），`encoding` 条件出现：
 
 | 键 | 类型 | 说明 |
 |----|------|------|
-| `tier` | `str` | `'L1' \| 'L2' \| 'L3' \| 'L4'` |
+| `tier` | `str` | `'L0' \| 'L1' \| 'L2' \| 'L3' \| 'L4'` |
 | `ttl` | `int` | 秒，正数。该域缓存有效期的**权威值** |
 | `pool_refresh` | `int \| None` | 秒，恒 `>= ttl`；`None` 表示该域无去重池 |
 | `pool_max` | `int \| None` | 去重池成员上限；`None` 表示无池 |
@@ -92,12 +95,13 @@ SAD §2.1 矩阵单元格用字面量 `'n/a'` 表示"不适用"。本设计：
 
 ```python
 def _is_trading_hours(now: float | None = None) -> bool
-def _trading_tiers(now: float | None = None) -> dict   # {'L1':int,'L2':int,'L3':int,'L4':int}
+def _trading_tiers(now: float | None = None) -> dict   # {'L0':int,'L1':int,'L2':int,'L3':int,'L4':int}
 ```
 
 - `now` 为**新增可选参数**，`now=None` 行为与现状逐字一致 → 存量调用 `_is_trading_hours()` / `_trading_tiers()` **零改动**。
 - 语义（P7b 更新）：`now`（epoch 秒）→ CST（UTC+8）→ **① 若该日期 ∈ `TRADING_HOLIDAYS` ⇒ False（休市日优先于星期判定）**；② 交易日（周一至周五）且 09:30–11:30 或 13:00–15:00。
-- **盘中**：`{'L1': 8, 'L2': 12, 'L3': 30, 'L4': 300}`；**非盘中**：`{'L1': 120, 'L2': 120, 'L3': 180, 'L4': 300}`（现状保留，不改）。
+- **盘中**：`{'L0': 4, 'L1': 8, 'L2': 12, 'L3': 30, 'L4': 300}`；**非盘中**：`{'L0': 120, 'L1': 120, 'L2': 120, 'L3': 180, 'L4': 300}`（P7b 新增 L0；其余档位保持现状口径）。
+- **L0 语义（P7b）**：最快档 = 个股五档 + 实时价（`quote`/`depth`）。盘中 4s ≈ 上游实测 3.0s 一跳的 1.3×（4s 轮询仍能看到每次上游变化，同时去掉 8s 的等待浪费）；**非盘中钉在 120s**（与 L1 基线同值），使休市时段不为不动的市场多付请求。
 - 边界保持现状口径：`09:30` 含、`11:30` 含、`15:00` **不含**（`in_afternoon = 13 <= h <= 14`）、周末（weekday ≥ 5）不含。
 - **休市日（P7b 新增）**：`TRADING_HOLIDAYS`（env `TRADING_HOLIDAYS`，逗号分隔 `YYYY-MM-DD`，**默认空 frozenset**）列出的日期视为**非交易时段** ⇒ 系统不在休市日按盘中节奏轮询，且 CDP 守护**可以**重启 Chrome（`watchdog_restart_skip_reason` 的 `'trading_hours'` 分支不再命中）。默认空 ⇒ 行为与 v1.1 逐字等价。
 - `cache_policy` 内部**只调用一次** `_trading_tiers(now)` 并把结果传给 TTL 与 pool_refresh 两处派生 → 一次调用内 tier 一致（跨时段边界不撕裂）。
@@ -117,11 +121,18 @@ def _trading_tiers(now: float | None = None) -> dict   # {'L1':int,'L2':int,'L3'
 | `LISTEN_BACKLOG` | **128** | int | `LISTEN_BACKLOG` | `server.BoundedThreadPoolServer.request_queue_size`（`listen(2)` backlog） | E1 |
 | `TRADING_HOLIDAYS` | **`''`（空 frozenset）** | 逗号分隔 `YYYY-MM-DD` → `frozenset[date]` | `TRADING_HOLIDAYS` | `_is_trading_hours`（休市日）/ `cdp_engine.watchdog_restart_skip_reason` | A3/S4 |
 | `CDP_RESTART_THROTTLE` | **15** | int（秒） | `CDP_RESTART_THROTTLE` | `cdp_engine.ensure_chrome` / `full_chrome_restart` / `_maybe_reconnect`（`×2` = back-to-back 护栏） | R19 |
+| `BATCH_MAX_WORKERS` | **20** | int | `BATCH_MAX_WORKERS` | `stock_api._run_batch` / `stream._refresh_pool`（批相位有界并发） | E2/E5 |
+| `STREAM_PER_FETCH_EST` | **0.3** | float（秒） | `STREAM_PER_FETCH_EST` | `stream.refresh_capacity`（BR-STR-16 容量模型） | E2/E5 |
+| `HTTP_POOL_MAX_PER_HOST` | **24** | int | `HTTP_POOL_MAX_PER_HOST` | `cache._ConnectionPool`（每 `(scheme,host,port)` 池上限） | E1/E2 |
+| `HTTP_POOL_IDLE_TTL` | **60** | float（秒） | `HTTP_POOL_IDLE_TTL` | `cache._ConnectionPool`（空闲连接懒淘汰） | E1 |
+| `HTTP_DNS_CACHE_TTL` | **300** | float（秒） | `HTTP_DNS_CACHE_TTL` | `cache._DNSResolver`（`ttl<=0` 关闭缓存） | E1 |
+| `HTTP_WARM_CONNECTIONS` | **1** | int | `HTTP_WARM_CONNECTIONS` | `cache.warm_transport`（每 host 预拨号数） | E2 |
+| `HTTP_WARM_TIMEOUT` | **2.0** | float（秒） | `HTTP_WARM_TIMEOUT` | `cache.warm_transport`（单次拨号上限） | E2 |
 
 实现要点（逐条，避免编码者发明）：
 - `MAX_INFLIGHT` 默认必须**由 `MAX_WORKERS` 派生**（`str(MAX_WORKERS * 2)`），而非写死 `'40'`——使 `MAX_WORKERS` env 改动时默认联动（SAD §2.2 R-1①："把 `max_workers*2` 提为显式配置，使 '40' 不再是隐式推导"）。
 - `STREAM_QUEUE_BYTES_BUDGET` env 只接受**整数字节**，不做 `'128MB'` 后缀解析（不引入解析器；SAD 只定默认值 128MB）。
-- `NEG_TTL` 默认 `5`：SAD 的派生式 `min(5, cache_policy('quote')['ttl'])` 在盘中（L1=8）与非盘中（L1=120）均等于 5，故默认值和派生式等价；env 是**唯一的显式覆盖入口**（AR-3 要求 `NEG_TTL`/`PROBE_TIMEOUT` 可调）。
+- `NEG_TTL` 默认 `5`：SAD 的派生式 `min(5, cache_policy('quote')['ttl'])` 在**旧 L1 口径**（盘中 8 / 非盘中 120）下恒等于 5；**v1.4 引入 L0（盘中 4）后该派生式盘中会得 4** ⇒ **实现不再采用派生式**，`NEG_TTL` 以 env 默认 **5** 为唯一权威值（与 v1.3 实际行为一致；env 仍是唯一的显式覆盖入口，AR-3）。
   - ⚠️ **REV-DES-08 · AC-S3 口径前提**：SAD §2.3 D-1 与 `cache.md` T-CACHE-4 的稳态推导「`2s(半开探测) + 5s(负缓存) = 7s` 周期、P95 ≤ 3s」**以 `NEG_TTL = 5` 且探测预算恒为 `PROBE_TIMEOUT` 为前提**。env 覆盖 `NEG_TTL` 属**运维变更**：周期变为 `探测预算 + NEG_TTL`，`P95 ≤ 3s` 仅在 `NEG_TTL` 保持同量级时成立 ⇒ **覆盖即须重跑 AC-S3 模式 B 校准**。CI 断言一律按默认值 5 执行（不得注入覆盖）。
   - ⚠️ **P7b 追加前提（★ v1.3 已被下条更正）**：`cache._probe_budget` 的**递增阶梯**（BR-CACHE-22）使"探测预算恒为 2s"不再成立 ⇒ v1.2 曾据此把 **`P95 ≤ 3s` 的成立条件退化为"请求密度相关"**（高峰密度下仍成立；低密度下 P95 ≈ 阶梯当轮预算）。完整量化与三个备选处置见 `cache.md` §10#11。
   - ✅ **AC-S3 裁决（v1.3 更正）**：阶梯**封顶 = `cache._PROBE_BUDGET_CAP = 5.0`**（模块级机制常量，**不注册为 env**），序列为 `2→4→5`；**`REQUEST_TIMEOUT(10s)` 不再是阶梯上限**——它只在"无失败历史"与"失败段已老化（≥`_HISTORY_AGE=600s`）"两支作**一次性全预算探测**（BR-CACHE-5/20/22）。⇒ 持续黑洞稳态 ≈ `5s 探测 + 5s NEG_TTL = 10s` 周期、慢请求占比 ≈50% ⇒ **P95 ≈ 5s**；单请求上界 `≤15s` 仍恒成立。`PROBE_TIMEOUT` 在本表**仍作为阶梯首级（下限）**，**不是**上限。
@@ -129,6 +140,7 @@ def _trading_tiers(now: float | None = None) -> dict   # {'L1':int,'L2':int,'L3'
 - **`LISTEN_BACKLOG` 默认 128（P7b / BUG-P6C-03，§10#11）**：`socketserver` 默认 backlog = 5，突发连接时内核丢 SYN、客户端 ~1s（RTO）后重传，表现为 AC-E1 的 ~1.006s 长尾。必须 **≥ 它前置的两道准入闸**：主端口 `MAX_INFLIGHT`(=40) 与流端口 `MAX_STREAM_CONNS`(=100) ⇒ 128 同时留出余量。可由 env 覆盖。
 - **`TRADING_HOLIDAYS` 默认空（P7b，§10#12）**：见 §2.2；解析在**导入期**完成，非法日期（非 `YYYY-MM-DD`）⇒ `datetime.strptime` 抛 `ValueError` 冒泡（与其他 env 一致的 fail-fast）；空串/全空白 token 被跳过。
 - **`CDP_RESTART_THROTTLE` 默认 15（P7b，§10#13）**：注册在本模块，使 `cdp_engine` **不再自行读 env**（env 注册中心单一权威，`code-discipline §6`）；语义为"两次 `ensure_chrome` 启动之间的最小间隔"，并被 `full_chrome_restart` / `watchdog_restart_skip_reason` / `CDPPage._maybe_reconnect` 以 `×2` 用作 back-to-back 护栏。
+- **传输 env（P7b 补登，§2.7）**：`BATCH_MAX_WORKERS=20` / `STREAM_PER_FETCH_EST=0.3` 为 SSE 容量模型两个标定输入（`stock_api`/`stream` 在导入期各读一次后保留自己的模块级同名常量）；`HTTP_POOL_MAX_PER_HOST=24` **必须 ≥ `BATCH_MAX_WORKERS`**（否则批扇出会在池上排队，容量模型的 worker 数不可达，BUG-SSE-DEPTH-01）；`HTTP_POOL_IDLE_TTL=60` / `HTTP_DNS_CACHE_TTL=300` / `HTTP_WARM_CONNECTIONS=1` / `HTTP_WARM_TIMEOUT=2.0` 为传输调优项。
 - 全部 int 转换在**模块导入期**完成；非法值 → `ValueError` 冒泡（fail-fast，见 §6）。
 
 ### 2.4 已删除的常量清单 + 消费者迁移表（**实现态：已全部落地**）
@@ -165,7 +177,7 @@ def _trading_tiers(now: float | None = None) -> dict   # {'L1':int,'L2':int,'L3'
 
 ### 2.5 INV-1a 的实现落点
 
-> INV-1a（SAD §2.1）：对任意 domain，`ttl_url(d) == ttl_terminal(d) == cache_policy(d)['ttl']`，且 `pool_refresh(d) >= ttl(d)`；实时域（quote/fundflow/timeline）满足 `ttl(d) <= L1`。
+> INV-1a（SAD §2.1）：对任意 domain，`ttl_url(d) == ttl_terminal(d) == cache_policy(d)['ttl']`，且 `pool_refresh(d) >= ttl(d)`；实时域（quote/depth/fundflow/timeline）满足 `ttl(d) <= L1`（v1.4：quote/depth 为 L0=4 ⇒ 严格小于 L1）。
 
 三条落点（缺一即不变式不成立）：
 1. **来源保证（本模块）**：`pool_refresh = int(round(ttl * pool_refresh_factor))`，`pool_refresh_factor ∈ {1.0, 2.0}` 恒 `>= 1.0` ⇒ `pool_refresh >= ttl` 由构造保证。
@@ -186,13 +198,78 @@ def canonical_code(code: str) -> str | None:
 | `600519.SH` / `000001.SZ` / `430047.BJ`（点号形，交换前后缀大小写均可） | `sh600519` / `sz000001` / `bj430047` |
 | 非 `str` / 空 / 空白 / 长度错 / 未知交易所 | **`None`** |
 
-- **canonical 形 = 小写交易所前缀拼写**（`sh600519`/`sz000001`/`bj430047`），即上游 `secu_code` 参数的形态。
+- **canonical 形 = 小写交易所前缀拼写**（`sh600519`/`sz000001`/`bj430047`）——它是**内部身份键**（池/缓存/账本键），**不总是上游 `secu_code` 的形态**：x-quote 对沪/深接受前缀形，但北交所只接受点号大写形 `430047.BJ`（见 §2.8 `upstream_secu_code`）。**身份固定、只有 URL 构造转换。**
 - **调用方自行决定 `None` 的语义**：HTTP/流端口入口 ⇒ 拒绝（400）；CDP 不匹配 ⇒ 计 `cdp_unavailable`。本函数**不**决定拒绝策略。
 - **唯一性约束**：**每一个 ingress、每一个缓存/池/账本键都必须过此函数**（`server._handle_stock_batch` 截断前折叠、`stock_api._process_chunk` 池/缓存/账本键、`stock_api.cached_batch` 查询键、`cdp_engine.navigate_stock`/`_same_code`）。
+- **上游 URL 另过 `upstream_secu_code`（§2.8）**：所有 `?secu_code=` 构造点必须经它（`stock_api` 的 basic/detail/fundflow/timeline/depth 共 6+ 处）。
 - **响应按请求原拼写回填**：归一只用于内部定位，`build_batch_response` 仍以**请求拼写**为键（`stock_api._process_chunk` 的 `alias` 映射）。
 - **幂等**：`canonical_code(canonical_code(x)) == canonical_code(x)`（测试 CFG-T11）。
 - **线程安全**：纯函数，无共享可变状态。
 - **冻结接口**：`server.py` / `stream.py` 按此名消费；改名属 🔴 FROZEN 变更。
+
+### 2.7 env 注册中心（**全量清单**，P7b 补全）
+
+> 本表是 `config.py` 实际 `os.getenv` 面的**完整**清单（`grep os.getenv china_finance_rss/config.py` 可核对）。§2.3 是"新增/重点项"详表，本节补全此前未列项；**其它模块禁止自行 `os.getenv`**（BR-CFG-16）。
+
+```yaml
+# 服务/端口
+PORT: 8053 | STREAM_PORT: 8054 | STREAM_HOST: 127.0.0.1 | PUBLIC_BASE_URL: ''
+# 上游 CDP
+CDP_URL: http://localhost:9222 | CDP_RESTART_INTERVAL: 7200 | CDP_RESTART_THROTTLE: 15
+CDP_STOCK_PAGES: 3            # 由 stock_nav_page_names() 在调用期读取（既有唯一例外，非导入期冻结）
+# 请求/准入预算
+REQUEST_TIMEOUT: 10 | MAX_WORKERS: 20 | MAX_INFLIGHT: MAX_WORKERS*2
+MAX_HEALTH_INFLIGHT: 5 | MGMT_BODY_TIMEOUT: 5 | LISTEN_BACKLOG: 128
+# 负缓存/半开探测
+NEG_TTL: 5 | PROBE_TIMEOUT: 2
+# HTTP 传输（cache.fetch_json 唯一出口）
+HTTP_POOL_MAX_PER_HOST: 24 | HTTP_POOL_IDLE_TTL: 60.0 | HTTP_DNS_CACHE_TTL: 300.0
+HTTP_WARM_CONNECTIONS: 1 | HTTP_WARM_TIMEOUT: 2.0
+# SSE 容量模型 / 流端口
+BATCH_MAX_WORKERS: 20 | STREAM_PER_FETCH_EST: 0.3
+MAX_STREAM_CONNS: 100 | MAX_CODES_PER_SUB: 200 | MAX_DEDUP_CODES: 2000 | MAX_GROUPS: 200
+STREAM_PING_INTERVAL: 20 | STREAM_GROUP_IDLE_TTL: 300.0 | STREAM_QUEUE_BYTES_BUDGET: 134217728
+# 压缩
+GZIP_MIN_BYTES: 1024 | GZIP_COMPRESSLEVEL: 1
+# 交易历
+TRADING_HOLIDAYS: ''          # 逗号分隔 YYYY-MM-DD → frozenset[date]
+```
+
+> **冻结 vs 调用期读取**：仅 `CDP_STOCK_PAGES` 经 `stock_nav_page_names()` 在**调用期**读取（既有唯一例外）；其余全部在**导入期**求值并冻结（BR-CFG-16）。
+
+### 2.8 `upstream_secu_code(code) -> str`（**单一权威**，P7b 新增）
+
+```python
+def upstream_secu_code(code: str) -> str:
+```
+
+**职责**：把内部 canonical 身份转成 x-quote 实际接受的 `secu_code` wire 形（实测 `https://x-quote.cls.cn/quote/stock/{basic,volume,detail}`）：
+
+| canonical 输入 | 返回（wire 形） | 说明 |
+|----------------|-----------------|------|
+| `sh600519` / `sz000001` | 原样（前缀小写形） | 沪/深；点号形（`600519.SH`）会返回全 null 空壳 |
+| `bj430047` / `bj832000` | `430047.BJ` / `832000.BJ` | 北交所；前缀形 `bj430047` 返回空壳（曾使 BSE 报价全空而沪深正常） |
+| 非 canonical（无法归一） | **原样返回** | 入口已校验；本函数不抛 |
+
+- **唯一性**：URL 构造是**唯一**转换点；身份（池/缓存/账本键）保持 canonical 不变 ⇒ 一只股票仍只有一个身份（P1-6）。
+- **幂等**：`upstream_secu_code(upstream_secu_code(x))` 对合法 canonical 输入保持不变（`430047.BJ` 经 `canonical_code` 折叠回 `bj430047` 再转回）。
+- **消费者**（本模块提供、`stock_api` 消费）：`fetch_cls_basic_info` / detail / fundflow / timeline / `fetch_cls_stock_depth` / `_direct_fetch` 等全部 `?secu_code=` 构造点。
+
+### 2.9 `warm_hosts() -> tuple` + SSE 热路径 URL 常量（P7b 新增）
+
+```python
+_SSE_HOT_PATH_URLS = (_BASIC_INFO_BASE_URL, _STOCK_DEPTH_URL,
+                      _STOCK_DETAIL_BASE_URL, _FUNDFLOW_BASE_URL, _TIMELINE_BASE_URL)
+
+def warm_hosts() -> tuple[tuple[str, str, int], ...]:
+    """去重、稳定序地返回热路径上游的 (scheme, hostname, port)。"""
+
+_STOCK_DEPTH_URL    = 'https://x-quote.cls.cn/quote/stock/volume'   # 五档盘口；field=five 取 21 字段
+_STOCK_DEPTH_HEADERS = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.cls.cn/stock'}
+```
+
+- `warm_hosts()` 从 `_SSE_HOT_PATH_URLS` **派生**（URL 常量 = 单一权威）⇒ 移动上游不会让预热清单过期；`cache.warm_transport` 消费。
+- 端口缺省按 scheme 推（https→443 / http→80）；同 host 去重；插入序稳定。
 ---
 
 ## 3. 数据结构
@@ -206,7 +283,8 @@ def canonical_code(code: str) -> str | None:
 # pool_max: 'dedup'(=MAX_DEDUP_CODES) | 'fixed:<n>' | 'n/a'
 # cache_max: int | 'n/a'      # 终态缓存 / feed 缓存上限；URL-cache-only 域 = 'n/a'（P7b）
 DOMAIN_MATRIX:
-  quote:        [L1, 1.0,              1.0, 'dedup',       2000]   # stock/data, basic_info, 实时价
+  quote:        [L0, 1.0,              1.0, 'dedup',       2000]   # ★ v1.4：stock/data, basic_info, 实时价（L1→L0）
+  depth:        [L0, 1.0,              1.0, 'dedup',        500]   # ★ v1.4 新增：五档盘口（与 quote 同拍，独立池/终态上限）
   fundflow:     [L1, 1.0,              1.0, 'dedup',       2000]
   timeline:     [L1, 1.0,              1.0, 'dedup',       2000]
   plate:        [L2, 1.0,              1.0, 'fixed:200',  'n/a']   # cls/hotplate, cls/plate（URL 缓存，P7b）
@@ -230,12 +308,14 @@ _DOMAIN_ENCODING: {longhu: 'gbk'}   # 仅声明非 utf-8 的域；cache_policy �
 ### 3.2 `cache_policy` 返回值（yaml，逐域实值）
 
 ```yaml
+L0:  {trading: 4,   off: 120}
 L1:  {trading: 8,   off: 120}
 L2:  {trading: 12,  off: 120}
 L3:  {trading: 30,  off: 180}
 L4:  {trading: 300, off: 300}
 # 以下为 trading / off 两组实值（pool_refresh = ttl × factor；'n/a'→null；'dedup'→2000；'fixed:N'→N）
-quote:        {tier: L1, ttl: [8,120],     pool_refresh: [8,120],     pool_max: 2000, cache_max: 2000}
+quote:        {tier: L0, ttl: [4,120],     pool_refresh: [4,120],     pool_max: 2000, cache_max: 2000}
+depth:        {tier: L0, ttl: [4,120],     pool_refresh: [4,120],     pool_max: 2000, cache_max: 500}
 fundflow:     {tier: L1, ttl: [8,120],     pool_refresh: [8,120],     pool_max: 2000, cache_max: 2000}
 timeline:     {tier: L1, ttl: [8,120],     pool_refresh: [8,120],     pool_max: 2000, cache_max: 2000}
 plate:        {tier: L2, ttl: [12,120],    pool_refresh: [12,120],    pool_max: 200,  cache_max: null}
@@ -263,12 +343,18 @@ sector:       {tier: L4, ttl: [604800,604800], pool_refresh: null,   pool_max: 2
 VALID_STOCK_CODE: <re.Pattern>        # r'^(sh|sz|bj)\d{6}$|^\d{6}\.(BJ|SH|SZ)$', re.IGNORECASE
                                       # 保留公开名；当前唯一消费者 = canonical_code（stream 已迁走）
 _DOTTED_STOCK_CODE: <re.Pattern>      # r'^(\d{6})\.(SH|SZ|BJ)$', re.IGNORECASE（canonical 专用）
-canonical_form: 小写交易所前缀形       # sh600519 / sz000001 / bj430047
+canonical_form: 小写交易所前缀形       # sh600519 / sz000001 / bj430047（内部身份键）
+upstream_wire_form:                   # ★ v1.4：x-quote 的 secu_code 形（仅 URL 构造用）
+  sh|sz: 同 canonical（前缀小写形）
+  bj:    '<6位>.BJ'（点号大写形）      # 由 upstream_secu_code() 派生
 invalid_result: None                  # 非 str / 空 / 空白 / 长度错 / 未知交易所
 
 TRADING_HOLIDAYS: frozenset[datetime.date]   # env 解析结果；默认 frozenset()（空）
 _parse_holidays(raw):                         # 逗号分隔 YYYY-MM-DD；空白 token 跳过；
                                               # 非法日期 ⇒ datetime.strptime 抛 ValueError（导入期 fail-fast）
+
+_SSE_HOT_PATH_URLS: tuple[str, ...]           # ★ v1.4：热路径上游 URL 常量（单一权威）
+warm_hosts():                                 # ★ v1.4：去重 (scheme, hostname, port) 元组，插入序稳定
 ```
 ---
 
@@ -293,6 +379,10 @@ _parse_holidays(raw):                         # 逗号分隔 YYYY-MM-DD；空白
 | **BR-CFG-15** | `LISTEN_BACKLOG` 必须 **≥ 其前置的两道准入闸**（主端口 `MAX_INFLIGHT`、流端口 `MAX_STREAM_CONNS`）；默认 128 | E1 / BUG-P6C-03 |
 | **BR-CFG-16** | 所有 env 常量（含 `CDP_RESTART_THROTTLE`）**只在 config.py 读取**；其它模块经 `config.X` 引用，**禁止自行 `os.getenv`** | env 注册中心 / code-discipline §6 |
 | **BR-CFG-17** | `VALID_STOCK_CODE` 保留为公开名，但**只由 `canonical_code` 内部消费**（`stream.py` 已迁移）；建议改用 `\Z` 锚定（`$` 会匹配末尾换行前，但 `canonical_code` 先 `strip()` ⇒ 生产无逃逸面） | §10#14 |
+| **BR-CFG-18** | **L0 档（P7b）**：`_trading_tiers()` 盘中 `{'L0':4,...}`、非盘中 `{'L0':120,...}`；L0 = 最快档（`quote`/`depth`，个股五档+实时价），盘中 4s ≈ 上游实测 3.0s 一跳的 1.3×。**L0 是 tier 基值，不改变 `pool_refresh >= ttl` 不变式** | SAD §2.1 分层 / PRD 实时价 |
+| **BR-CFG-19** | **`depth` 域（P7b）**：`('L0', 1.0, 1.0, 'dedup', 500)` —— 与 `quote` **同拍（同 tier）**但**自有池与终态缓存上限**（`pool_max=2000` 去重池、`cache_max=500` 终态）；`quote` 同步由 L1 升为 L0 | 五档盘口并入实时价刷新 / SAD §2.1 |
+| **BR-CFG-20** | **`upstream_secu_code` 是上游 wire 形的唯一权威（P7b）**：沪/深 = 前缀形（= canonical）；北交所 = `<6位>.BJ`；非 canonical 输入原样返回。**所有 `?secu_code=` 构造点必须经它**；内部身份仍用 `canonical_code`（两者职责分离，禁止混用） | P1-6 / BSE 空壳修复 |
+| **BR-CFG-21** | **`warm_hosts()` 从 URL 常量派生（P7b）**：`_SSE_HOT_PATH_URLS` 是单一权威，`warm_hosts()` 去重并稳定排序返回 `(scheme, hostname, port)`；端口缺省按 scheme 推。移动上游不得留下手工主机字面量 | 预热清单不腐烂 / BUG-SSE-DEPTH-01 |
 
 ## 5. 伪代码
 
@@ -317,6 +407,14 @@ MAX_HEALTH_INFLIGHT      = int(os.getenv('MAX_HEALTH_INFLIGHT', '5'))
 STREAM_PING_INTERVAL     = int(os.getenv('STREAM_PING_INTERVAL', '20'))   # 原为硬编码 20
 LISTEN_BACKLOG           = int(os.getenv('LISTEN_BACKLOG', '128'))        # P7b：listen(2) backlog
 CDP_RESTART_THROTTLE     = int(os.getenv('CDP_RESTART_THROTTLE', '15'))   # P7b：cdp_engine 不再读 env
+# v1.4 补登（传输 + 容量模型，§2.7 全量）
+HTTP_POOL_MAX_PER_HOST   = int(os.getenv('HTTP_POOL_MAX_PER_HOST', '24'))
+HTTP_POOL_IDLE_TTL       = float(os.getenv('HTTP_POOL_IDLE_TTL', '60'))
+HTTP_DNS_CACHE_TTL       = float(os.getenv('HTTP_DNS_CACHE_TTL', '300'))
+HTTP_WARM_CONNECTIONS    = int(os.getenv('HTTP_WARM_CONNECTIONS', '1'))
+HTTP_WARM_TIMEOUT        = float(os.getenv('HTTP_WARM_TIMEOUT', '2.0'))
+BATCH_MAX_WORKERS        = int(os.getenv('BATCH_MAX_WORKERS', '20'))
+STREAM_PER_FETCH_EST     = float(os.getenv('STREAM_PER_FETCH_EST', '0.3'))
 
 # 3) DOMAIN_MATRIX（§3.1 字面量）+ 编码表
 DOMAIN_MATRIX = {...}
@@ -337,6 +435,35 @@ def canonical_code(code):
         return f'{dotted.group(2).lower()}{dotted.group(1)}'   # 600519.SH → sh600519
     lowered = text.lower()
     return lowered if VALID_STOCK_CODE.match(lowered) else None
+
+
+def upstream_secu_code(code):
+    """BR-CFG-20：唯一权威上游 wire 形（沪/深前缀形；北交所点号大写形）。"""
+    canon = canonical_code(code)
+    if canon is None:
+        return code                       # 入口已校验；不抛
+    if canon.startswith('bj'):
+        return f'{canon[2:]}.BJ'          # bj430047 → 430047.BJ
+    return canon                          # sh600519 / sz000001
+
+
+# 3d) SSE 热路径主机（v1.4，§2.9/BR-CFG-21）
+_STOCK_DEPTH_URL = 'https://x-quote.cls.cn/quote/stock/volume'
+_SSE_HOT_PATH_URLS = (_BASIC_INFO_BASE_URL, _STOCK_DEPTH_URL, _STOCK_DETAIL_BASE_URL,
+                      _FUNDFLOW_BASE_URL, _TIMELINE_BASE_URL)
+
+
+def warm_hosts():
+    """从 _SSE_HOT_PATH_URLS 派生 (scheme, hostname, port)，去重、稳定序。"""
+    seen, out = set(), []
+    for url in _SSE_HOT_PATH_URLS:
+        parsed = urlsplit(url)
+        key = (parsed.scheme, parsed.hostname,
+               parsed.port or (443 if parsed.scheme == 'https' else 80))
+        if key not in seen:
+            seen.add(key)
+            out.append(key)
+    return tuple(out)
 
 
 # 3c) 休市日（P7b，§2.2/BR-CFG-14）
@@ -368,8 +495,8 @@ def _is_trading_hours(now=None):          # now: epoch 秒 | None
 
 def _trading_tiers(now=None):
     if _is_trading_hours(now):
-        return {'L1': 8, 'L2': 12, 'L3': 30, 'L4': 300}
-    return {'L1': 120, 'L2': 120, 'L3': 180, 'L4': 300}
+        return {'L0': 4, 'L1': 8, 'L2': 12, 'L3': 30, 'L4': 300}   # ★ v1.4：新增 L0
+    return {'L0': 120, 'L1': 120, 'L2': 120, 'L3': 180, 'L4': 300}
 ```
 
 ```python
@@ -440,20 +567,24 @@ def cache_policy(domain, now=None):
 
 | 用例 | 断言（精确） | 覆盖 AC |
 |------|-------------|---------|
-| **CFG-T1** policy 一致性白盒 | `for d in DOMAIN_MATRIX:` 断言 `p['ttl'] == p['pool_refresh']`（`pool_refresh is not None` 时 `>=`）；`ttl > 0`；`tier in {L1..L4}`；键集合 == `{tier,ttl,pool_refresh,pool_max,cache_max}` ∪（longhu 的 `encoding`） | A3 |
-| **CFG-T2** 实时域 ≤ L1 | 盘中 `cache_policy(d, now=盘中时刻)['ttl'] <= 8`；非盘中 `<= 120`（对 quote/fundflow/timeline） | A3 |
-| **CFG-T3** 断崖收敛 | 盘中/非盘中分别断言 `feed.ttl == L3`（30/180）、`quote.ttl == L1`（8/120）、`announcement.ttl == L3`、`longhu.ttl == 300`、`margin.ttl == 600` | A4/E9/E6 |
+| **CFG-T1** policy 一致性白盒 | `for d in DOMAIN_MATRIX:` 断言 `p['ttl'] == p['pool_refresh']`（`pool_refresh is not None` 时 `>=`）；`ttl > 0`；`tier in {L0..L4}`；键集合 == `{tier,ttl,pool_refresh,pool_max,cache_max}` ∪（longhu 的 `encoding`） | A3 |
+| **CFG-T2** 实时域 ≤ L0/L1 | 盘中 `cache_policy('quote'/'depth', now=盘中)['ttl'] == 4`（L0）；`fundflow/timeline <= 8`（L1）；非盘中三者 `<= 120` | A3 |
+| **CFG-T3** 断崖收敛 | 盘中/非盘中分别断言 `feed.ttl == L3`（30/180）、`quote.ttl == L0`（4/120）、`depth.ttl == L0`、`announcement.ttl == L3`、`longhu.ttl == 300`、`margin.ttl == 600` | A4/E9/E6 |
 | **CFG-T4** `now` 注入与边界 | `now` 取 09:30/11:30/13:00/14:59/15:00/周六 → tier 基值符合 BR-CFG-1；`15:00` 判非盘中 | A3 |
 | **CFG-T5** 未知域 | `cache_policy('nope')` → `KeyError` 且消息含全部合法域名 | R16 防复发 |
 | **CFG-T6** 返回值隔离 | 两次调用 `p1 is not p2`；改 `p1['ttl']` 不影响 `p2` | 线程安全 |
 | **CFG-T7** longhu 编码 | `cache_policy('longhu')['encoding'] == 'gbk'`；其余域无 `encoding` 键 | E9 |
 | **CFG-T8** `'n/a'` 归一化 | `news_url.pool_max is None`；`longhu.cache_max is None`；矩阵单元格仍为 `'n/a'` | ADR-008 |
-| **CFG-T9** env 默认不变 | 无 env 时 `MAX_INFLIGHT == MAX_WORKERS*2`、`MAX_GROUPS==200`、`MGMT_BODY_TIMEOUT==5`、`STREAM_QUEUE_BYTES_BUDGET==134217728`、`NEG_TTL==5`、`PROBE_TIMEOUT==2`、`MAX_HEALTH_INFLIGHT==5`、`STREAM_PING_INTERVAL==20`、`LISTEN_BACKLOG==128`、`CDP_RESTART_THROTTLE==15`、`TRADING_HOLIDAYS==frozenset()` | S7/S3 |
+| **CFG-T9** env 默认不变 | 无 env 时 `MAX_INFLIGHT == MAX_WORKERS*2`、`MAX_GROUPS==200`、`MGMT_BODY_TIMEOUT==5`、`STREAM_QUEUE_BYTES_BUDGET==134217728`、`NEG_TTL==5`、`PROBE_TIMEOUT==2`、`MAX_HEALTH_INFLIGHT==5`、`STREAM_PING_INTERVAL==20`、`LISTEN_BACKLOG==128`、`CDP_RESTART_THROTTLE==15`、`TRADING_HOLIDAYS==frozenset()`、`HTTP_POOL_MAX_PER_HOST==24`、`HTTP_POOL_IDLE_TTL==60.0`、`HTTP_DNS_CACHE_TTL==300.0`、`HTTP_WARM_CONNECTIONS==1`、`HTTP_WARM_TIMEOUT==2.0`、`BATCH_MAX_WORKERS==20`、`STREAM_PER_FETCH_EST==0.3` | S7/S3/E1/E2 |
 | **CFG-T10** 无裸 TTL 字面量 | 对 `cache.py/stock_api.py/market_api.py/server.py/stream.py` 扫描 `ttl=` 实参来源为 `cache_policy(...)` | R16 |
 | **CFG-T11** `canonical_code` 归一/幂等（P7b） | 两形等价：`{'sh600519','SH600519','600519.SH','600519.sh'}` → `'sh600519'`；`sz000001`/`000001.SZ` → `'sz000001'`；`bj430047`/`430047.BJ` → `'bj430047'`；**幂等** `canonical_code(canonical_code(x)) == canonical_code(x)`；非法集（非 str/`''`/`'  '`/`'60051'`/`'600519.XX'`/`'us600519'`）→ `None`；**不抛** | BR-CFG-13 |
 | **CFG-T12** 休市日（P7b） | `patch TRADING_HOLIDAYS` 为某周三 ⇒ `_is_trading_hours(该日 10:00)` 为 False；默认空 ⇒ 同刻为 True；`TRADING_HOLIDAYS == frozenset()` | BR-CFG-14 / A3 |
 | **CFG-T13** `cache_max` 语义（P7b） | `plate/margin/news_url/longhu` 的 `cache_max is None`（矩阵单元格仍为 `'n/a'`）；`quote/f10/feed/sector` 等为 int；`feed.cache_max == 100` | §10#15 |
 | **CFG-T14** backlog 约束（P7b） | `LISTEN_BACKLOG >= MAX_INFLIGHT` 且 `>= MAX_STREAM_CONNS` | E1 |
+| **CFG-T15** L0 档与 depth 域（v1.4） | `_trading_tiers(盘中) == {'L0':4,'L1':8,'L2':12,'L3':30,'L4':300}`、非盘中 `L0==120`；`quote.tier=='L0'` 且 `depth.tier=='L0'`；`depth.ttl==4/120`、`depth.cache_max==500`、`depth.pool_max==2000`；`DOMAIN_MATRIX` 含 12 个域 | SAD 分层 / E6 |
+| **CFG-T16** `upstream_secu_code`（v1.4） | `upstream_secu_code('bj430047')=='430047.BJ'`、`('bj832000')=='832000.BJ'`；`('sh600519')=='sh600519'`、`('sz000001')=='sz000001'`；`('430047.BJ')=='430047.BJ'`（幂等经 canonical）、`('600519.SH')=='sh600519'`；非法输入原样返回且**不抛** | BR-CFG-20 / BSE |
+| **CFG-T17** `warm_hosts()`（v1.4） | 返回值 == `(('https','x-quote.cls.cn',443),)`（当前 5 个热路径 URL 同主机 ⇒ 去重为 1 项）；`_SSE_HOT_PATH_URLS` 变更 ⇒ 结果随之变化（从常量派生，无手工字面量） | BR-CFG-21 |
+| **CFG-T18** env 全量注册（v1.4） | `grep os.getenv china_finance_rss/config.py` 的 env 名集合 == §2.7 清单；除 `stock_nav_page_names()` 外无调用期读取 | BR-CFG-16 |
 
 ## 9. AC 追溯矩阵
 
@@ -471,6 +602,10 @@ def cache_policy(domain, now=None):
 | **`TRADING_HOLIDAYS`（BR-CFG-14）** | **AC-A3**（TTL 分层在休市日不按盘中节奏）/ **AC-S4**（CDP 窗口） |
 | **`LISTEN_BACKLOG`（BR-CFG-15）** | **AC-E1**（连接长尾 ≤5ms） |
 | **`cache_max` URL-only 域归一（§3.1/§10#15）** | **AC-E6**（域缓存有界口径不误导运维） |
+| **L0 档 + `depth` 域（v1.4 / BR-CFG-18/19）** | 实时价/五档同拍刷新（SSE L0 tick=4s）/ **AC-E6**（`depth.cache_max=500`） |
+| **`upstream_secu_code`（v1.4 / BR-CFG-20）** | 北交所报价/五档不再空壳（BSE wire 形）/ P1-6 |
+| **`warm_hosts()`（v1.4 / BR-CFG-21）** | **AC-E2**（`cache.warm_transport` 冷进程预热清单不腐烂） |
+| **传输 env（v1.4 / §2.3·§2.7）** | **AC-E1/E2**（池/空闲 TTL/DNS TTL/预热参数为 `cache` 侧的权威值供给） |
 
 ---
 
@@ -479,7 +614,7 @@ def cache_policy(domain, now=None):
 | # | 项 | SAD 表述 | 实际代码 / 本文裁决 | 处置 |
 |---|----|---------|-------------------|------|
 | 1 | `CACHE_TTL` 消费者 | Q3② 列为「cache.py 默认 ttl、`utils.warm_jin10`、`server._get_or_fetch_feed`」 | `utils.py` 的 `CACHE_TTL` **死 import 已删除**（P7b 实况）；`warm_jin10` 的真实依赖是 `fetch_json(ttl=None)` 默认值 | 已按实际落点补全迁移表（§2.4）；SAD 表述差异登记，不改 SAD |
-| 2 | `NEG_TTL = min(5, cache_policy('quote')['ttl'])` | SAD §2.3 | L1 ∈ {8,120} ⇒ 派生值恒为 5，与 env 默认 5 等价 | 采用 env 默认 5 + 派生式注释（§2.3） |
+| 2 | `NEG_TTL = min(5, cache_policy('quote')['ttl'])` | SAD §2.3 | 旧 L1 口径下派生值恒为 5；**v1.4 `quote` 升 L0（盘中 4）后派生式会得 4** ⇒ 实现以 env 默认 **5** 为唯一权威（不再采用派生式） | 采用 env 默认 5 + 本注（§2.3） |
 | 3 | 负缓存「过期即清」（§4.3）vs 半开探测需"失败历史"（§2.3） | 两处张力 | 裁决：**门禁**过期即失效（不阻塞）；**条目**保留失败历史直至成功或被上限淘汰（细节见 `cache.md` §4） | 标注，不改 SAD；`cache.md` 给出可断言口径 |
 | 4 | `cache_policy` 返回值 `'n/a'` | 示例字面量 | 返回 `None`，矩阵保留 `'n/a'`（§2.1/BR-CFG-11） | 标注，唯一改动点在 `_materialize` |
 | 5 | `feed` 返回示例未列 `pool_max` | §2.1 示例 | 键集合固定 5 键恒在（§2.1） | 已统一 |
@@ -496,10 +631,17 @@ def cache_policy(domain, now=None):
 | 16 | **P7b · `canonical_code` 新增（冻结接口）** | SAD 未定义代码归一函数（仅在 §2.4/§3 隐含"代码校验"） | 新增模块级函数（§2.6）作为**唯一权威**；`server`/`stream`/`stock_api`/`cdp_engine` 均按此名消费 | 消除"同一股票多个身份"（池/缓存/URL 分裂 + CDP 精确比较只匹配一种拼写，P1-6）；属**新增**接口（🟠 STABLE 内），无破坏 |
 | 17 | **P7b · `_parse_holidays` 内部名** | 未提 | 新增模块级私有函数（导入期解析，非法日期 `ValueError`） | 实现细化，登记不改 SAD |
 | 18 | **v1.3 · 阶梯封顶归属（AC-S3 裁决）** | SAD §2.3 D-1 只说"半开探测用 `PROBE_TIMEOUT`"，未定义阶梯与其上限 | `cache._probe_budget` 的封顶是 **`cache._PROBE_BUDGET_CAP=5.0`（本模块机制常量，不注册 env）**；`REQUEST_TIMEOUT` 只用于无历史/老化两支的全预算探测（§2.3 注） | v1.2 曾记"`REQUEST_TIMEOUT` 为阶梯封顶"——**与实现不符**（`cache.py:84/171`）。⇒ `PROBE_TIMEOUT` 语义不变（仍为 env 可调首级），新增的是 cache 侧机制常量；**config 侧无行为变更、无新增 env** |
+| 19 | **v1.4 · L0 档** | SAD §2.1 分层为 L1..L4（无 L0） | 新增 `L0`（盘中 4 / 非盘中 120），`quote` 由 L1 升 L0（BR-CFG-18） | 上游实测 3.0s 一跳；L0 使实时价同拍刷新，非盘中钉 120s 不多付请求 |
+| 20 | **v1.4 · `depth` 域** | SAD §2.1 矩阵无 `depth`（五档盘口在实现中并入 quote 拍） | 新增 `depth` 行 `('L0',1.0,1.0,'dedup',500)`：与 quote 同 tier、**自有池与终态上限**（BR-CFG-19） | 五档与实时价同拍但生命周期/容量不同 ⇒ 独立域；`stock_api._basic_depth_pool/_basic_depth_cache` 消费其 `pool_max`/`cache_max`（不再是死设置，P2-9） |
+| 21 | **v1.4 · `upstream_secu_code`（单一权威）** | SAD §2.1 只说 `canonical_code` 归一；未区分"内部身份"与"上游 wire 形" | 新增函数（§2.8/BR-CFG-20）：沪/深=前缀形；**北交所=点号大写形 `430047.BJ`**；非 canonical 原样返回 | 北交所前缀形返回全 null 空壳（BSE 报价全空而沪深正常）；身份固定、只 URL 构造转换 ⇒ 不破坏"一股票一身份" |
+| 22 | **v1.4 · 传输/容量 env 补登** | SAD §3 config 行未列 `BATCH_MAX_WORKERS`/`STREAM_PER_FETCH_EST`/`HTTP_POOL_*`/`HTTP_DNS_CACHE_TTL`/`HTTP_WARM_*` | 已在实现中注册（§2.3 + §2.7 全量清单/BR-CFG-16） | env 注册中心完整可核对；SAD §3 由 system-architect 回填 |
+| 23 | **v1.4 · `_SSE_HOT_PATH_URLS`/`warm_hosts()`/`_STOCK_DEPTH_URL`** | SAD 未定义传输预热清单 | 新增（§2.9/BR-CFG-21）：从 URL 常量派生主机键，供 `cache.warm_transport` | 手工主机字面量会与上游常量脱钩 ⇒ 预热失效（冷启动 ~4.2s 扇出） |
 
 > **编排层裁决回执（2026-09-15，6 项）**：#1 `'n/a'`→`None` ✅（本文已按此写）；#2 负缓存「门禁过期失效、条目保留作失败历史」✅（且为 AC-S3 模式 B 必要条件，见 `cache.md` §4.2/§10#1）；#3 feed LRU 落 `cache.py` ✅（`cache.md` §2.4 保持并补双检语义）；#4 metrics 增 `key=`/`reset()` ✅；#5 `cache_hit_ratio` 发布点 ✅（`cache.md` §5.2 补齐实现）；#6 `STREAM_PING_INTERVAL` env 化 ✅（本文 §2.3/§10#8，SAD 将补列）。
 
 > **P7b 契约同步回执（2026-09-16）**：本版 §2.2/§2.3/§2.4/§2.6/§3.1/§3.2/§3.4/§4/§5/§8/§9 已与 `china_finance_rss/config.py` 逐项对齐。**遗留项（不在本 agent 范围，交编排层）**：① 若需 SAD 补齐 `LISTEN_BACKLOG` / `TRADING_HOLIDAYS` / `CDP_RESTART_THROTTLE` 三行 env（§10#11/#12/#13）与 `canonical_code`（§10#16），由 system-architect 回填；② `VALID_STOCK_CODE` 的 `\Z` 锚定属可选技术债（§10#14），当前无实际逃逸面。
+
+> **v1.4 契约同步回执（2026-09-17，以 `config.py` 为准）**：§2.2（L0）/§2.6（身份 vs wire）/§2.7（env 全量）/§2.8（`upstream_secu_code`）/§2.9（`warm_hosts`）/§3.1·§3.2（`quote`→L0 + `depth`）/§3.4/§4 BR-CFG-18..21/§5/§8 CFG-T15..T18/§9/§10#19..23 已对齐。**遗留项（交编排层/system-architect）**：SAD §2.1 补 L0 档与 `depth` 域、§2.8 `upstream_secu_code`、§3 config 行补传输/容量 env（§10#19..22）。
 
 ## 11. 交付自检
 
@@ -515,6 +657,9 @@ def cache_policy(domain, now=None):
 - [x] **v1.2（P7b）**：`canonical_code` 冻结接口（§2.6/§3.4/BR-CFG-13/CFG-T11）；`TRADING_HOLIDAYS` 休市日（§2.2/§3.4/BR-CFG-14/CFG-T12）；`LISTEN_BACKLOG`(128)/`CDP_RESTART_THROTTLE`(15) 入 §2.3 env 表
 - [x] **v1.2（P7b）**：§3.1/§3.2 `plate`/`margin` 的 `cache_max` 已改 `'n/a'`→`null`（BR-CFG-5/§10#15）；§2.4 删除清单标注为**已落地实现态**（前置条件已解除）
 - [x] **v1.3（AC-S3 裁决）**：`PROBE_TIMEOUT` 脚注更正为"阶梯首级；封顶 = `cache._PROBE_BUDGET_CAP=5.0`"（§2.3 注 / §10#18）；默认值与 env 面**零变更**
+- [x] **v1.4**：L0 档 + `quote`→L0 + `depth` 域（§2.2/§3.1/§3.2/BR-CFG-18/19/§10#19·20；CFG-T15）
+- [x] **v1.4**：`upstream_secu_code` 单一权威（§2.8/§3.4/BR-CFG-20/CFG-T16；§2.6 身份 vs wire 措辞更正）
+- [x] **v1.4**：env 注册表补全（§2.3 补 7 项 + §2.7 全量清单/BR-CFG-16/CFG-T18）与 `_SSE_HOT_PATH_URLS`/`warm_hosts()`/`_STOCK_DEPTH_URL`（§2.9/BR-CFG-21/CFG-T17）
 
 
 

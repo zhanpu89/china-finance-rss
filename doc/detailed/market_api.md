@@ -1,6 +1,8 @@
 # market_api.py 详细设计
 
-> **版本** v1.3 · **状态** 已契约同步（P7b + AC-S3 裁决回写：以 `china_finance_rss/market_api.py` 实现为准）· **日期** 2026-09-16 · **作者/产出** task-decomposer
+> **版本** v1.4 · **状态** 已契约同步（P7b 传输层批次：以 `china_finance_rss/market_api.py` 实现为准）· **日期** 2026-09-17 · **作者/产出** task-decomposer
+> **v1.4 变更（以代码为准）**：① **§3.3 `margin.cache_max` 由 `16` 更正为 `null`**——`config.DOMAIN_MATRIX` 的 `margin` 行为 `[L4, 2.0, 2.0, 'fixed:16', 'n/a']`，`cache_policy('margin')['cache_max']` 归一化为 `None`（margin 仅走共享 URL 缓存，`cache.MAX_CACHE_SIZE=2000` 全局约束；per-domain 上限是运维无法生效的死设置，`config.md` §3.1/§10#15 已钉死）。★ **这是本模块本轮唯一的"描述与代码不符"项**。
+> **本轮逐项核对结论（清单 vs 代码）**：`fetch_margin` 透传 `deadline`（BR-MKT-11）✅ 已在 v1.3 记载；`zb` 归一为 float ✅；`_to_float` 逐字段容错 ✅；`_DEGRADED_LATEST` 全 `0.0` ✅。**四项均与代码一致，无需改动**（`market_api.py` 代码零变更）。
 > **v1.3 变更（AC-S3 裁决 · 收尾契约同步）**：⑤ **BR-MKT-11 的"预算封顶"更正**——`fetch_json` 的 `deadline` 透传使 `urlopen` 超时 = `cache._effective_timeout` = `min(_fetch_budget(url), max(0.05, 剩余 deadline))`；其中 `_fetch_budget` 的**阶梯封顶是 `cache._PROBE_BUDGET_CAP=5.0`**（**不是** `REQUEST_TIMEOUT(10s)`）。`REQUEST_TIMEOUT` 仅在"无失败历史 / 已老化"两支作冷/全预算探测 ⇒ **margin 在故障期的单次回源上界实际 ≤5s**（旧表述"可跑满固定 `REQUEST_TIMEOUT`"仅在冷预算期成立）。
 > 本版修订（P7b 契约同步，**只改文档、不改代码**）：① `fetch_margin` 把 `deadline` **透传给 `fetch_json`**（`urlopen` 超时随预算收缩）；② `zb` **归一为 float**、`_transform_margin` **逐字段容错**（新增 `_to_float`）；③ **`_DEGRADED_LATEST` 为 `0.0`**（float）；④ 新增 **`VALID_MARKETS` 枚举闸**（URL 拼装前拒绝非法 `market`）。
 > 沿用 v1.1：REV-DES-20260915-002（REV-DES-11 裁决回执 + REV-DES-20 owner 引据更正）
@@ -160,7 +162,7 @@ cache_policy('margin'):
   ttl: 600                 # 盘中/非盘中均 600（= L4 300 × factor 2.0）→ 与旧 _MARGIN_CACHE_TTL 数值等价
   pool_refresh: 1200       # 本模块不使用（无去重池）
   pool_max: 16             # 本模块不使用（无去重池）
-  cache_max: 16            # 本模块不使用（无终点缓存；URL 缓存由 cache.py 统一 2000 上限）
+  cache_max: null          # ★ v1.4 更正（原记 16）：URL-cache-only 域 ⇒ 'n/a'→None（条目由 cache.MAX_CACHE_SIZE 全局约束）
 ```
 
 > 本模块**不消费** `pool_refresh`/`pool_max`/`cache_max`：margin 是单键端点、无按码去重池、无终点缓存。TTL 由 `fetch_json` 的 URL 缓存生效。
@@ -346,6 +348,7 @@ def handle_margin(market='99'):
 | **MKT-T10** `market` 枚举闸（P7b） | `fetch_margin('1x')` / `fetch_margin('')` / `fetch_margin('99/../admin')` ⇒ 各抛 `FetchError('upstream_error')`、`fetch_json` **未被调用**；合法四值均通过 | §2.1 / 注入防护 |
 | **MKT-T11** 期限透传（P7b） | patch `fetch_json` 捕获关键字 ⇒ `deadline` 实参 == 传入值（非 `None`）；`fetch_margin('99', deadline=D)` 在 `D` 未过时**不**抛、调 `fetch_json(deadline=D)` | BR-MKT-11 / AC-E2 |
 | **MKT-T12** 逐字段容错（P7b） | 单行含 `rzye='--'`、`rqye='junk'`、`zb='1.23'`、另一行 `items[1]='xxx'`（非 dict） ⇒ **不抛**、`rzye/rqye == 0.0`、`zb == 1.23`（float）、**另一行的有效值保留**、无 `_error`；`_to_float` 对 `None/'--'/''/None→0.0`、`'1.5'→1.5`、`False/{}→0.0` | BR-MKT-12 |
+| **MKT-T13** `margin.cache_max` 归一（v1.4） | `cache_policy('margin')['cache_max'] is None`（矩阵单元格仍为 `'n/a'`）；`pool_max == 16`、`pool_refresh == 1200`、`ttl == 600` 不变 | §3.3 / `config.md` CFG-T13 |
 
 ---
 
@@ -380,6 +383,7 @@ def handle_margin(market='99'):
 | 7 | **P7b · `deadline` 透传；★ v1.3 封顶更正** | SAD §2.3 D-2 只要求"期限可传入" | 除入口快速判定外，**把 `deadline` 交给 `fetch_json`**（BR-MKT-11） | 否则通过入口判定的调用仍可跑满 `_fetch_budget`（**v1.3 更正**：故障期该值 = `_PROBE_BUDGET_CAP=5s`，冷期/老化期才是 `REQUEST_TIMEOUT=10s`），越过调用方预算 |
 | 9 | **v1.3 · `_PROBE_BUDGET_CAP` 对 margin 的影响（AC-S3 裁决）** | SAD §2.3 D-1 未定义探测阶梯上限 | BR-MKT-11 的封顶表述更正为 `cache._PROBE_BUDGET_CAP=5.0`（**非** `REQUEST_TIMEOUT`）⇒ margin 故障期单次回源 ≤5s；**本模块代码零改动**（约束来自 `cache` 侧） | 与 `cache.md` §4.2 BR-CACHE-22 / `config.md` §2.3 注保持单一口径；旧表述会让读者以为故障期 margin 仍可 10s 回源 |
 | 8 | **P7b · 逐字段数值容错 + `_to_float`** | SAD 未定义脏字段行为 | 每个数值单元格独立 `_to_float`（`None`/`'--'`/`''`/junk ⇒ `0.0`）；`items[i]` 非 dict ⇒ 空 dict；`zb` 归一 float（BR-MKT-12） | 旧版 `float(val)` 抛出后 `handle_margin` 把**整份**响应降级为零 ⇒ 一行脏数据抹掉全部有效行（`_DEGRADED_LATEST` 由此改为全 `0.0`，类型与正常体一致） |
+| 10 | **v1.4 · `margin.cache_max` 更正** | SAD §2.1 矩阵 `margin` 曾给 16；本文 v1.3 §3.3 仍作 `16` | 实现为 `'n/a'`⇒`None`：margin **只走共享 URL 缓存**，per-domain 上限是运维无法生效的死设置（与 `plate`/`news_url`/`longhu` 同口径） | ★ 本轮唯一"描述与代码不符"项（`config.py:350` vs 本文 v1.3 §3.3）。语义澄清，**本模块不消费 `cache_max`** ⇒ 无行为回归（`config.md` §3.1/§10#15/CFG-T13 已钉死） |
 
 ---
 
@@ -395,6 +399,7 @@ def handle_margin(market='99'):
 - [x] **v1.2（P7b）**：`VALID_MARKETS` 枚举闸（§2.1/BR-MKT-10/MKT-T10）；`deadline` 透传 `fetch_json`（§1.4/§2.1/BR-MKT-11/MKT-T11）
 - [x] **v1.2（P7b）**：`_to_float` 逐字段容错 + `zb` 归一 float + `_DEGRADED_LATEST` 全 `0.0`（§2.3/§2.5/§3.1/§3.2/BR-MKT-12/MKT-T12）——§5 伪代码与实现逐行一致
 - [x] **v1.3（AC-S3 裁决）**：BR-MKT-11 封顶更正为 `cache._PROBE_BUDGET_CAP=5.0`（§2.1 参数表 / §4.1 BR-MKT-11 / §10#7·#9）；故障期 margin 单次回源上界 **5s**（冷期/老化期 10s）；MKT-T11 断言不变但预算期望值更正
+- [x] **v1.4**：§3.3 `margin.cache_max` 由 `16` 更正为 `null`（BR 无改动；§10#10/MKT-T13）；逐项核对 `deadline` 透传/`zb` float/`_to_float`/`_DEGRADED_LATEST=0.0` **四项均与代码一致**
 
 ---
 
@@ -406,4 +411,5 @@ def handle_margin(market='99'):
 | v1.1 | 2026-09-15 | 按 `doc/review/数据层三模块_详细设计评审_专家版.md`（REV-DES-20260915-002）修订：**P1 REV-DES-11**（§10#1 改裁决回执：设计保持、PRD 回改）；**P2 REV-DES-20**（BR-MKT-8/§10#5 owner 引据更正，`metrics.md` 同步权归编排层）。**代码/契约形态不变** |
 | v1.2 | 2026-09-16 | P7b 契约同步（以 `market_api.py` 实现为准）：`deadline` 透传 `fetch_json`（BR-MKT-11）·`VALID_MARKETS` 枚举闸（BR-MKT-10）·`_to_float` 逐字段容错 + `_DEGRADED_LATEST` 全 `0.0`（BR-MKT-12）。**未改代码** |
 | v1.3 | 2026-09-16 | **AC-S3 裁决收尾同步**：BR-MKT-11 的"预算封顶"更正为 `cache._PROBE_BUDGET_CAP=5.0`（非 `REQUEST_TIMEOUT`）⇒ 故障期 margin 单次回源 ≤5s（§2.1/§4.1 BR-MKT-11/§10#7·#9/§11）。**未改代码**（约束来自 `cache` 侧） |
+| v1.4 | 2026-09-17 | **P7b 传输层批次契约同步（以 `market_api.py` 实现为准）**：§3.3 `margin.cache_max` 由 `16` 更正为 `null`（URL-cache-only 域归一；§10#10/MKT-T13）。逐项核对 `deadline` 透传、`zb` float、`_to_float` 容错、`_DEGRADED_LATEST=0.0` **均与代码一致**。**未改代码** |
 | v1.2 | 2026-09-16 | **P7b 契约同步（以 `market_api.py` 实现为准）**：`VALID_MARKETS` 枚举闸（拼 URL 前拒绝）·`deadline` 透传 `fetch_json`·`_to_float` 逐字段容错 + `zb` 归一 float + `_DEGRADED_LATEST` 全 `0.0`。新增 BR-MKT-10..12、MKT-T10..T12、§10#6..8。**未改代码** |

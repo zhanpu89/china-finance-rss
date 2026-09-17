@@ -51,7 +51,7 @@ description: |
 
 **评审报告的关键不是列了 50 条意见，而是让开发者知道哪 3 条最重要。** 在报告开头给出 1-2 句话的总评。
 
-**输出命名：** 常规评审输出 `doc/review/{项目/模块名}_代码评审.md`（必须带 `_代码评审` 后缀）。与 review-expert 的 `{类型}评审_专家版.md` 命名隔离，避免共用 `doc/review/` 目录时撞名。P7 漂移模式例外，输出 `doc/tester/drift-report.md`。报告结构按 `templates/report-template.md` 组织（含 CR 编号 / 评审概要 / Dim 0-6 详情 / 修复建议）。
+**输出命名：** 常规评审输出 `doc/review/{项目/模块名}_代码评审.md`（必须带 `_代码评审` 后缀）。与 review-expert 的 `{类型}评审_专家版.md` 命名隔离，避免共用 `doc/review/` 目录时撞名。P7 漂移模式例外，输出 `doc/review/drift-report.md`。报告结构按 `templates/report-template.md` 组织（含 CR 编号 / 评审概要 / Dim 0-6 详情 / 修复建议）。
 
 **修复副作用逆向检查（P5b 评审收到 `>>SIDE-EFFECT:` 时强制）：** 修复轮最危险的不是原 Bug 没修好，是**修好了一个引入了另一个**。入参携带 `>>SIDE-EFFECT: {文件}:{影响点} → {行为变化}` 清单时，对每个受影响点做逆向假设：
 - 这个行为变化会**破坏哪个既有调用方**？（改了校验 → 谁在依赖旧的宽松行为；改了返回语义 → 下游怎么用旧值）
@@ -102,13 +102,13 @@ description: |
 
 **P7 漂移检测模式（编排器标记 `>>MODE: drift`，仅特殊场景独立触发；常规随 P5b 合并走 review+drift）**
 
-跳过 Dim 0-6，执行漂移工作流（产物：`doc/tester/drift-report.md`）：
+跳过 Dim 0-6，执行漂移工作流（产物：`doc/review/drift-report.md`）：
 
 **D1 加载变更：** 读 `>>SCOPE:` 标记确定被修改的模块/端点/文件
 **D2 契约核对：** 对每个变更模块，对照详设检查接口签名、字段、BR 实现的一致性
 **D3 DOC_SYNC 追溯：** 验证 P5a 输出的 `>>DOC_SYNC:` 标记对应的文档已更新
 **D4 规范合规：** 新代码遵守项目规则和编码规范
-**D5 报告：** 输出 `doc/tester/drift-report.md`。无漂移时空报告含"✅ 无漂移"
+**D5 报告：** 输出 `doc/review/drift-report.md`。无漂移时空报告含"✅ 无漂移"
 
 **P8 对抗性盲审模式（编排器标记 `>>MODE: blind` — pipeline 终点前的最终门禁）**
 

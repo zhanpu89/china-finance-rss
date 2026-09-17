@@ -1,6 +1,7 @@
 # cache.py 详细设计
 
-> **版本** v1.3 · **状态** 已契约同步（P7b + AC-S3 裁决回写：以 `china_finance_rss/cache.py` 实现为准）· **日期** 2026-09-16 · **作者/产出** task-decomposer
+> **版本** v1.4 · **状态** 已契约同步（P7b 传输层 + AC-S3 裁决回写：以 `china_finance_rss/cache.py` 实现为准）· **日期** 2026-09-17 · **作者/产出** task-decomposer
+> **v1.4 变更（P7b 传输层契约同步 · 以代码为准）**：① 新增 **HTTP 连接复用池** `_ConnectionPool`（按 `(scheme,host,port)` 分桶、每 host 有界 `HTTP_POOL_MAX_PER_HOST`、空闲 `HTTP_POOL_IDLE_TTL` 懒淘汰、**失效连接丢弃并重试一次**、`_lock` 只护桶记账、连接/关闭/IO 全在锁外）与 **进程内 DNS TTL 缓存** `_DNSResolver`（TTL=`HTTP_DNS_CACHE_TTL`、失败不缓存、命中 IP 连不上时 `force` 重解析、异常回退 `socket.create_connection`）；② **`cache.urlopen(req, timeout=None)`** 为模块级可打桩缝，返回可 `read()` 的上下文管理器，4xx/5xx 抛 `HTTPError`、传输失败抛 `URLError`（跟随 ≤5 次重定向）——`urllib.request.urlopen` 已不再是取数出口；③ 新增公开函数 **`warm_transport(hosts=None, count=None, timeout=None)`**（走池、**仅握手不发业务请求**、总函数绝不抛）；④ `fetch_json` 新增**第 6 位关键字形参 `refresh_epoch`**（刷新轮起点；`_cache_fresh` 判定 `entry['time'] >= epoch`，`None` 时逐字不变；写入仍用完整域 TTL）；⑤ §1.3 import 面更正：**`json` 已删除**（v1.3 已登记），实际新增 `http.client` 与 `urllib.parse`。**其余 v1.3 口径（`_PROBE_BUDGET_CAP=5.0` / follower 余量 / metrics 锁外发布 / leader `try/finally`）保持不变。**
 > **v1.3 变更（AC-S3 裁决 · 收尾契约同步）**：⑦ **半开探测阶梯封顶 = `_PROBE_BUDGET_CAP = 5.0`（新增模块级机制常量）**，序列 `2→4→5`（**不再是** `2→4→8→REQUEST_TIMEOUT(10)`）；`REQUEST_TIMEOUT` 仅用于"无失败历史 / 已老化（≥`_HISTORY_AGE=600s`）"两支的**一次性全预算探测**（§1.1#1 / §4.2 BR-CACHE-22 / §5.1 / §8 T-CACHE-4·4c·4d·21 / §10#11·#18 / §2.5）。**推导**：持续黑洞稳态 ≈ `5s 探测 + 5s NEG_TTL = 10s` 周期、慢请求占比 ≈50% ⇒ **P95 ≈ 5s**；单请求上界 `≤15s` 恒成立。
 > 本版修订（P7b 契约同步，**只改文档、不改代码**）：① `fetch_json` 新增第 5 位形参 `deadline`，且**超期闸门位于正缓存命中之后**；② `_probe_budget` 按 `fail_count` **递增阶梯**（v1.3 更正：`2→4→5`，`_PROBE_BUDGET_CAP` 封顶）；③ follower 等待窗口 = `_fetch_budget + _FOLLOWER_WAIT_MARGIN(1.0s)`，`event.wait` 后复查 `_fetch_inflight`（leader 存活 ⇒ `upstream_timeout`）；④ metrics **一律在业务锁释放后**发布（`_publish_url_stats`），命中路径（段①/③双检/④）统一计 hit；⑤ leader 令牌获取纳入 `try/finally`；⑥ `import json` 已删（§10#6 收口）。
 > 沿用 v1.1：REV-DES-01（plate stagger 表口径）/02（`cache_hit_ratio`）/03（`logging`）/04（依赖图）/09（段 3 try 范围）+ 逆向建议 1（失败历史老化）+ 逆向建议 2（删常量前置）+ 编排层裁决 #2/#3/#5 + 偏差 D-1/D-2/D-3/D-7 登记
@@ -13,7 +14,8 @@
 
 ### 1.1 职责
 
-1. **唯一上游取数入口** `fetch_json(url, headers, ttl, encoding, deadline)`：URL 缓存 + leader/follower 防击穿 + **负缓存（失败状态层）** + **四段式语义**。超时预算三分：**冷预算 / 老化全预算 = `REQUEST_TIMEOUT(10s)`**，**递增半开探测阶梯 = `2→4→_PROBE_BUDGET_CAP(5s)`**（★ v1.3 / AC-S3 裁决，§4.2 BR-CACHE-22）。
+1. **唯一上游取数入口** `fetch_json(url, headers, ttl, encoding, deadline, refresh_epoch)`：URL 缓存 + leader/follower 防击穿 + **负缓存（失败状态层）** + **四段式语义**。超时预算三分：**冷预算 / 老化全预算 = `REQUEST_TIMEOUT(10s)`**，**递增半开探测阶梯 = `2→4→_PROBE_BUDGET_CAP(5s)`**（★ v1.3 / AC-S3 裁决，§4.2 BR-CACHE-22）。
+1. **HTTP 传输子层（v1.4 新增，唯一出口）** `urlopen(req, timeout=None)`：per-`(scheme,host,port)` keep-alive 连接池 + 进程内 DNS TTL 缓存 + 重定向跟随；`warm_transport()` 在进程启动期预热 DNS/连接（**不发业务请求**）。`fetch_json` 只经此出口触网（§2.7 / §4.5 BR-CACHE-26..30）。
 2. **URL 缓存** `cache`：真 LRU（`OrderedDict`）+ 双触发过期清扫 + 上限 2000。
 3. **feed 缓存** `feed_cache`：真 LRU + 双触发清扫 + 上限由 `cache_policy('feed')['cache_max']` 派生。
 4. **批量响应组装（纯函数）** `build_batch_response(requested, results, errors, dropped)`：下划线保留键契约的唯一组装点。
@@ -36,8 +38,9 @@ forbiddenImports: server, stream, stock_api, market_api
 reason: cache.py 必须保持纯缓存/契约层，反向依赖上层模块会形成环
 ```
 
-**允许 import**：标准库 `collections`(OrderedDict) / `json` / `logging` / `random` / `socket` / `threading` / `time` / `urllib.request` / `urllib.error`；包内 `config`、`metrics`。
+**允许 import**：标准库 `collections`(OrderedDict) / `http.client` / `logging` / `random` / `socket` / `threading` / `time` / `urllib.error` / `urllib.parse`(urljoin, urlsplit) / `urllib.request`(Request)；包内 `config`、`metrics`。
 > `logging` 为 **REV-DES-03 补列**：本模块 §2.3/§5.4/§6 使用 `log.warning(...)`，须在模块顶部 `log = logging.getLogger('cache')`（§5.1 初始化段）。`socket` 为 D-3 新增（供 `_classify` 判定超时），已在 tech-stack allowlist。
+> ★ **v1.4 import 面更正（以代码为准）**：`json` **已删除**（v1.3 §10#6 登记，本模块从未使用）；**新增 `http.client`**（`_STALE_CONNECTION_ERRORS` 的 `RemoteDisconnected`/`BadStatusLine`/… + `responses` 表）与 **`urllib.parse`**（`_pool_request` 的 `urlsplit`、`urlopen` 的 `urljoin`）。原 `urllib.request.urlopen` 改为 `Request` + 本模块 `urlopen`（§2.7）。
 
 **依赖方向**（**REV-DES-04 澄清**：`←` 表「分层顺序」，**非 import 关系**）：本模块 `import config` + `import metrics`（二者互不依赖，均为 Layer 0 叶子）→ 上承 `stock_api`/`market_api`/`stream` → `server`。`metrics` 零业务依赖、**不 import config**，图中与 config 并列而非其上：`config` ‖ `metrics` ← **`cache`** ← `stock_api`/`market_api`/`stream` ← `server`。
 
@@ -45,11 +48,12 @@ reason: cache.py 必须保持纯缓存/契约层，反向依赖上层模块会�
 
 ## 2. 接口契约
 
-### 2.1 `fetch_json(url, headers=None, ttl=None, encoding='utf-8', deadline=None) -> str`
+### 2.1 `fetch_json(url, headers=None, ttl=None, encoding='utf-8', deadline=None, refresh_epoch=None) -> str`
 
 ```python
 def fetch_json(url: str, headers: dict | None = None, ttl: int | None = None,
-               encoding: str = 'utf-8', deadline: float | None = None) -> str:
+               encoding: str = 'utf-8', deadline: float | None = None,
+               refresh_epoch: float | None = None) -> str:
 ```
 
 | 参数 | 类型 | 默认 | 语义 |
@@ -59,6 +63,7 @@ def fetch_json(url: str, headers: dict | None = None, ttl: int | None = None,
 | `ttl` | `int \| None` | `None` | 秒。`None` → 取 `cache_policy('news_url')['ttl']`（L3）。**调用方应传 `cache_policy(d)['ttl']`** |
 | `encoding` | `str` | `'utf-8'` | `resp.read().decode(encoding, errors='replace')`。**新增形参**（D-5）；GBK 上游显式传 `'gbk'` |
 | `deadline` | `float \| None` | `None` | **P7b 新增第 5 位形参**：绝对 epoch 秒的端到端期限。`None` ⇒ 不设期限（仅用 `_fetch_budget` 兜底）。非 `None` 时 leader 网络超时 = `min(_fetch_budget(url), max(0.05, deadline-now))`，follower 等待窗口同样被该时刻截断。**位置参数追加，既有 18 处调用点零改动** |
+| `refresh_epoch` | `float \| None` | `None` | **v1.4 新增第 6 位关键字形参**：计划刷新轮的起点 epoch 秒。非 `None` 时正缓存命中额外要求 `entry['time'] >= refresh_epoch`（§4.5 BR-CACHE-31 / `_cache_fresh`），以消除"TTL==tick 相位耦合"（名义 4s 实际 8s 刷新）。**段①/③/④ 三处判定一致**；`None`（全部 REST/prefetch 调用方）语义逐字不变；**写入仍用完整域 TTL** |
 
 **返回**：`str`（已解码正文）。
 **抛出**：`FetchError`（**唯一失败类型**，见 2.2）。成功路径不再返回 `None`。
@@ -92,6 +97,8 @@ def fetch_json(url: str, headers: dict | None = None, ttl: int | None = None,
                                **不再重入选举**（删除 fall-through 三段路径）
 ```
 
+> ★ **v1.4 · `refresh_epoch` 新鲜度下限（以代码为准）**：段 ①/③/④ 的正缓存判定一律调 `_cache_fresh(entry, refresh_epoch)`（§5.1），即 `now < expires_at` **且**（`refresh_epoch is None or entry['time'] >= refresh_epoch`）。计划刷新路径（`stream`）把**本轮起点**作为该域 `refresh_epoch` 传入，使上一轮 δ 秒后写入的条目在本轮不再算命中——否则 TTL 恰等于 tick 时每两轮才真回源一次（4s 名义刷新退化为 8s）。**写路径不感知 `refresh_epoch`**：`_cache_put` 仍写完整域 TTL，故 REST/预取在窗口内仍被正缓存保护。
+
 **行为变更登记（相对现状）**
 
 | 变化 | 现状 | 目标 | 依据 |
@@ -108,6 +115,8 @@ def fetch_json(url: str, headers: dict | None = None, ttl: int | None = None,
 | **follower 等待窗口** | `event.wait(_fetch_budget(url))` | `+ _FOLLOWER_WAIT_MARGIN(1.0s)`，并按 deadline 截断（P7b，§4.2 BR-CACHE-23） | leader 取数后的发布（微秒级）不得与等待窗口竞态而把 follower 推入 gap 分支 |
 | **metrics 发布点** | 持锁内发布（残留） | **一律锁外**：`_publish_url_stats` / `_record_failure` / `_clear_negative` / `feed_cache_put`（P7b，§4.2 BR-CACHE-24） | `/healthz` 快照不得阻塞取数热路径 |
 | **leader 令牌** | 预算/选举异常可泄漏 `_fetch_inflight` 条目 | 选举后的全部逻辑置于 `try/finally`，`finally` 内 `pop` + `event.set()`（P7b，§4.2 BR-CACHE-25） | 泄漏会使该 URL 此后每次请求都沦为超时 follower |
+| **触网出口**（v1.4） | `urllib.request.urlopen(req, timeout=...)`（每请求新建 TCP+TLS **并重解析 DNS**） | 本模块 `urlopen(req, timeout=None)`：keep-alive 池 + DNS TTL 缓存（§2.7 / §4.5） | 2C2G 实测单请求 ~340ms（DNS ~176ms + 握手 ~78ms）→ 复用后 ~48ms；50 码冷扇出 ~4.2s（超 0.8×tick 预算） |
+| **正缓存新鲜度**（v1.4） | 仅 `now < expires_at` | 追加可选 `refresh_epoch` 下限：`entry['time'] >= epoch`（`None` ⇒ 逐字不变） | TTL==tick 时相位耦合使名义 4s 刷新实际 8s（每两轮回源一次） |
 ### 2.2 `FetchError(kind, *, url=None, cause=None)`
 
 ```python
@@ -195,6 +204,13 @@ def feed_cache_put(path: str, xml: str, ttl: int) -> None
 | `_record_hit_locked()` | — | **新增**（P7b）：持 `_cache_lock` 时自增 `_cache_stats['hit']`，返回 `(hit, miss, entries)` 三元组 | 段①/③双检/④ 三处命中统一计数 |
 | `_publish_url_stats(hit, miss, entries, metric_key='url')` | — | **新增**（P7b）：**锁外**发布 `cache_entries` + `cache_hit_ratio` | metrics 发布的唯一入口（S1-4 落点） |
 | `import json` | 未使用 | **已删除**（§10#6 收口） | 清洁化；不涉契约 |
+| `_cache_fresh(entry, refresh_epoch=None)` | — | **新增**（v1.4）：`now < expires_at` 且（`refresh_epoch is None or entry['time'] >= refresh_epoch`）；段①/③/④ 唯一新鲜度判定 | 新增内部名；`None` ⇒ 与旧行为逐字一致 |
+| `urlopen(req, timeout=None)` | 直用 `urllib.request.urlopen` | **新增**（v1.4）：**模块级**池化 drop-in，测试打桩的唯一网络缝（签名 `(req, timeout=None)`） | 公开名；§2.7 / BR-CACHE-26..30 |
+| `warm_transport(hosts=None, count=None, timeout=None) -> int` | — | **新增**（v1.4）：走池预热 DNS+连接，**仅握手不发业务请求**，总函数（绝不抛） | 公开名；`server.main` 启动守护线程调用（§2.7 / BR-CACHE-30） |
+| `_ConnectionPool(max_per_host, idle_ttl)` / `_pool` | — | **新增**（v1.4）：per-key keep-alive 池；`_pool` 为模块级单例（`HTTP_POOL_MAX_PER_HOST` / `HTTP_POOL_IDLE_TTL`） | 新增内部名 |
+| `_DNSResolver(ttl)` / `_resolver` | — | **新增**（v1.4）：`getaddrinfo` TTL 缓存；`_resolver` 单例（`HTTP_DNS_CACHE_TTL`） | 新增内部名 |
+| `_pool_request(method, url, headers, timeout)` / `_send(conn, method, path, headers)` / `_open_connection(key, timeout)` / `_PooledResponse` / `_PooledHTTP(S)Connection` / `_CachedDNSConnection` / `_close_quietly` | — | **新增**（v1.4）：池化请求实现（§2.7） | 新增内部名；无外部引用 |
+| `_MAX_REDIRECTS(5)` / `_REDIRECT_CODES` / `_STALE_CONNECTION_ERRORS` | — | **新增**（v1.4）：重定向与失效连接判定（机制常量） | 新增内部名 |
 
 ### 2.6 `fetch_json` 全部调用点兼容策略（**18 处，逐一列名**）
 
@@ -233,7 +249,55 @@ def feed_cache_put(path: str, xml: str, ttl: int) -> None
 
 > 兼容性结论：**签名向后兼容（编码零改动）**；**行为按 D1-D4 变更**（TTL 来源统一、失败类型变 `FetchError`、LRU 取代 FIFO、新增负缓存）。所有调用点的 `except Exception` 继续覆盖；`utils.warm_jin10_headers` 已 `except Exception: pass` ✓。
 > `/ths/longhu` 计数口径：两个不同 URL 各回源 1 次、共 2 次；连续 10 次请求其余 9 次命中（AC-E9）。
+
+### 2.7 HTTP 传输子层（v1.4 新增，**唯一触网出口**）
+
+> `fetch_json` 是项目唯一的 HTTP egress；自 v1.4 起它经本模块的 `urlopen` 触网，而**不再**直用 `urllib.request.urlopen`。动机（`config.py` 实测注）：2C2G 节点上单请求 ~340ms，其中 DNS ~176ms、TCP+TLS 握手 ~78ms；keep-alive + DNS 缓存后复用请求 ~48ms。50 码 quote 冷扇出实测 ~4.2s（超 0.8×tick 预算），故新增进程启动预热。
+
+```python
+def urlopen(req, timeout=None) -> _PooledResponse:
+    """池化 drop-in（http/https）；测试打桩的唯一网络缝。
+
+    入参为 fetch_json 构造的 Request（也接受 URL 字符串）；返回带 read() 的
+    上下文管理器，status/headers 可用。跟随 ≤ _MAX_REDIRECTS(5) 次重定向
+    （301/302/303/307/308 + Location）；status >= 400 抛 urllib.error.HTTPError；
+    传输失败抛 urllib.error.URLError —— 与 stdlib 契约一致（_classify 与全部调用方依赖它）。
+    """
+
+def warm_transport(hosts=None, count=None, timeout=None) -> int:
+    """进程启动预热 DNS + 池化连接（总函数，绝不抛，不发业务请求）。
+
+    hosts 缺省取 config.warm_hosts()；count 缺省 HTTP_WARM_CONNECTIONS，
+    timeout 缺省 HTTP_WARM_TIMEOUT。逐 host 拨号，失败静默换下一个 host；
+    返回本次新置入池中的连接数。由 server.main 的启动守护线程调用。
+    """
+```
+
+**池化语义（`_ConnectionPool`，键 = `(scheme, host, port)`）**
+
+| 行为 | 规则 |
+|------|------|
+| **获取** | 有空闲 ⇒ LIFO 取出一条（`reuse`）；`conn.sock.settimeout(timeout)` 失败（checkout 与复用之间已死）⇒ 释放槽位并改走新建 |
+| **有界** | 每 key 至多 `HTTP_POOL_MAX_PER_HOST` 条**池内**连接；达到上限且无空闲 ⇒ 开一条短命 **ephemeral** 连接、请求后即关（**不排队**——排队会把池本要保留的并发重新串行化；ephemeral 从不回池） |
+| **淘汰** | 空闲超过 `HTTP_POOL_IDLE_TTL` 的连接在下一次 checkout 时**懒关闭**（无 reaper 线程）；`release` 时 `len(bucket) > max_per_host` 亦溢出关闭 |
+| **愈合** | 请求抛 `_STALE_CONNECTION_ERRORS`（`RemoteDisconnected`/`BadStatusLine`/`CannotSendRequest`/`CannotSendHeader`/`ConnectionResetError`/`BrokenPipeError`）⇒ 丢弃该连接；**仅当本次是复用（reused）且首次尝试**才在新连接上**重试一次**（真失败的上游不会被翻倍预算） |
+| **锁纪律** | `_pool._lock` **只护桶记账**（`_idle`/`_live`/`stats`）；`connect`/`close`/请求 IO **一律在锁外** |
+| **统计** | `_pool.stats = {reuse, new, stale, evicted, ephemeral}`（仅供观测，非 metrics 注册名） |
+
+**DNS 语义（`_DNSResolver`）**
+
+- 以 `socket.getaddrinfo(host, port, type=SOCK_STREAM)` 填充缓存，键 `(host, port)`，TTL = `HTTP_DNS_CACHE_TTL`；上限 `_MAX_ENTRIES=256`（超限先清过期、再按插入序淘汰）。
+- **失败不缓存**；`ttl <= 0` 完全关闭缓存。
+- 连接仍按**主机名**拨号（TLS 的 SNI 与证书主机名校验不变）——只缓存 name→address。
+- 缓存地址连不上时，`connect` 以 `force=True` **重解析一次**再试；解析器异常/空结果 ⇒ 回退 `socket.create_connection`（由 stdlib 抛 gaierror）。
+
+**预热语义（`warm_transport`）**
+
+- 逐 host、逐 count 次 `_pool.acquire` → 立即 `_pool.release`（**只握手，不发业务请求**）；某 host 拨号失败 ⇒ `break` 换下一 host；已复用到既有热身连接或池满（ephemeral）⇒ `break`（该 host 无需再加）。
+- **总函数**：`warm_hosts()` 取值异常亦被吞（返回 0）；调用方（启动守护线程）不等待结果、不 gate 启动或 `/healthz`。
+
 ---
+
 
 ## 3. 数据结构
 
@@ -320,6 +384,29 @@ _HISTORY_AGE: 600.0                             # 失败历史老化窗口（机
 _PROBE_BUDGET_CAP: 5.0                          # ★ v1.3：半开探测阶梯封顶（机制常量，AC-S3 裁决；非 env）
 _FOLLOWER_WAIT_MARGIN: 1.0                      # follower 等待余量（机制常量，P7b）
 MAX_CACHE_SIZE: 2000 / CACHE_JITTER: 0.2 / _CACHE_SWEEP_INTERVAL: 60.0
+_PROBE_BUDGET_CAP / _FOLLOWER_WAIT_MARGIN / _HISTORY_AGE 见上（机制常量，非 env）
+```
+
+### 3.6 HTTP 传输状态（v1.4，yaml）
+
+```yaml
+_pool: _ConnectionPool(HTTP_POOL_MAX_PER_HOST=24, HTTP_POOL_IDLE_TTL=60.0)
+  _lock:    threading.Lock          # 只护桶记账；connect/close/IO 全在锁外（BR-CACHE-27）
+  _idle:    dict[key -> [(conn, idle_since), ...]]   # key = (scheme, host, port)；LIFO
+  _live:    dict[key -> int]        # 该 key 的池内连接数（≤ max_per_host）
+  stats:    {reuse, new, stale, evicted, ephemeral}  # 观测用，非 metrics 注册名
+
+_resolver: _DNSResolver(HTTP_DNS_CACHE_TTL=300.0)
+  _ttl:     float                   # <=0 ⇒ 禁用缓存
+  _lock:    threading.Lock          # 只护 _cache 读写
+  _cache:   dict[(host, port) -> (expires_at, infos_tuple)]
+  _MAX_ENTRIES: 256                 # 超限先清过期，再按插入序淘汰
+
+# 传输常量（机制常量，非域 TTL，非 env）
+_MAX_REDIRECTS: 5
+_REDIRECT_CODES: {301, 302, 303, 307, 308}
+_STALE_CONNECTION_ERRORS: (RemoteDisconnected, BadStatusLine, CannotSendRequest,
+                           CannotSendHeader, ConnectionResetError, BrokenPipeError)
 ```
 
 ---
@@ -351,6 +438,17 @@ MAX_CACHE_SIZE: 2000 / CACHE_JITTER: 0.2 / _CACHE_SWEEP_INTERVAL: 60.0
 | **BR-CACHE-24** | **metrics 一律锁外发布（P7b / S1-4）**：`_publish_url_stats(hit, miss, entries, metric_key)` / `_record_failure` 的 `incr`+`set_gauge` / `_clear_negative` 的 `set_gauge` / `feed_cache_put` 的 `set_gauge` 均在**释放对应业务锁之后**调用。锁内只做"读取需要一致的少量标量"（如 `_cache_stats` 的 hit/miss、`len(cache)`）。**命中路径（段①/段③双检/段④）统一经 `_record_hit_locked()` 计 hit**——只计段①会按"并发/慢上游流量"的比例把 `cache_hit_ratio` 系统性压低，而该 gauge 存在的意义正是观测这部分流量。 |
 | **BR-CACHE-25** | **leader 令牌不泄漏（P7b）**：选举成功后的**全部**逻辑（`_effective_timeout` 求值、网络 IO、cache 写回）置于 `try/finally`；`finally` 内先 `with _cache_lock: _fetch_inflight.pop(url, None)`，再 `event.set()`（释锁后 set，避免唤醒的 follower 立即争锁）。⇒ 任何异常（含预算计算与 `Request` 构造）都不会让该 URL 的选举令牌永久残留；否则此后每次请求都会沦为"等待一个已死的 leader"并超时。 |
 
+### 4.5 HTTP 传输（v1.4 新增，BR-CACHE-26..31）
+
+| 编号 | 规则 |
+|------|------|
+| **BR-CACHE-26** | **触网唯一出口 = `cache.urlopen(req, timeout=None)`**：`http`/`https` 之外 scheme 或缺失 host ⇒ `URLError`；返回对象须可 `read()` 且支持 `with`；**status ≥ 400 抛 `HTTPError`**（带 `resp_headers`）；传输异常统一包成 `URLError`（保持 `_classify` 与既有调用方的 stdlib 契约）。跟随即 `_REDIRECT_CODES`（301/302/303/307/308）且 `Location` 非空，≤ `_MAX_REDIRECTS(5)`（超限抛 `HTTPError`）。 |
+| **BR-CACHE-27** | **池化连接**：按 `(scheme, host, port)` 分桶；空闲复用 LIFO；每桶**池内**连接 ≤ `HTTP_POOL_MAX_PER_HOST`（达上限且无空闲 ⇒ ephemeral，用完即关、**不排队**）；空闲 > `HTTP_POOL_IDLE_TTL` 懒淘汰；`release` 溢出（`len(bucket) > cap`）关闭。 |
+| **BR-CACHE-28** | **失效连接丢弃并重试一次**：请求抛 `_STALE_CONNECTION_ERRORS` ⇒ `note_stale` + `discard`；**仅当 `reused and attempt == 0`** 才在新连接上重试一次（`for attempt in (0, 1)`），否则 `URLError`。超时（`socket.timeout`/`TimeoutError`）与 `URLError`/`OSError`/`HTTPException` 一律不重试（直接丢弃并上抛）。 |
+| **BR-CACHE-29** | **DNS TTL 缓存**：仅缓存 `getaddrinfo` 结果（键 `(host, port)`，TTL `HTTP_DNS_CACHE_TTL`，上限 `_MAX_ENTRIES=256`）；**失败不缓存**；`ttl <= 0` 禁用；仍按主机名拨号（SNI/证书校验不变）；缓存地址连接失败 ⇒ `force=True` 重解析一次；解析异常/空结果 ⇒ 回退 `socket.create_connection`。 |
+| **BR-CACHE-30** | **`warm_transport` 为总函数**：**仅拨号不发业务请求**；`hosts`/`count`/`timeout` 分别缺省 `warm_hosts()` / `HTTP_WARM_CONNECTIONS` / `HTTP_WARM_TIMEOUT`；单 host 失败静默换下一个；已热身/池满即 `break`；返回新入池连接数；**绝不抛**。 |
+| **BR-CACHE-31** | **`refresh_epoch` 新鲜度下限（v1.4）**：正缓存命中判定统一为 `_cache_fresh(entry, refresh_epoch)`：`now < expires_at` **且**（`refresh_epoch is None or entry['time'] >= refresh_epoch`）。段①/③/④ 一律传同一 `refresh_epoch`；`None` ⇒ 与 v1.3 行为逐字一致。**写路径不感知该参数**（`_cache_put` 仍写完整域 TTL）⇒ REST/预取在窗口内仍受正缓存保护。目的：消除"TTL == tick"时条目跨轮复用造成的相位耦合（名义 4s 刷新实际 8s）。 |
+
 ### 4.3 LRU 与双触发清扫（R3/R11 / ADR-008）
 
 | 编号 | 规则 |
@@ -378,9 +476,13 @@ MAX_CACHE_SIZE: 2000 / CACHE_JITTER: 0.2 / _CACHE_SWEEP_INTERVAL: 60.0
 
 ```python
 from collections import OrderedDict
-import logging, random, socket, threading, time, urllib.error
-from urllib.request import Request, urlopen
-from .config import REQUEST_TIMEOUT, NEG_TTL, PROBE_TIMEOUT, cache_policy
+import http.client, logging, random, socket, threading, time, urllib.error
+from urllib.parse import urljoin, urlsplit
+from urllib.request import Request                             # urlopen 由本模块定义（§5.5）
+from .config import (HTTP_DNS_CACHE_TTL, HTTP_POOL_IDLE_TTL,
+                     HTTP_POOL_MAX_PER_HOST, HTTP_WARM_CONNECTIONS,
+                     HTTP_WARM_TIMEOUT, NEG_TTL, PROBE_TIMEOUT,
+                     REQUEST_TIMEOUT, cache_policy, warm_hosts)
 from . import metrics
 
 log = logging.getLogger('cache')                     # REV-DES-03：§2.3/§5.4/§6 使用 log.warning
@@ -420,6 +522,13 @@ def _expires_at(ttl=None):
     """expires_at = now + ttl ×(1 ± jitter)；ttl None ⇒ news_url 域 TTL（BR-CACHE-2）。"""
     base = ttl if ttl is not None else cache_policy('news_url')['ttl']
     return time.time() + base * (1 + random.uniform(-CACHE_JITTER, CACHE_JITTER))
+
+
+def _cache_fresh(entry, refresh_epoch=None):
+    """BR-CACHE-1/31：TTL 内，且（计划刷新时）写入不早于本轮起点。"""
+    if not entry or time.time() >= entry.get('expires_at', 0):
+        return False
+    return refresh_epoch is None or entry.get('time', 0) >= refresh_epoch
 
 
 def _probe_budget(fail_count):
@@ -507,12 +616,13 @@ def _clear_negative(url):
         metrics.set_gauge('negative_cache_size', size)                   # ★ 锁外（BR-CACHE-24）
 
 
-def fetch_json(url, headers=None, ttl=None, encoding='utf-8', deadline=None):
+def fetch_json(url, headers=None, ttl=None, encoding='utf-8', deadline=None,
+               refresh_epoch=None):                                      # ★ v1.4 第 6 位（关键字）
     # ── 段 1：正缓存（命中即返回：不读负缓存、不看 deadline、零网络）────
     hit_stats = None
     with _cache_lock:
         entry = cache.get(url)
-        if _cache_fresh(entry):                                          # BR-CACHE-1
+        if _cache_fresh(entry, refresh_epoch):                           # BR-CACHE-1/31
             cache.move_to_end(url)                                       # BR-CACHE-10
             entry['last_access'] = time.time()
             hit_stats = _record_hit_locked()                             # BR-CACHE-24
@@ -538,7 +648,7 @@ def fetch_json(url, headers=None, ttl=None, encoding='utf-8', deadline=None):
     hit_stats = None
     with _cache_lock:
         entry = cache.get(url)                                           # 双检
-        if _cache_fresh(entry):
+        if _cache_fresh(entry, refresh_epoch):
             cache.move_to_end(url)
             entry['last_access'] = time.time()
             hit_stats = _record_hit_locked()                             # BR-CACHE-24
@@ -586,7 +696,7 @@ def fetch_json(url, headers=None, ttl=None, encoding='utf-8', deadline=None):
     hit_stats = None
     with _cache_lock:
         entry = cache.get(url)
-        if _cache_fresh(entry):
+        if _cache_fresh(entry, refresh_epoch):
             cache.move_to_end(url)
             entry['last_access'] = time.time()
             hit_stats = _record_hit_locked()                             # BR-CACHE-24
@@ -702,6 +812,115 @@ def build_batch_response(requested, results, errors=None, dropped=0):
         out['_dropped_count'] = int(dropped)
     return out
 ```
+
+### 5.5 HTTP 传输（`urlopen` / `_pool_request` / `warm_transport`，v1.4）
+
+```python
+def urlopen(req, timeout=None):
+    """池化 drop-in（BR-CACHE-26）：单一网络缝（测试 patch cache.urlopen）。"""
+    if isinstance(req, Request):
+        url, headers, method = req.full_url, dict(req.header_items()), req.get_method()
+    else:
+        url, headers, method = str(req), {}, 'GET'
+    current, redirects = url, 0
+    while True:
+        status, resp_headers, body = _pool_request(method, current, headers, timeout)
+        if status in _REDIRECT_CODES and resp_headers is not None:
+            location = resp_headers.get('location')
+            if location:
+                redirects += 1
+                if redirects > _MAX_REDIRECTS:
+                    raise urllib.error.HTTPError(current, status, 'too many redirects',
+                                                 resp_headers, None)
+                current = urljoin(current, location)
+                continue
+        if status >= 400:
+            raise urllib.error.HTTPError(current, status,
+                                         http.client.responses.get(status, ''),
+                                         resp_headers, None)
+        return _PooledResponse(body, status, resp_headers)      # read()able + 上下文管理器
+
+
+def _pool_request(method, url, headers, timeout):
+    """BR-CACHE-27/28：一次池化请求，失效复用连接重试一次。"""
+    parsed = urlsplit(url)
+    scheme = (parsed.scheme or '').lower()
+    if scheme not in ('http', 'https'):
+        raise urllib.error.URLError(f'unsupported URL scheme {scheme!r} in {url!r}')
+    host = parsed.hostname
+    if not host:
+        raise urllib.error.URLError(f'missing host in URL {url!r}')
+    key = (scheme, host, parsed.port or (443 if scheme == 'https' else 80))
+    path = (parsed.path or '/') + (f'?{parsed.query}' if parsed.query else '')
+    for attempt in (0, 1):
+        conn, reused, ephemeral = _pool.acquire(key, timeout)    # ★ 仅记账在锁内
+        try:
+            status, resp_headers, body, will_close = _send(conn, method, path, headers)
+        except _STALE_CONNECTION_ERRORS as exc:
+            _pool.note_stale(); _pool.discard(key, conn, ephemeral=ephemeral)
+            if reused and attempt == 0:
+                continue                                        # 失效 keep-alive ⇒ 新连接重试一次
+            raise urllib.error.URLError(exc) from exc
+        except (socket.timeout, TimeoutError):
+            _pool.discard(key, conn, ephemeral=ephemeral); raise
+        except urllib.error.URLError:
+            _pool.discard(key, conn, ephemeral=ephemeral); raise
+        except OSError as exc:
+            _pool.discard(key, conn, ephemeral=ephemeral)
+            raise urllib.error.URLError(exc) from exc
+        except http.client.HTTPException as exc:
+            _pool.discard(key, conn, ephemeral=ephemeral)
+            raise urllib.error.URLError(exc) from exc
+        (_pool.discard if will_close else _pool.release)(key, conn, ephemeral=ephemeral)
+        return status, resp_headers, body
+    raise urllib.error.URLError('stale connection retry exhausted')
+
+
+class _ConnectionPool:
+    """BR-CACHE-27：per-key keep-alive 桶；_lock 只护 _idle/_live/stats。"""
+
+    def acquire(self, key, timeout):
+        """⇒ (conn, reused, ephemeral)。空闲 LIFO；达上限 ⇒ ephemeral（不排队）。"""
+        # ① 锁内：摘空闲（过期懒淘汰计数）、或预留槽位、或标 ephemeral
+        # ② 锁外：死连接关闭；reused 时 settimeout（失败 ⇒ 释放槽位并新建）
+        # ③ 锁外：_open_connection(key, timeout)；失败回滚预留槽位后上抛
+
+    def release(self, key, conn, ephemeral=False):
+        """ephemeral ⇒ 直接关；否则入桶（溢出部分关闭）。"""
+    def discard(self, key, conn, ephemeral=False):
+        """不回池：ephemeral ⇒ 关；否则减 _live 并关。"""
+
+
+class _DNSResolver:
+    """BR-CACHE-29：getaddrinfo TTL 缓存；TLS 仍按主机名拨号。"""
+
+    def resolve(self, host, port, force=False):
+        """缓存命中（且未过期、非 force）⇒ 返回；否则 getaddrinfo 并（ttl>0）写缓存。"""
+    def connect(self, address, timeout, source_address):
+        """先 resolve 后遍历 infos 连接；失败 force 重解析一次；异常/空 ⇒ stdlib 回退。"""
+
+
+def warm_transport(hosts=None, count=None, timeout=None):
+    """BR-CACHE-30：总函数，仅握手不发业务请求。"""
+    try:
+        hosts = tuple(hosts) if hosts else warm_hosts()          # 取值异常 ⇒ return 0
+    except Exception:
+        return 0
+    count = HTTP_WARM_CONNECTIONS if count is None else max(0, int(count))
+    timeout = HTTP_WARM_TIMEOUT if timeout is None else timeout
+    warmed = 0
+    for key in hosts:
+        for _ in range(count):
+            try:
+                conn, reused, ephemeral = _pool.acquire(key, timeout)
+            except Exception:
+                break                                            # 该 host 静默失败 ⇒ 下一个
+            _pool.release(key, conn, ephemeral=ephemeral)
+            if reused or ephemeral:
+                break                                            # 已热身 / 池满 ⇒ 无需再加
+            warmed += 1
+    return warmed
+```
 ---
 
 ## 6. 错误处理
@@ -716,6 +935,11 @@ def build_batch_response(requested, results, errors=None, dropped=0):
 | `build_batch_response` 收到未知 kind | 归一 `'upstream_error'` + warning（不抛） | 枚举封闭 |
 | `build_batch_response` 收到 data + error 冲突 | 数据优先、不收录 `_errors` + warning（不抛） | 值域三分自洽 |
 | `FetchError(kind)` 非法 kind | 构造期 `ValueError` | 编程错误，暴露于测试 |
+| **4xx/5xx（池化 `urlopen`）** | `urllib.error.HTTPError`（含 status/headers）→ `_classify` ⇒ `FetchError('upstream_error')` + 落负缓存 | 同"上游其它异常" |
+| **失效 keep-alive 连接**（`_STALE_CONNECTION_ERRORS`） | **仅复用且首次尝试** ⇒ 丢弃 + 新连接**重试一次**；否则 `URLError` ⇒ `FetchError('upstream_error')` | 复用抖动不放大为上游失败（BR-CACHE-28） |
+| **DNS 解析失败/缓存地址不可连** | `force` 重解析一次；仍失败 ⇒ `URLError`/`gaierror` ⇒ `FetchError('upstream_error')`；解析器本身异常 ⇒ 回退 `socket.create_connection` | 失败**不缓存**（BR-CACHE-29） |
+| **`warm_transport` 任一 host 拨号失败** | 静默 `break` 该 host，继续下一个；整体**绝不抛**（返回已热身数） | 启动预热不 gate 启动/`/healthz`（BR-CACHE-30） |
+| **scheme 非 http/https / URL 缺 host** | `_pool_request` 抛 `URLError` | `FetchError('upstream_error')` |
 
 **契约要点**
 - `fetch_json` 的失败**永远**是 `FetchError`（不再有 `RuntimeError` / 返回 `None`）；**失败不留 Traceback 断连**（由 `_guard` 兜底）。
@@ -732,11 +956,13 @@ def build_batch_response(requested, results, errors=None, dropped=0):
 | `_neg_lock` | `_negative` | **新增**（独立锁，避免与 `_cache_lock` 嵌套） |
 | `_feed_cache_lock` | `feed_cache`、`_last_feed_sweep` | 既有，保留 |
 | `_feed_fetch_locks_lock` | `_feed_fetch_locks`（建锁表） | 既有，保留（server 消费） |
+| `_pool._lock` | `_pool` 的 `_idle`/`_live`/`stats`（**桶记账**） | **v1.4 新增**：`connect`/`close`/请求 IO **一律在锁外** |
+| `_resolver._lock` | `_DNSResolver._cache` | **v1.4 新增**：仅护 dict 读写，`getaddrinfo` 在锁外 |
 
 ### 7.2 锁序纪律（硬约束）
 
-1. **`_cache_lock` / `_neg_lock` / `_feed_cache_lock` / `_feed_fetch_locks_lock` 互不嵌套**：任何时刻最多持有一把。需要组合状态时**顺序获取、立即释放**（如段 3 先 `_cache_lock` 出块，再由 `_fetch_budget` 取 `_neg_lock`）。
-2. **网络 IO（`urlopen`/`read`/`decode`）永不持锁** ⇒ 慢上游不阻塞缓存读者（AC-E1/A4）。
+1. **`_cache_lock` / `_neg_lock` / `_feed_cache_lock` / `_feed_fetch_locks_lock` / `_pool._lock` / `_resolver._lock` 互不嵌套**：任何时刻最多持有一把。需要组合状态时**顺序获取、立即释放**（如段 3 先 `_cache_lock` 出块，再由 `_fetch_budget` 取 `_neg_lock`）。`_pool.acquire` 内可能同时触及 `_pool._lock` 与（锁外的）`_resolver.resolve`（其内部再取 `_resolver._lock`）⇒ **`_pool._lock` 释放后才 connect**，两把锁不重叠。
+2. **网络 IO（`urlopen`/`read`/`decode`）永不持锁** ⇒ 慢上游不阻塞缓存读者（AC-E1/A4）。`_pool`/`_resolver` 同样遵守：锁内只做记账/dict 读写。
 3. `event.set()` 在释放 `_cache_lock` 之后调用（先 pop inflight，再 set），避免唤醒的 follower 立即争锁。
 4. 与 `_feed_fetch_locks`（per-path Lock，server 持有）**无锁序关系**：cache 层不在持有自身锁时获取 feed fetch lock，反之亦然（`_get_or_fetch_feed` 先释放 `_feed_cache_lock` 再取 per-path lock —— server 侧纪律，详见 server 详设）。
 5. **不引入全局大锁**（项目约定：分锁不用全局大锁）。
@@ -786,6 +1012,12 @@ def build_batch_response(requested, results, errors=None, dropped=0):
 | **T-CACHE-23** follower 窗口与 `leader_alive`（BR-CACHE-23，P7b） | 构造"leader 慢于 follower 窗口"：`event.wait` 超时后 leader 仍在 `_fetch_inflight` ⇒ `FetchError('upstream_timeout')` 且 `_negative` **无**该 URL、`upstream_fail_total` **不增**；三态皆无（清空负缓存 + 删 inflight）⇒ `FetchError('upstream_error')` | S3/S1 |
 | **T-CACHE-24** metrics 锁外发布（BR-CACHE-24，P7b） | 复用 `_lock_held_during`：`_cache_put` / `_record_failure` / `_clear_negative` / `feed_cache_put` 执行期间**均未持有**对应业务锁；段①/③/④ 三种命中路径均使 `cache_hit_ratio` 分子 +1（`_record_hit_locked` 三处调用） | S10（Q1） |
 | **T-CACHE-25** leader 令牌不泄漏（BR-CACHE-25，P7b） | mock `_effective_timeout` 抛异常 ⇒ `url not in _fetch_inflight`（`finally` 已 pop）、`event.is_set()` 为真；随后同一 URL 的新请求可正常成为 leader（不再沦为 follower） | S1 |
+| **T-CACHE-26** 池化复用与有界（v1.4 / BR-CACHE-27） | 同一 `(scheme,host,port)` 连发两次 ⇒ 第二次 `_pool.stats['reuse'] == 1`（打桩 `_open_connection`）；并发 > `HTTP_POOL_MAX_PER_HOST` ⇒ 多余走 ephemeral（`stats['ephemeral'] > 0`）且**不阻塞**；空闲超 `HTTP_POOL_IDLE_TTL` 后 checkout ⇒ `stats['evicted'] += 1` 且关闭 | E1 传输 |
+| **T-CACHE-27** 失效连接重试一次（v1.4 / BR-CACHE-28） | 打桩 `_send` 首次（`reused=True`）抛 `http.client.RemoteDisconnected`、第二次成功 ⇒ 请求成功、`stats['stale']==1`、`_open_connection` 被调 2 次；若 `reused=False` 抛同错 ⇒ `URLError` 且**不重试**；`socket.timeout` 抛 ⇒ 原样上抛、不重试 | 传输健壮性 |
+| **T-CACHE-28** `urlopen` stdlib 契约（v1.4 / BR-CACHE-26） | 打桩池返回 200 ⇒ `resp.read()` 得 body、`resp.status==200`、可 `with`；404/500 ⇒ `HTTPError`；连接异常 ⇒ `URLError`；302+Location ⇒ 跟随，>5 次 ⇒ `HTTPError('too many redirects')`；非 http scheme ⇒ `URLError` | `_classify` 依赖 |
+| **T-CACHE-29** DNS TTL 缓存（v1.4 / BR-CACHE-29） | 两次 `resolve` 同 host ⇒ `getaddrinfo` 仅调 1 次；`ttl=0` ⇒ 每次调；解析失败**不写缓存**；缓存地址 connect 失败 ⇒ `force` 重解析一次；`getaddrinfo` 抛 ⇒ `connect` 回退 `socket.create_connection` | E1 传输 |
+| **T-CACHE-30** `warm_transport` 总函数（v1.4 / BR-CACHE-30） | `warm_transport(hosts=[key], count=1)` ⇒ `_pool` 有该 key 且返回 1；同一 key 再调 ⇒ 返回 0（已热身 `break`）；`_open_connection` 抛 ⇒ 返回 0 **不抛**；`warm_hosts()` 抛 ⇒ 返回 0 | 启动预热 |
+| **T-CACHE-31** `refresh_epoch` 新鲜度下限（v1.4 / BR-CACHE-31） | 写入 `time=t0`、`ttl=60`，以 `refresh_epoch=t0+tick` 读 ⇒ **不命中**（`urlopen` 被调 1 次、`upstream_fetch_total` 增），以 `refresh_epoch=None` 读 ⇒ 命中（`urlopen` 0 次）；`refresh_epoch` 不改变写入 TTL（写后 `expires_at-time ≈ ttl`） | SSE 每拍真刷新 |
 
 ## 9. AC 追溯矩阵
 
@@ -807,6 +1039,9 @@ def build_batch_response(requested, results, errors=None, dropped=0):
 | follower 等待窗口 + `leader_alive`（BR-CACHE-23） | **AC-S1**（不升级本地预算为上游失败）/ **AC-S3** |
 | metrics 锁外发布（BR-CACHE-24） | **AC-E1**（`/healthz` 快照不阻塞取数）/ AC-S10 |
 | leader 令牌 `try/finally`（BR-CACHE-25） | **AC-S1**（异常不全站退化为超时） |
+| **HTTP 连接复用池 + DNS TTL 缓存（v1.4 / BR-CACHE-26..29）** | **AC-E1**（单请求延迟：2C2G 实测 340ms→~48ms）/ **AC-E2**（50 码冷扇出 ~4.2s → 单 tick 内） |
+| **`warm_transport` 启动预热（v1.4 / BR-CACHE-30）** | **AC-E2**（冷进程首轮不付全量握手/解析）/ AC-E1 |
+| **`refresh_epoch` 新鲜度下限（v1.4 / BR-CACHE-31）** | SSE 每拍真刷新（消除 TTL==tick 相位耦合，名义 4s 不再退化为 8s） |
 
 ## 10. 与 SAD / 现有代码的偏差与歧义标注（不擅自改 SAD）
 
@@ -830,6 +1065,10 @@ def build_batch_response(requested, results, errors=None, dropped=0):
 | 15 | **P7b · follower 等待余量与 `leader_alive`** | SAD §2.3 D-1 第 4 段仅"读负缓存并 raise" | 等待窗口 `+ _FOLLOWER_WAIT_MARGIN(1.0s)`；复查 `_fetch_inflight` ⇒ leader 存活报 `upstream_timeout` 且**不落负缓存/不计数**（BR-CACHE-23） | leader 取数后的发布（微秒级）不得因竞态把 follower 推入 gap 分支；本地等待预算≠上游失败 |
 | 16 | **P7b · metrics 锁外发布** | SAD §2.4/§2.6 未定义发布时机 | `_publish_url_stats` 为唯一入口，**锁外**调用（BR-CACHE-24）；命中路径段①/③/④统一 `_record_hit_locked()` 计 hit | 否则 `/healthz` 快照可与取数热路径争锁；只计段①会按并发流量比例系统性压低 `cache_hit_ratio` |
 | 17 | **P7b · leader 令牌 `try/finally`** | SAD 未定义 | 选举后全部逻辑置于 `try/finally`，`finally` 内 `pop` + `event.set()`（BR-CACHE-25） | 令牌泄漏会使该 URL 此后每次请求都沦为"等待死 leader"并超时 |
+| 19 | **v1.4 · HTTP 连接复用池 + DNS TTL 缓存** | SAD §2.3 D-1 未定义传输实现；本文 v1.3 仍以 `urllib.request.urlopen` 为出口 | 新增 `_ConnectionPool`/`_DNSResolver`/`_pool_request`/`urlopen`（§2.7/§4.5 BR-CACHE-26..29） | 每请求新建 TCP+TLS **并重解析 DNS** 是 2C2G 上单请求 ~340ms 的主因（DNS ~176ms + 握手 ~78ms）；复用后 ~48ms。**行为等价 stdlib 契约**（`read()`/`HTTPError`/`URLError`/重定向），仅传输复用 |
+| 20 | **v1.4 · `warm_transport` 启动预热** | SAD 未定义 | 新增公开函数（§2.7/BR-CACHE-30）；`server.main` 启动守护线程调用，**仅握手不发业务请求**、总函数 | 冷进程首个 50 码 quote 扇出实测 ~4.2s（超 0.8×tick 预算）：空池 + 空 DNS 缓存的首轮一次性成本 |
+| 21 | **v1.4 · `refresh_epoch`（第 6 位关键字形参）** | SAD §2.3 D-1 无该形参；`stream` 的"每拍真刷新"由实现引入 | `_cache_fresh(entry, refresh_epoch)`：命中追加 `entry['time'] >= epoch`；段①/③/④ 一致；`None` 逐字不变；写 TTL 不变（BR-CACHE-31） | TTL 恰等于 tick 时，上一轮 δ 秒后写入的条目在本轮仍新鲜 ⇒ 名义 4s 刷新实际每 8s 才回源一次（相位耦合） |
+| 22 | **v1.4 · import 面（`json`→`http.client`/`urllib.parse`）** | SAD/tech-stack allowlist | 本模块实际 import：`http.client`、`urllib.parse` 为新增；`json` 已删（v1.3 #6） | §1.3 一度仍列 `json` 而未列 `http.client`/`urllib.parse`——**与实现不符**，本版据实更正 |
 
 > **§10#11 的 AC-S3 影响量化（★ v1.3 按 AC-S3 裁决 / 实现重写——遗留项已闭环）**
 >
@@ -868,6 +1107,9 @@ def build_batch_response(requested, results, errors=None, dropped=0):
 - [x] **v1.2（P7b）**：`fetch_json` 的 5 位形参、两处 deadline 闸门位置、`_probe_budget` 阶梯、follower 等待窗口 + `leader_alive` 三态、metrics 锁外发布、leader 令牌 `try/finally` 与实现逐行一致（§2.1/§4.2 BR-CACHE-21..25/§5.1/§7.3/§8 T-CACHE-21..25）
 - [x] **v1.2（P7b）**：`import json` 已删（§10#6 收口）；§2.5 兼容清单补 `_probe_budget`/`_effective_timeout`/`_follower_wait_budget`/`_FOLLOWER_WAIT_MARGIN`/`_record_hit_locked`/`_publish_url_stats`
 - [x] **v1.3（AC-S3 裁决）**：阶梯封顶更正为 **`_PROBE_BUDGET_CAP=5.0`**（§1 头部 / §2.1 四段式+行为表 / §2.5 / §3.1+§3.5 / §4.2 BR-CACHE-8·22 / §5.1 / §8 T-CACHE-4·4c·4d·21 / §9 / §10#11·#18）；`REQUEST_TIMEOUT` 角色收敛为"冷预算 + 老化全预算探测"；稳态 P95 ≈ 5s、单请求 ≤15s
+- [x] **v1.4（P7b 传输层）**：连接复用池 + DNS TTL 缓存 + `urlopen` 单一网络缝 + `warm_transport`（§2.7 / §3.6 / §4.5 BR-CACHE-26..30 / §5.5 / §6 / §7.1·7.2 / §8 T-CACHE-26..30 / §9）
+- [x] **v1.4（P7b 传输层）**：`fetch_json` 第 6 位关键字形参 `refresh_epoch` + `_cache_fresh` 下限（§2.1 / §4.5 BR-CACHE-31 / §5.1 / §8 T-CACHE-31 / §10#21）
+- [x] **v1.4（import 面更正）**：§1.3 删 `json`、补 `http.client`/`urllib.parse`（§10#22，据实现更正）
 
 
 

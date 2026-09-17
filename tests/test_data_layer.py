@@ -579,7 +579,13 @@ class BasicInfoSectorCacheTests(unittest.TestCase):
             second = stock_api.fetch_cls_basic_info(self.CODE)
 
         self.assertEqual(second['sector_name'], self.SECTOR)
-        self.assertEqual(calls, [f'{config._BASIC_INFO_BASE_URL}?secu_code={self.CODE}'])
+        # only the fatal quote call and the (always-fresh) depth call remain —
+        # the sector detail call is fully served from its 7-day cache
+        self.assertEqual(calls, [
+            f'{config._BASIC_INFO_BASE_URL}?secu_code={self.CODE}',
+            f'{config._STOCK_DEPTH_URL}?secu_code={self.CODE}&field=five',
+        ])
+        self.assertEqual([c for c in calls if '/detail?' in c], [])
 
     def test_unexpired_entry_is_served_from_cache(self):
         """Within the TTL the entry is returned verbatim (boundary-safe: the
@@ -615,7 +621,9 @@ class BasicInfoSectorCacheTests(unittest.TestCase):
 
     def test_empty_sector_is_not_cached(self):
         with patch.object(stock_api, '_fetch_rest_json',
-                          return_value={'code': 200, 'data': {}}):
+                          return_value={'code': 200,
+                                        'data': {'secu_name': '贵州茅台',
+                                                 'last_px': 1.0}}):
             stock_api.fetch_cls_basic_info(self.CODE)
         self.assertIsNone(stock_api._basic_sector_get(self.CODE))
 
@@ -631,6 +639,315 @@ class BasicInfoSectorCacheTests(unittest.TestCase):
             with self.assertRaises(FetchError):
                 stock_api.fetch_cls_basic_info(self.CODE)
         self.assertEqual(calls, [f'{config._BASIC_INFO_BASE_URL}?secu_code={self.CODE}'])
+
+
+# ── stock_api: five-level order book (depth domain) ────────────────────────
+
+class StockDepthTests(unittest.TestCase):
+    """任务 2b: `fetch_cls_stock_depth` — 21-field payload, honest empty
+    semantics (None, never a fabricated all-zero book) and non-fatal failure."""
+
+    CODE = 'sh600519'
+    INDEX = 'sh000001'
+    BJ = 'bj430047'
+
+    def setUp(self):
+        _reset_stock_state()
+
+    def tearDown(self):
+        _reset_stock_state()
+
+    @staticmethod
+    def _book():
+        """A realistic five-band payload (20 value fields + preclose_px)."""
+        data = {'preclose_px': 1500.0}
+        for level in range(1, 6):
+            data[f'b_px_{level}'] = 1499.0 - level
+            data[f'b_amount_{level}'] = 100 * level
+            data[f's_px_{level}'] = 1501.0 + level
+            data[f's_amount_{level}'] = 200 * level
+        return data
+
+    def test_url_uses_canonical_prefixed_form_and_field_five(self):
+        calls = []
+
+        def _fake(url, headers, ttl, deadline=None):
+            calls.append(url)
+            return {'code': 200, 'data': self._book()}
+
+        with patch.object(stock_api, '_fetch_rest_json', side_effect=_fake):
+            out = stock_api.fetch_cls_stock_depth(self.CODE)
+        self.assertEqual(calls, [
+            f'{config._STOCK_DEPTH_URL}?secu_code={self.CODE}&field=five'])
+        self.assertEqual(out['b_px_1'], 1498.0)
+        self.assertEqual(out['preclose_px'], 1500.0)
+
+    def test_returns_none_for_empty_data_dict(self):
+        """Unknown / invalid code: upstream returns `data: {}` — no book."""
+        for code in (self.BJ, 'sh999999'):
+            with patch.object(stock_api, '_fetch_rest_json',
+                              return_value={'code': 200, 'data': {}}):
+                self.assertIsNone(stock_api.fetch_cls_stock_depth(code))
+
+    def test_returns_none_for_all_zero_band(self):
+        """指数 (sh000001 / sz399001) have no order book: every band field 0."""
+        zero = {f: 0 for f in stock_api._DEPTH_VALUE_FIELDS}
+        zero['preclose_px'] = 3200.0
+        with patch.object(stock_api, '_fetch_rest_json',
+                          return_value={'code': 200, 'data': zero}):
+            self.assertIsNone(stock_api.fetch_cls_stock_depth(self.INDEX))
+
+    def test_returns_none_when_one_band_field_is_nonzero(self):
+        """The all-zero test must not be over-broad: a single live band means a
+        real book."""
+        data = {f: 0 for f in stock_api._DEPTH_VALUE_FIELDS}
+        data['s_amount_5'] = 1
+        with patch.object(stock_api, '_fetch_rest_json',
+                          return_value={'code': 200, 'data': data}):
+            self.assertEqual(stock_api.fetch_cls_stock_depth(self.CODE), data)
+        # the successful fetch also populates the depth terminal cache, making
+        # DOMAIN_MATRIX['depth']'s pool_max/cache_max live settings
+        self.assertEqual(stock_api.cached_batch('depth', [self.CODE]),
+                         {self.CODE: data})
+        with stock_api._basic_depth_cache_lock:
+            self.assertIn(self.CODE, stock_api._basic_depth_pool)
+
+    def test_transport_failure_is_non_fatal(self):
+        """A depth outage returns None and does not raise a FetchError."""
+        with patch.object(stock_api, '_fetch_rest_json',
+                          side_effect=FetchError('upstream_timeout', url='u')):
+            self.assertIsNone(stock_api.fetch_cls_stock_depth(self.CODE))
+
+    def test_semantic_failure_is_non_fatal(self):
+        with patch.object(stock_api, '_fetch_rest_json',
+                          return_value={'code': 500}):
+            self.assertIsNone(stock_api.fetch_cls_stock_depth(self.CODE))
+
+    def test_depth_failure_does_not_withhold_the_quote(self):
+        """任务 2b: 五档取数失败不得影响 quote 主数据."""
+        def _fake(url, headers, ttl, deadline=None):
+            if '/volume?' in url:
+                raise FetchError('upstream_error', url=url)
+            if '/stock/basic' in url:
+                return {'code': 200, 'data': {'secu_code': self.CODE, 'last_px': 1.0}}
+            return {'code': 200, 'data': {}}
+
+        with patch.object(stock_api, '_fetch_rest_json', side_effect=_fake):
+            out = stock_api.fetch_cls_basic_info(self.CODE)
+        self.assertEqual(out['data']['last_px'], 1.0)   # quote survived
+        self.assertNotIn('depth', out)                 # no fabricated book
+
+    def test_depth_is_attached_to_the_quote_payload(self):
+        book = self._book()
+
+        def _fake(url, headers, ttl, deadline=None):
+            if '/volume?' in url:
+                return {'code': 200, 'data': book}
+            if '/stock/basic' in url:
+                return {'code': 200, 'data': {'secu_code': self.CODE, 'last_px': 1.0}}
+            return {'code': 200, 'data': {}}
+
+        with patch.object(stock_api, '_fetch_rest_json', side_effect=_fake):
+            out = stock_api.fetch_cls_basic_info(self.CODE)
+        self.assertEqual(out['depth'], book)           # additive, same tick
+
+
+# ── stock_api: upstream wire secu_code (P1 BSE data gap) ───────────────────
+
+class UpstreamWireCodeTests(unittest.TestCase):
+    """P1: every CLS x-quote fetcher must send the wire `secu_code` — prefixed
+    for SH/SZ but dotted `430047.BJ` for BSE.  The prefixed BSE form makes
+    basic/volume answer the all-null shell / empty depth dict."""
+
+    BJ = 'bj430047'
+    BJ_WIRE = '430047.BJ'
+    SH = 'sh600519'
+
+    def setUp(self):
+        _reset_stock_state()
+
+    def tearDown(self):
+        _reset_stock_state()
+
+    @staticmethod
+    def _book():
+        data = {'preclose_px': 14.0}
+        for level in range(1, 6):
+            data[f'b_px_{level}'] = 13.0
+            data[f'b_amount_{level}'] = level
+            data[f's_px_{level}'] = 15.0
+            data[f's_amount_{level}'] = level
+        return data
+
+    def test_basic_info_and_depth_use_the_bse_wire_form(self):
+        calls = []
+
+        def _fake(url, headers, ttl, deadline=None):
+            calls.append(url)
+            if '/volume?' in url:
+                return {'code': 200, 'data': self._book()}
+            return {'code': 200,
+                    'data': {'secu_name': '诺思兰德', 'last_px': 14.61}}
+
+        with patch.object(stock_api, '_fetch_rest_json', side_effect=_fake):
+            out = stock_api.fetch_cls_basic_info(self.BJ)
+
+        self.assertIn(f'{config._BASIC_INFO_BASE_URL}?secu_code={self.BJ_WIRE}',
+                      calls)
+        self.assertIn(f'{config._STOCK_DEPTH_URL}?secu_code={self.BJ_WIRE}'
+                      f'&field=five', calls)
+        self.assertNotIn(f'{config._BASIC_INFO_BASE_URL}?secu_code={self.BJ}',
+                         calls)
+        self.assertNotIn(f'{config._STOCK_DEPTH_URL}?secu_code={self.BJ}'
+                         f'&field=five', calls)
+        self.assertEqual(out['data']['last_px'], 14.61)
+        self.assertEqual(out['depth']['b_px_1'], 13.0)
+
+    def test_depth_uses_the_bse_wire_form(self):
+        calls = []
+
+        def _fake(url, headers, ttl, deadline=None):
+            calls.append(url)
+            return {'code': 200, 'data': self._book()}
+
+        with patch.object(stock_api, '_fetch_rest_json', side_effect=_fake):
+            out = stock_api.fetch_cls_stock_depth(self.BJ)
+        self.assertEqual(calls, [f'{config._STOCK_DEPTH_URL}'
+                                 f'?secu_code={self.BJ_WIRE}&field=five'])
+        self.assertEqual(out['preclose_px'], 14.0)
+
+    def test_every_rest_fetcher_sends_the_bse_wire_form(self):
+        seen = []
+
+        def _fake(url, headers, ttl, deadline=None, refresh_epoch=None):
+            seen.append(url)
+            return {'code': 200, 'data': {}}
+
+        cases = (
+            (stock_api.fetch_cls_fundflow, config._FUNDFLOW_BASE_URL),
+            (stock_api.fetch_cls_timeline, config._TIMELINE_BASE_URL),
+            (stock_api.fetch_cls_stock_detail, config._STOCK_DETAIL_BASE_URL),
+        )
+        with patch.object(stock_api, '_fetch_rest_json', side_effect=_fake):
+            for fetcher, base in cases:
+                seen.clear()
+                fetcher(self.BJ)
+                self.assertEqual(
+                    seen, [f'{base}?secu_code={self.BJ_WIRE}'], base)
+
+            # Announcement is CLS-signed: assert on the query, not URL order.
+            seen.clear()
+            stock_api.fetch_cls_announcement(self.BJ)
+        self.assertEqual(len(seen), 1)
+        self.assertIn('secu_code=430047.BJ', seen[0])
+
+    def test_prefetch_direct_fetchers_send_the_bse_wire_form(self):
+        seen = []
+
+        def _fake(url, headers, ttl, deadline=None):
+            seen.append(url)
+            return {'code': 200, 'data': {}}
+
+        with patch.object(stock_api, '_evaluate_fetch_any', return_value=None), \
+                patch.object(stock_api, '_fetch_rest_json', side_effect=_fake):
+            stock_api._fundflow_direct_fetch(self.BJ)
+            stock_api._timeline_direct_fetch(self.BJ)
+            stock_api._announcement_direct_fetch(self.BJ)
+
+        self.assertEqual(seen[0], f'{config._FUNDFLOW_BASE_URL}'
+                                    f'?secu_code={self.BJ_WIRE}')
+        self.assertEqual(seen[1], f'{config._TIMELINE_BASE_URL}'
+                                    f'?secu_code={self.BJ_WIRE}')
+        self.assertIn('secu_code=430047.BJ', seen[2])
+
+    def test_shanghai_and_shenzhen_urls_are_unchanged(self):
+        seen = []
+
+        def _fake(url, headers, ttl, deadline=None):
+            seen.append(url)
+            return {'code': 200,
+                    'data': {'secu_name': '贵州茅台', 'last_px': 1.0}}
+
+        with patch.object(stock_api, '_fetch_rest_json', side_effect=_fake):
+            stock_api.fetch_cls_basic_info(self.SH)
+            stock_api.fetch_cls_stock_depth(self.SH)
+
+        self.assertIn(f'{config._BASIC_INFO_BASE_URL}?secu_code={self.SH}', seen)
+        self.assertIn(f'{config._STOCK_DEPTH_URL}?secu_code={self.SH}'
+                      f'&field=five', seen)
+
+
+# ── stock_api: all-null upstream shell (wrong wire spelling) ───────────────
+
+class BasicInfoShellDefenceTests(unittest.TestCase):
+    """P1: a wrong spelling yields HTTP 200 + `code:200` + a 41-key all-null
+    object.  That is a failure, not a quote — it must never be cached or served
+    as a frame full of nulls."""
+
+    CODE = 'bj430047'
+
+    def setUp(self):
+        _reset_stock_state()
+
+    def tearDown(self):
+        _reset_stock_state()
+
+    @staticmethod
+    def _shell():
+        # The measured upstream shell: 41 keys, every value null.
+        data = {k: None for k in (
+            'secu_code', 'secu_name', 'last_px', 'preclose_px', 'open_px',
+            'high_px', 'low_px', 'volume', 'amount', 'turnover', 'change',
+            'change_px', 'change_rate', 'amplitude', 'pe', 'pe_ttm', 'pb',
+            'total_mv', 'circ_mv', 'total_share', 'circ_share', 'limit_up',
+            'limit_down', 'bid_px', 'ask_px', 'secu_type', 'status',
+            'secu_market', 'trade_status', 'is_st', 'is_new', 'list_date',
+            'issue_price', 'dividend', 'eps', 'bps', 'cash_flow',
+            'net_profit', 'revenue', 'gross_margin', 'plate_id')}
+        assert len(data) == 41
+        return {'code': 200, 'data': data}
+
+    def test_all_null_shell_is_a_fetch_failure(self):
+        with patch.object(stock_api, '_fetch_rest_json',
+                          return_value=self._shell()):
+            with self.assertRaises(FetchError):
+                stock_api.fetch_cls_basic_info(self.CODE)
+
+    def test_empty_data_dict_is_also_a_failure(self):
+        with patch.object(stock_api, '_fetch_rest_json',
+                          return_value={'code': 200, 'data': {}}):
+            with self.assertRaises(FetchError):
+                stock_api.fetch_cls_basic_info(self.CODE)
+
+    def test_shell_is_counted_as_an_upstream_failure(self):
+        with patch.object(stock_api, '_fetch_rest_json',
+                          return_value=self._shell()):
+            with self.assertRaises(FetchError):
+                stock_api.fetch_cls_basic_info(self.CODE)
+        self.assertEqual(
+            metrics.snapshot()['upstream_fail_total'].get('upstream_error'), 1)
+
+    def test_shell_is_not_cached_by_the_batch_handler(self):
+        with patch.object(stock_api, '_fetch_rest_json',
+                          return_value=self._shell()):
+            out = stock_api.handle_cls_basic_infos([self.CODE])
+        self.assertIsNone(out[self.CODE])
+        with stock_api._basic_info_cache_lock:
+            self.assertNotIn(self.CODE, stock_api._basic_info_cache)
+
+    def test_secu_name_alone_is_enough_to_be_valid(self):
+        with patch.object(stock_api, '_fetch_rest_json',
+                          return_value={'code': 200,
+                                        'data': {'secu_name': '诺思兰德'}}):
+            out = stock_api.fetch_cls_basic_info(self.CODE)
+        self.assertEqual(out['data']['secu_name'], '诺思兰德')
+
+    def test_last_px_alone_is_enough_to_be_valid(self):
+        with patch.object(stock_api, '_fetch_rest_json',
+                          return_value={'code': 200,
+                                        'data': {'last_px': 14.61}}):
+            out = stock_api.fetch_cls_basic_info(self.CODE)
+        self.assertEqual(out['data']['last_px'], 14.61)
 
 
 # ── stock_api: f10 CDP degradation (A') ────────────────────────────────────
@@ -1318,6 +1635,92 @@ class LastDataEvictionTests(unittest.TestCase):
         self.assertEqual(len(page._last_data), cap)
         self.assertEqual(set(page._last_data_ts), set(page._last_data))
         self.assertEqual(set(page._key_last_seen), set(page._last_data))
+
+
+# ── Scheduled-refresh freshness floor (quote 相位耦合修复) ──────────────────
+
+class RefreshEpochTerminalCacheTests(unittest.TestCase):
+    """The scheduled refresh must not be served by the previous tick's caches.
+
+    The previous round wrote its terminal-cache entry δ s after that round
+    started, so at this round the entry is only ``tick − δ`` old — inside a TTL
+    equal to the tick.  Passing the round start as ``refresh_epoch`` makes the
+    terminal-cache read (step ③ of `_process_chunk`) and the URL-cache read
+    agree that only data fetched this round counts.
+    """
+
+    def setUp(self):
+        _reset_stock_state()
+
+    def tearDown(self):
+        _reset_stock_state()
+
+    @staticmethod
+    def _store(entry):
+        return OrderedDict({'sh600519': entry}), {'sh600519': time.time()}
+
+    def _fetcher(self, calls):
+        def fetch(code, deadline=None, ttl=None, refresh_epoch=None):
+            calls.append((code, refresh_epoch))
+            return {'v': 'new'}
+        return fetch
+
+    def test_pre_epoch_entry_forces_a_refetch(self):
+        now = time.time()
+        cache, cache_ts = self._store({'v': 'old'})
+        cache_ts['sh600519'] = now                  # TTL not elapsed
+        calls = []
+        results, errors = stock_api._process_chunk(
+            ['sh600519'], 'quote', config.cache_policy('quote'),
+            self._fetcher(calls),
+            pool=None, cache=cache, cache_ts=cache_ts,
+            lock=threading.Lock(), refresh_epoch=now + 1)
+
+        self.assertEqual(results['sh600519'], {'v': 'new'})   # not 'old'
+        self.assertEqual(calls, [('sh600519', now + 1)])      # epoch forwarded
+        self.assertEqual(errors, {})
+
+    def test_without_epoch_the_terminal_cache_still_hits(self):
+        """REST / prefetch: the plain TTL hit is unchanged."""
+        cache, cache_ts = self._store({'v': 'old'})
+        calls = []
+        results, errors = stock_api._process_chunk(
+            ['sh600519'], 'quote', config.cache_policy('quote'),
+            self._fetcher(calls),
+            pool=None, cache=cache, cache_ts=cache_ts,
+            lock=threading.Lock())
+
+        self.assertEqual(results['sh600519'], {'v': 'old'})
+        self.assertEqual(calls, [])
+        self.assertEqual(errors, {})
+
+    def test_an_entry_written_this_round_is_reused(self):
+        now = time.time()
+        cache, cache_ts = self._store({'v': 'this-round'})
+        cache_ts['sh600519'] = now + 1              # written after round start
+        calls = []
+        results, _errors = stock_api._process_chunk(
+            ['sh600519'], 'quote', config.cache_policy('quote'),
+            self._fetcher(calls),
+            pool=None, cache=cache, cache_ts=cache_ts,
+            lock=threading.Lock(), refresh_epoch=now)
+
+        self.assertEqual(results['sh600519'], {'v': 'this-round'})
+        self.assertEqual(calls, [])
+
+    def test_legacy_fetcher_without_the_keyword_still_fetches(self):
+        """The epoch is an additive hint: a pre-epoch fetcher is unaffected."""
+        calls = []
+
+        def legacy(code, deadline=None, ttl=None):
+            calls.append(code)
+            return {'v': 'legacy'}
+
+        results, errors = stock_api._run_batch(legacy, ['sh600519'],
+                                               refresh_epoch=time.time())
+        self.assertEqual(results, {'sh600519': {'v': 'legacy'}})
+        self.assertEqual(errors, {})
+        self.assertEqual(calls, ['sh600519'])       # called exactly once
 
 
 if __name__ == '__main__':

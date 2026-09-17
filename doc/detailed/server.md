@@ -1,6 +1,7 @@
 # server.py 详细设计
 
-> **版本** v1.3 · **状态** 已同步实现（P7b + **N1 回退** 契约同步 · 以代码为准）· **日期** 2026-09-16 · **作者/产出** task-decomposer
+> **版本** v1.4 · **状态** 已同步实现（P7b + N1 回退 + **传输预热 / gzip 协商** 契约同步 · 以代码为准）· **日期** 2026-09-17 · **作者/产出** task-decomposer
+> **v1.4 变更（契约级同步 · 以代码为准）**：① **`main()` 新增 daemon 线程 `warm_transport`**（启动即预热上游传输：DNS + 每 SSE 热路径主机 1 条池化连接；**仅握手、不发业务请求**；`threading.Thread(target=warm_transport, daemon=True).start()`，**不阻塞启动/`/healthz`**，失败静默——`cache.warm_transport` 为总函数）；② **gzip 协商**：`_accepts_gzip(header)` 按 RFC 9110 §12.5.3 解析 `Accept-Encoding`（逗号分隔 token + `;q=` 权重、coding 大小写不敏感、`*` 兜底、**`gzip;q=0` = 明确拒绝**、`GZIP`/`*` 接受）；`_send_text` 对 `len(body) >= config.GZIP_MIN_BYTES(1024)` 且被接受的响应 `gzip.compress(level=config.GZIP_COMPRESSLEVEL=1)` 并发 `Content-Encoding: gzip`；**`Vary: Accept-Encoding` 在 `gzipped or cache` 时无条件发出**（= 所有可缓存响应 + 任何 gzip 响应，**含 `cache=False` 的 gzip**，防共享缓存把 gzip 体复用给不支持它的客户端）。
 > **v1.3 变更（N1 回退 · 编排层裁决）**：Ⓝ① **业务端点降级恢复 `200 + error 体`**——`_send_json_shape` **恒 `_send_json(payload)`（200）**，不再按 payload 内容判 503；**`_json_payload_has_data` 已删除**（`_guard` 仍产出 `{'error': …}` / `_error` 客体，只是状态码不再随之变化）。Ⓝ② **`_send_json` 去掉 `status` 形参**（签名回落为 `_send_json(data, write_body=True, cache=True)`）。Ⓝ③ **`http_503_total` 计数点 4→3**：仅剩**连接准入拒绝**（`_reject_503`）、**流端口准入拒绝**（`stream._serve_sse` 超 `MAX_STREAM_CONNS`）、**`/healthz`**（其 503 是端点自身语义，**不构成业务端点先例**）。Ⓝ④ **降级体重新可缓存**：`_send_json_shape` 以 `cache=cache` 传参 ⇒ 降级 JSON 按域 TTL 拿 `Cache-Control: public, max-age=<domain ttl>`（v1.2 的"503 ⇒ 不缓存"消失）。
 > **v1.2 变更（契约级同步 · 对照表见 §11.1；① 已于 v1.3 回退）**：① ~~**纯 error 包装的 JSON payload ⇒ 503**~~（**已回退，见上**；`_json_payload_has_data` 已删除）② `/healthz` payload 缺 `status` 或含 `error` ⇒ **503**（不只 `status=='degraded'`；**v1.3 保留**）③ `_HealthBatch` 增 **`settle()`**；`build_health_payload` 先建账再调用 + `except BaseException: settle(); raise`；`_run_health_checks(base_url, batch=None)` ④ `_fanout_executor` 的等待受 **`_FANOUT_WAIT_BUDGET=REQUEST_TIMEOUT`** 约束（超期 `cancel()` + `FetchError('upstream_timeout')`）⑤ `_base_url()`：`PUBLIC_BASE_URL` 优先，否则 **Host 格式校验** + `Vary` + `Cache-Control: private`（`_send_text(varies_on_host=…)`）⑥ `_cache_age()` 改用 `urlparse(self.path).path` ⑦ **4 面板的 cache-age 域改 `quote`**（L1，非 `f10` 的 300）⑧ **`/stock/*` 码归一**：`_parse_stock_codes`（canonical 折叠去重）+ `_rekey_batch_response`（响应键回用户原拼写）；截断按归一后码数；非法码值 ⇒ 逐码 `null`（非 400）⑨ **`/market/margin` 非法 `market` ⇒ 400**（`VALID_MARKETS` 前置校验）⑩ `_PANEL_HANDLERS` + `_JSON_DISPATCHED_PATHS` 导入期断言 ⑪ `do_GET`/`do_HEAD` 断连捕获扩为 **`OSError`** ⑫ `BoundedThreadPoolServer.request_queue_size = LISTEN_BACKLOG` ⑬ `handle_ths_longhu` 席位配对 `broker_idx` **无条件自增** + 错位告警；encoding 取自 `cache_policy('longhu')['encoding']` ⑭ import 块更正（`page_data`/`FetchError`/`LISTEN_BACKLOG`；删 `handle_cls_stock`/`fetch_cls_*`/`strip_html`/`escape_xml`）
 > **v1.1 变更**：P1-1 healthz 准入位覆盖在飞任务（`_HealthBatch`）· P1-2 `/cls/hotplate`·`/cls/plate`·`/ths/longhu` ≤3 并发（AC-E2）· P1-3 hotplate 全分区失败补顶层 `error` · P1-4 `max_inflight` 形参（流端口显式 110）· P2-1/2/3/4/5 表述收口
@@ -13,7 +14,7 @@
 
 ## 1. 模块职责与边界
 
-### 1.1 职责（8 条）
+### 1.1 职责（11 条）
 
 1. **路由分发（唯一入口）**：`RSSHandler._handle_request` 分派 `14 个 JSON 分支 + 5 个 RSS + / + /opml.xml + /healthz`；**shape 由 `_JSON_SHAPES` 路由表派生**（SAD §2.4「由路由表派生 shape、不写死数字」）。
 2. **统一异常边界 `_guard(fn, *, shape, ...)`**：任何 handler 异常**不冒泡**（R1），按 `shape ∈ {batch, object, rss, text}` 产出结构化降级体。
@@ -26,6 +27,8 @@
 8. **过载有界拒绝（AC-E8 / S5）+ CDP 守护委派（ADR-012）**：`MAX_INFLIGHT` 显式化，达上限**立即 503 不排队**并计 `http_503_total`；`_cdp_memory_watchdog` 改调 `cdp_engine.watchdog_restart_skip_reason()`（盘中避让判断集中化）。
 9. **JSON 端点降级 = `200 + error 体`（★ v1.3 / N1 回退）**：`object`/`batch`/`text` shape 的 payload **不因内容改变状态码**——上游/CDP 整体不可用时 `_guard` 产出的 `{'error': …}` / `_error` 客体仍以 **HTTP 200** 返回（与旧版本及既有业务系统消费的契约一致）。**真实 503 仅三条路径**：连接准入拒绝（`BoundedThreadPoolServer._reject_503`）、流端口准入拒绝（`stream._serve_sse` 超 `MAX_STREAM_CONNS`）、`/healthz`（端点自身语义，**不是业务端点先例**）。`_send_json_shape` 只做"从表读 shape + 调 handler + 发 200 JSON"。~~v1.2 的 `_json_payload_has_data` / error-only ⇒ 503 已删除~~。
 10. **码身份归一（P1-6）**：`/stock/*` 入口经 `_parse_stock_codes` 折叠（`config.canonical_code`）去重后再计 `_MAX_BATCH_SIZE`；响应经 `_rekey_batch_response` 回请求原拼写，值与键集**不因归一而变**。
+11. **响应压缩协商（v1.4 / AC-E1）**：`_accepts_gzip(header)` 按 RFC 9110 解析 `Accept-Encoding`（`gzip;q=0` 拒绝、大小写不敏感、`*` 兜底）；大响应（≥ `GZIP_MIN_BYTES`）gzip 后发 `Content-Encoding`；`Vary: Accept-Encoding` 在 `gzipped or cache` 时必发。
+12. **上游传输预热（v1.4 / 冷启动）**：`main()` 起 `warm_transport` daemon 线程（DNS + 池化连接握手，无业务请求），使进程首个 refresh 不再全冷（冷扇出实测 ≈4.2s > 0.8×tick 预算）；预热不阻塞启动与 `/healthz`。
 
 ### 1.2 明确不做
 
@@ -42,10 +45,10 @@
 
 ```
 允许 import：
-  标准库：atexit / json / logging / os / re / signal / sys / threading / time /
+  标准库：atexit / gzip（★ v1.4：响应压缩）/ json / logging / os / re / signal / sys / threading / time /
           concurrent.futures.ThreadPoolExecutor,wait,FIRST_COMPLETED /
           email.utils.formatdate / http.server / urllib.parse / urllib.request
-  包内  ：config / cache / utils / stock_api / market_api / cdp_engine / metrics
+  包内  ：config / cache（含 `warm_transport`，★ v1.4）/ utils / stock_api / market_api / cdp_engine / metrics
   延迟  ：from .stream import push_loop, run_stream_server   ← 仅 main() 内（打破 server ↔ stream 环，现状保留）
 禁止 import：新增第三方库；`china_finance_rss/` 之外的第二个代码根
 ```
@@ -90,7 +93,7 @@ cdp_engine: 仅依赖 config/metrics；server 调用其函数（config.cdp_engin
 
 ```yaml
 openapi: 3.0.3
-info: {title: china-finance-rss main port (8053), version: '1.3'}
+info: {title: china-finance-rss main port (8053), version: '1.4'}
 paths:
   '/':                                {get: {responses: {'200': {content: {text/html: {}}}}}}          # _serve_index（静态，无 IO）
   '/opml.xml':                        {get: {responses: {'200': {content: {'text/x-opml': {}}}}}}      # generate_opml（静态，无 IO）
@@ -486,7 +489,7 @@ _BASE_URL_VARY = 'Host, X-Forwarded-Host, X-Forwarded-Proto'   # ★ v1.2（S2-3
 _HOST_RE / _HOST_IPV6_RE = ...           # ★ v1.2：Host 格式校验正则
 ```
 
-> **线程账**：本模块新增线程来源 = healthz 专用执行器（≤5，懒创建）+ 扇出执行器（≤3，懒创建）；`fanout` 线程仅在首次并发扇出时创建（AC-S9 线程总账 +8 上界，见 §10#15）。
+> **线程账**：本模块新增线程来源 = healthz 专用执行器（≤5，懒创建）+ 扇出执行器（≤3，懒创建）+ **启动预热线程 `warm_transport`（1，daemon，v1.4；随 `main()` 起一次，不常驻轮询）**；`fanout` 线程仅在首次并发扇出时创建（AC-S9 线程总账 **+9** 上界，见 §10#15/#31）。
 
 > `_LHBTABLE_*` / `_LONGHU_PAGE_*` 是**从现状 `Request(...)` 字面量提取**的模块级常量（现状 `server.py:143-176` 内联）；**本次未上收 `config.py`**（`config.md` v1.1 的常量清单未登记该域）——登记见 §10#1。
 
@@ -524,7 +527,7 @@ _HOST_RE / _HOST_IPV6_RE = ...           # ★ v1.2：Host 格式校验正则
 | `ROUTES`（5 项 dict，含 `handler`/`name`/`title`/`link`/`description`） | **不变**（OPML/healthz/首页均依赖其结构） |
 | `RSSHandler.timeout = 30` | 不变（主端口兜底） |
 | `_serve_index` / `_serve_feed` | 不变（`_serve_feed` 内部改传 `varies_on_host=not PUBLIC_BASE_URL`） |
-| `_base_url()` / `_send_text` / `_send_json` | **签名扩展（v1.2）**：`_base_url` 加 Host 校验；`_send_text(..., varies_on_host=False, write_body=True)`；`_send_json(data, write_body=True, cache=True)`（★ v1.3：**无 `status` 形参**——恒调 `_send_text(200, …)`）；新增 `_send_json_shape`（★ v1.3：恒 200，无 503 分支） |
+| `_base_url()` / `_send_text` / `_send_json` | **签名扩展（v1.2）**：`_base_url` 加 Host 校验；`_send_text(..., varies_on_host=False, write_body=True)`；`_send_json(data, write_body=True, cache=True)`（★ v1.3：**无 `status` 形参**——恒调 `_send_text(200, …)`）；新增 `_send_json_shape`（★ v1.3：恒 200，无 503 分支）；★ **v1.4**：新增 `_accepts_gzip(header) -> bool`，`_send_text` 内部按 `GZIP_MIN_BYTES`/`GZIP_COMPRESSLEVEL` 决定 gzip 并补发 `Content-Encoding`/`Vary`（**签名不变**） |
 | `BoundedThreadPoolServer.__init__(*args, max_workers=MAX_WORKERS, max_inflight=None, **kwargs)` | **增 `max_inflight` 形参（v1.1）**；★ v1.2 增类属性 `request_queue_size = LISTEN_BACKLOG` |
 | `init_cdp()` / `_cdp_memory_watchdog()` / `main()` | 签名不变（watchdog 内部决策改调 cdp_engine） |
 | `handle_cls_telegraph` / `handle_eastmoney_kuaixun` / `handle_ths_kuaixun` / `handle_jin10_flash` / `handle_wallstreetcn_live(feed_url=None)` | 签名不变；内部 `ttl` 改 `cache_policy('news_url')['ttl']` |
@@ -544,6 +547,7 @@ _HOST_RE / _HOST_IPV6_RE = ...           # ★ v1.2：Host 格式校验正则
 ```python
 # ── 标准库 ────────────────────────────────────────────────────────────
 import atexit
+import gzip                     # ★ v1.4：_send_text 响应压缩
 import json
 import os
 import re
@@ -576,7 +580,8 @@ from .config import (
 )   # ★ 删除：CACHE_TTL、_trading_tiers；★ v1.2：MAX_HEALTH_INFLIGHT 不再直接 import（改用 config. 前缀）
 from .cache import (fetch_json, feed_cache_get, feed_cache_put,
                     _feed_fetch_locks, _feed_fetch_locks_lock,
-                    build_batch_response, _fill_missing, FetchError)       # ★ v1.2：FetchError 新增
+                    build_batch_response, _fill_missing, FetchError,
+                    warm_transport)                                        # ★ v1.4：warm_transport（main() 预热线程）
 from .utils import (                                                       # 不变（handler + main() 均用）
     generate_rss, generate_error_rss, generate_opml, count_rss_items,
     parse_cls_items, parse_jin10_items, parse_wallstreetcn_items,
@@ -751,6 +756,8 @@ _max_inflight: MAX_INFLIGHT if max_inflight is None else max_inflight
 | **BR-SRV-31** | `/cls/hotplate` 失败形态**唯一口径**：分区 error 客体（`plate_<type>` = `{'error':…}`，分区可独立降级）+ **三分区全失败时顶层补 `error`**（值 = 三块 error 摘要）；`hot_plates` 仅在至少一个分区取到 `main_fund_diff` 时出现 | SAD §2.3 D-4 / §2.4 / AC-A5（修 P1-3） |
 | **BR-SRV-32** | **longhu 席位配对（v1.2 / P0 修复）**：每匹配到一个"买入/卖出前5名营业部"`<th>` 标签的表 ⇒ `broker_idx` **无条件自增**（即便该表解析出 0 条 `entries`——`len(bro_cells)<4`、空名、`<th>` 数据行）。`stock_idx = broker_idx // 2` 与 `stocks` 位置配对，**跳过自增会静默错配后续所有股票的席位**（HTTP 200 无错误信号）。`stock_idx >= len(stocks)` ⇒ `log.warning` 丢弃该项（不静默）；末尾 `broker_idx != 2×len(stocks)` ⇒ `log.warning` 错位告警 | P0 / 数据正确性 |
 | **BR-SRV-33** | **请求派生 base URL 加固（v1.2 / S2-3）**：`PUBLIC_BASE_URL` 非空则恒优先；否则取 `X-Forwarded-Host` → `Host`，格式校验（`hostname[:port]`/`[v6][:port]`，非法 ⇒ `localhost:PORT`），并在响应标 `Cache-Control: private` + `Vary: Host, X-Forwarded-Host, X-Forwarded-Proto`（feed/opml 体嵌入了该 Host ⇒ 防共享缓存串号污染） | S2-3 |
+| **BR-SRV-34** | **响应 gzip 协商（v1.4 / AC-E1）**：`_accepts_gzip(header)` 按 RFC 9110 §12.5.3 解析 `Accept-Encoding`（逗号分隔 token + `;q=` 权重、coding 大小写不敏感、显式 `gzip` 覆盖 `*`、**`q=0` 表示拒绝**）；`_send_text` 仅当 `len(body_bytes) >= config.GZIP_MIN_BYTES` **且** 被接受时 `gzip.compress(..., config.GZIP_COMPRESSLEVEL)` 并加 `Content-Encoding: gzip`；**`Vary: Accept-Encoding` 在 `gzipped or cache` 时必发**（表示随编码变，不可缓存响应亦须标） | AC-E1 / S1（旧子串匹配对 `gzip;q=0` 误压缩、漏 `GZIP`） |
+| **BR-SRV-35** | **启动传输预热（v1.4 / 冷启动）**：`main()` 起 `threading.Thread(target=warm_transport, daemon=True)`——`cache.warm_transport` 走池**仅握手不发业务请求**（主机由 `config.warm_hosts()` 从 URL 常量派生），**总函数绝不抛**；不阻塞启动、不参与 `/healthz`；失败静默 | BUG-冷启动-01（冷扇出 ≈4.2s > 0.8×tick） |
 
 ---
 
@@ -1374,17 +1381,54 @@ def _cache_age(self):
     domain = _CACHE_AGE_DOMAINS.get(path, _DEFAULT_AGE_DOMAIN)
     return cache_policy(domain)['ttl']
 
+def _accepts_gzip(header):                                               # ★ v1.4（RFC 9110 §12.5.3）
+    """coding token 大小写不敏感；`;q=0` 表示拒绝；显式 `gzip` 覆盖 `*`。"""
+    best = None
+    for part in header.split(','):
+        tokens = part.split(';')
+        coding = tokens[0].strip().lower()
+        if not coding:
+            continue
+        q = 1.0
+        for param in tokens[1:]:
+            key, _, val = param.partition('=')
+            if key.strip().lower() == 'q':
+                try:
+                    q = float(val.strip())
+                except ValueError:
+                    q = 0.0
+        if coding == 'gzip':
+            best = q                      # 显式 coding 覆盖 '*'
+        elif coding == '*' and best is None:
+            best = q
+    return best is not None and best > 0
+
+
 def _send_text(self, status_code, content_type, body, cache=True,
                varies_on_host=False, write_body=True):                   # ★ v1.2 增 varies_on_host
     body_bytes = body.encode('utf-8')
+    gzipped = False
+    # ★ v1.4：大响应且客户端接受 ⇒ gzip（level=1，CPU 优先；334KB JSON ≈10× 缩减）
+    if (len(body_bytes) >= config.GZIP_MIN_BYTES
+            and _accepts_gzip(self.headers.get('Accept-Encoding', ''))):
+        body_bytes = gzip.compress(body_bytes, config.GZIP_COMPRESSLEVEL)
+        gzipped = True
     self.send_response(status_code)
     self.send_header('Content-Type', content_type)
     self.send_header('Content-Length', str(len(body_bytes)))
+    vary_parts = []
+    if gzipped:
+        self.send_header('Content-Encoding', 'gzip')
     if cache:
         scope = 'private' if varies_on_host else 'public'                # ★ v1.2：请求派生 Host ⇒ private
         self.send_header('Cache-Control', f'{scope}, max-age={self._cache_age()}')
         if varies_on_host:
-            self.send_header('Vary', _BASE_URL_VARY)
+            vary_parts.append(_BASE_URL_VARY)
+    # ★ v1.4：表示随 Accept-Encoding 变 ⇒ gzipped 或可缓存时都必须 Vary
+    if gzipped or cache:
+        vary_parts.append('Accept-Encoding')
+    if vary_parts:
+        self.send_header('Vary', ', '.join(vary_parts))
     self.end_headers()
     if write_body:
         self.wfile.write(body_bytes)
@@ -1426,13 +1470,16 @@ def _send_error(self, msg, write_body=True):                             # ★ �
 | `/healthz` / `/` / `/opml.xml` | L4（300） | 300（不变） | `_DEFAULT_AGE_DOMAIN='f10'`（L4 恒 300）；未登记路径现仅此三项 |
 | 请求派生 Host（`PUBLIC_BASE_URL` 未设）的 feed/opml | `public` | **`private` + `Vary`**（★ v1.2） | S2-3 防共享缓存串号 |
 
-### 5.9 `main()` 的改动点（仅 3 处）
+### 5.9 `main()` 的改动点（4 处）
 
 ```python
     # ① 启动日志 TTL 来源（删 CACHE_TTL 后不得留断链）
     log.info(f'Cache TTL: {cache_policy("feed")["ttl"]}s | Timeout: {REQUEST_TIMEOUT}s')
-    # ② 后台线程清单不变（warm_jin10 / init_cdp / _cdp_memory_watchdog / 4 prefetch / push_loop / run_stream_server）
+    # ② 后台线程清单：warm_jin10 / ★ warm_transport（v1.4）/ init_cdp /
+    #    _cdp_memory_watchdog / 4 prefetch / push_loop / run_stream_server
+    threading.Thread(target=warm_transport, daemon=True).start()   # ★ v1.4：预热传输（DNS + 池化握手）
     # ③ 服务类构造不变：BoundedThreadPoolServer(('0.0.0.0', PORT), RSSHandler)
+    # ④ warm_transport 是总函数 / daemon：上游宕机时静默，**绝不** gate 启动或 /healthz
 ```
 
 `_serve_index` 的 `json_apis` 表仅改 3 个 `needs_cdp` 布尔（§2.9.1 表）。
@@ -1487,6 +1534,7 @@ def _send_error(self, msg, write_body=True):                             # ★ �
 4. **healthz 准入位恰好释放一次**：`acquire` 成功 → 该批任务全部结束后由 `_HealthBatch` 释放（**不是** `finally` 立即释放，修 P1-1）；失败路径不 acquire、不 release。**在飞任务数 ≤ `MAX_HEALTH_INFLIGHT × len(ROUTES)` = 25，专用执行器工作队列 ≤ 20**（可断言上界；`BoundedSemaphore` 超放会抛 `ValueError` ⇒ 由类型再次兜底）。
 5. **feed 双检不可省**：并发 N 请求在 miss 窗口只产生 1 次回源（可用回源计数白盒断言）。
 6. **单请求上界（AC-E2 ≤15s）**：REST 批量 ≤15s（stock_api 预算）；`/cls/hotplate`、`/cls/plate` 的 3 段经 `_fetch_concurrent` **≤3 并发** ⇒ 耗时 ≤ `max(单次取数)` ≤ `REQUEST_TIMEOUT=10s`；`/ths/longhu` 的 2 URL **并发** ⇒ ≤10s（修 P1-2，`§10#10` 的 AC 归属已更正为 **E2**）；★ v1.2：整轮扇出受 **`_FANOUT_WAIT_BUDGET=REQUEST_TIMEOUT`** 界定（共享池被占时单请求也不会拖到 ~190s，超期项 `cancel()` + `FetchError('upstream_timeout')`）；面板 CDP ≤8s/次（cdp_engine）。
+7. **压缩与缓存协商一致（v1.4）**：`Content-Encoding: gzip` 当且仅当 `len(body_bytes) >= config.GZIP_MIN_BYTES` 且 `_accepts_gzip(Accept-Encoding)` 为真；**`Vary: Accept-Encoding` 在 `gzipped or cache` 时必发**——可断言：`cache=True` 的任意响应、以及 `cache=False` 的 gzip 响应都含该头，`cache=False` 且未 gzip 的响应不含。`gzip;q=0` 的请求**不压缩**（`_accepts_gzip` 返回 False）。
 
 ### 6.3 异常兜底范围声明
 
@@ -1603,6 +1651,8 @@ def _send_error(self, msg, write_body=True):                             # ★ �
 | **SRV-T41** longhu 席位配对（v1.2） | 构造 N 个股票行 + 其中一张表解析出 0 条 entries ⇒ 断言 `broker_idx` 仍按 2×股票数推进、后续股票席位**不偏移**；`broker_idx != 2×len(stocks)` ⇒ `log.warning` 命中 | P0 回归 |
 | **SRV-T42** `_base_url` 加固（v1.2） | 无 `PUBLIC_BASE_URL` 时：`Host: evil/@x` ⇒ 返回 `http://localhost:8053`；合法 `Host: example.com` ⇒ `http://example.com`；`X-Forwarded-Host` 优先；响应含 `Cache-Control: private` + `Vary: Host, …` | S2-3 |
 | **SRV-T43** `_cache_age` 面板域（v1.2） | 4 面板路径的 `max-age == cache_policy('quote')['ttl']`（8/120），**非** 300；`_cache_age` 用 `urlparse`：absolute-form 请求行解析出正确 path | S2-3 / A3 |
+| **SRV-T44** gzip 协商（v1.4） | ① `Accept-Encoding: gzip` + 大响应（≥1024B）⇒ `Content-Encoding: gzip` 且体可 `gzip.decompress` 还原；② `gzip;q=0` ⇒ **不压缩**（无 `Content-Encoding`）；③ `GZIP` / `*` ⇒ 压缩；④ 小响应（<1024B）⇒ 不压缩；⑤ `cache=True` 响应恒含 `Vary: Accept-Encoding`；⑥ `cache=False` + gzip 响应**亦**含该头，`cache=False` + 未压缩则不含 | E1 / S1 |
+| **SRV-T45** `main()` 预热线程（v1.4） | patch `warm_transport` 计数 ⇒ `main()` 启动即调用一次（daemon 线程内）；`warm_transport` 抛异常 / 上游不可达 ⇒ **不影响**启动与 `/healthz`（静默、总函数） | 冷启动 / S9 |
 
 ## 9. AC 追溯矩阵
 
@@ -1636,6 +1686,8 @@ def _send_error(self, msg, write_body=True):                             # ★ �
 | 面板 cache-age 域 = quote（BR-SRV-8b） | S2-3 / A3 |
 | longhu 席位配对无条件自增（BR-SRV-32） | 数据正确性（P0） |
 | `request_queue_size = LISTEN_BACKLOG`（§2.7） | E1（突发连接） |
+| 响应 gzip 协商 + `Vary: Accept-Encoding`（BR-SRV-34 / §1.1#11 / §5.8） | **E1**（网络时间） / S1 |
+| `main()` 预热 `warm_transport`（BR-SRV-35 / §1.1#12 / §5.9） | 冷启动（与 E1/E2 相关；观测项） |
 
 > **AC 覆盖核对**：本模块承载 **S1/A5/A8/A9/E2/E8/E9/S4/S5/S7/S8/S10** 共 12 条（v1.1 新增 **E2**：server 自有的 hotplate/plate/longhu 单请求上界）；`E1/E3/E4` 由基础层/数据层承载（本模块仅提供 `_cache_age` 与序列化路径）；`E6` 由 config/stock_api 承载（本模块提供 plate 侧派生）；`A3` 由 stock_api 承载（本模块提供 feed 侧同源）。
 
@@ -1659,7 +1711,7 @@ def _send_error(self, msg, write_body=True):                             # ★ �
 | 12 | `healthz_inflight` gauge 的写入点 | `metrics.md` §3.2 owner = `server.build_health_payload` | 由 `_set_health_inflight` 统一写入（`build_health_payload` 的唯一子路径） | owner 不变，落点细化 |
 | 13 | `_health_last_snapshot` 是否含 `check=1` 的真实结果 | SAD 未定义 | **含**：每次成功组装（`check=0` 或 `check=1`）都刷新 | `stale` 回退给"最近一次真实快照"信息量最大；`check=0` 体也刷新（否则长期无 `check=1` 时 stale 永远无快照） |
 | 14 | `build_health_payload` 的 `policy` 字段含 `encoding` | SAD §2.6 schema 示例只列 5 键 | `cache_policy('longhu')` 会**额外带 `encoding:'gbk'`**（`config.md` BR-CFG-7 规定） | 与 `config.md` 契约一致；`policy` 字段本就是 policy 原样透出。**不改 schema 断言**（断言应为"⊇ 5 键 ∪ longhu 的 encoding"） |
-| 15 | **外部上游扇出执行器**（新增） | SAD §4.1 只要求 hotplate ≤3 并发；未指定执行器归属 | 新增模块级**共享** `_fanout_executor`（`max_workers=_FANOUT_MAX_WORKERS=3`，懒创建、双检），供 hotplate/plate/longhu 复用；**不新增 config 常量**（`3` 为机制常量，同 `_HEALTH_POLL`） | 每请求新建 `ThreadPoolExecutor` 会引入不可控线程抖动；共享池使**全局**在这些端点上的在飞取数 ≤3（同时满足 AC-E8 资源口径）。线程账 +3（懒创建，AC-S9 上界见 §2.9） |
+| 15 | **外部上游扇出执行器**（新增） | SAD §4.1 只要求 hotplate ≤3 并发；未指定执行器归属 | 新增模块级**共享** `_fanout_executor`（`max_workers=_FANOUT_MAX_WORKERS=3`，懒创建、双检），供 hotplate/plate/longhu 复用；**不新增 config 常量**（`3` 为机制常量，同 `_HEALTH_POLL`） | 每请求新建 `ThreadPoolExecutor` 会引入不可控线程抖动；共享池使**全局**在这些端点上的在飞取数 ≤3（同时满足 AC-E8 资源口径）。线程账 +3（懒创建，AC-S9 上界见 §2.9）；★ v1.4：另有 `main()` 的 `warm_transport` 预热线程 +1（daemon，启动一次性） |
 | 16 | **healthz 准入位语义**（修 P1-1，新增） | SAD §2.6：*并发 check 任务在飞数被信号量钉死，执行器内部队列**从不堆积**（提交前已准入）* | 引入 `_HealthBatch`：准入位由**该批全部 future 的完成回调**释放（非 `_run_health_checks` 返回时立即释放）⇒ 在飞任务 ≤25、工作队列 ≤20，SAD 断言**成立** | v1.0 的"3s `break` 后 `finally release`"只约束轮询窗口、不约束在飞任务 ⇒ 持续慢 check 下无界队列累积（重演 SAD P1-3 的放大器）。响应时点不变（仍 ~3s 返回），仅**释放时点**后移 |
 | 17 | **handler 返回"组装 dict"（非 `(results, errors)`）** | SAD 对 `handle_cls_*` 的措辞将回改 | 保持现状口径：`handle_cls_*(codes, deadline=None, dropped=0) -> dict`（内部调 `build_batch_response`）；**编排层已批准**，SAD 措辞由 system-architect 回改 | `_PROGRESS.md` §B 锁定契约；server 只注入 `dropped`，组装点唯一 |
 | 18 | **error-only payload ⇒ 503**（v1.2；★ **v1.3 已回退**） | SAD §2.1 AC-A5 五类状态语义只定义"上游失败 → 200 + error 客体" | **回退**：业务端点降级体**恒 200**（BR-SRV-5b）；`_json_payload_has_data` 与 `_send_json_shape` 的 503 分支**已删**；`http_503_total` 计数点回到 3 个 | v1.2 曾把"CDP/上游整体不可用"改判 503 以让监控可区分——但那**改动了既有对外状态码契约**，与 AC-A5「上游失败 → 200 + error 客体」冲突，且既有消费方按 200 解析。编排层裁决 **N1：回退**。真正的可用性观测由 `/healthz`（503 语义 + `stale`/`metrics`/`cdp` 字段）承担 |
@@ -1674,6 +1726,8 @@ def _send_error(self, msg, write_body=True):                             # ★ �
 | 27 | **`handle_ths_longhu` 席位配对无条件自增**（v1.2） | SAD 未定义解析细节 | 标签匹配即 `broker_idx += 1`（即便该表 0 条 entries）；`stock_idx >= len(stocks)` 丢弃 + 告警；末尾错位告警 | 旧实现跳过自增会**静默错配**后续所有股票的买卖席位（HTTP 200 无错误信号）——数据正确性 P0 |
 | 28 | **import 面更正**（v1.2） | v1.1 §2.10 块含已不在使用面的名字 | 增 `page_data` / `FetchError` / `LISTEN_BACKLOG` / `VALID_MARKETS`；删 `handle_cls_stock` / `fetch_cls_fundflow` / `fetch_cls_timeline` / `strip_html` / `escape_xml`；`MAX_HEALTH_INFLIGHT` 改用 `config.` 前缀 | 文档与实现逐行对齐（编码者可直接整体替换） |
 | 29 | **N1 回退：业务端点降级恢复 `200 + error 体`**（v1.3） | AC-A5 只定义"上游失败 → 200 + error 客体"；v1.2 的 error-only ⇒ 503 属**超集变更** | `_send_json_shape` 恒 `_send_json(payload)`（**200**）；**`_json_payload_has_data` 删除**；**`_send_json` 去掉 `status` 形参**；**`http_503_total` 计数点 4→3**（`_reject_503` / `stream._serve_sse` / `/healthz`）；降级体 `cache=cache` ⇒ **按域 TTL 可缓存** | 编排层裁决 N1：v1.2 改判 503 动摇了既有对外状态码契约，既有消费方按 200 解析；`/healthz` 已能承担可用性观测，业务端点无需第二个 503 语义（且 `/healthz` 的 503 属端点自身语义，**不构成业务端点先例**） |
+| 30 | **`_accepts_gzip` + 响应 gzip（v1.4）** | SAD §2.6/§4.3 未定义响应压缩 | `_accepts_gzip(header)` 按 RFC 9110 解析；`_send_text` 对 `≥ GZIP_MIN_BYTES(1024)` 且被接受的响应 `gzip.compress(level=GZIP_COMPRESSLEVEL=1)` + `Content-Encoding: gzip`；**`Vary: Accept-Encoding` 在 `gzipped or cache` 时必发** | 旧实现用子串匹配 ⇒ 对 `gzip;q=0`（明确拒绝）仍压缩、且漏掉大写 `GZIP`；共享缓存会把 gzip 体复用给不支持它的客户端。`GZIP_*` 为 `config` env（`config.md` §2.7） |
+| 31 | **`main()` 预热 `warm_transport`（v1.4）** | SAD §4.3 未定义进程启动传输预热 | 新增 daemon 线程 `warm_transport`（`HTTP_WARM_CONNECTIONS=1` / `HTTP_WARM_TIMEOUT=2.0`；主机由 `config.warm_hosts()` 从 URL 常量派生） | 冷进程首个 refresh 空连接池/空 DNS ⇒ 50 码 quote 扇出 ≈4.2s（> 0.8×tick 预算）；仅握手不发业务请求，不 gate 启动/`/healthz`（`config.md` §2.7 已登记 env） |
 
 ---
 
@@ -1687,10 +1741,11 @@ def _send_error(self, msg, write_body=True):                             # ★ �
 - [x] 关键流程伪代码齐备：分发 / `_guard` / 批量截断 / feed 双检 / **`_fetch_concurrent` 扇出** / plate stagger / longhu GBK / healthz 准入（`_HealthBatch`） / 过载 503 / watchdog
 - [x] 错误处理矩阵（400/404/503/200-error/200-值域 + hotplate 全/部分分区）+ 降级分层 + 6 条可断言不变式
 - [x] 并发安全：锁清单 + 锁序（`_feed_fetch_locks_lock → per-path`；metrics 永远最内层）+ 热点开销 + 并发正确性依据
-- [x] 测试要点 **43 条**映射 PRD AC（v1.1 新增 T34/T35；**v1.2 新增 T36–T43**）；回归用例逐条列名（含 **2 条**跨模块交叉引用必改：见 §10.1）
+- [x] 测试要点 **45 条**映射 PRD AC（v1.1 新增 T34/T35；v1.2 新增 T36–T43；**v1.4 新增 T44–T45**）；回归用例逐条列名（含 **2 条**跨模块交叉引用必改：见 §10.1）
 - [x] AC 追溯：S1/A5/A8/A9/**E2**/E8/E9/S4/S5/S7/S8/S10 主承载，A3/E6/A6 协同项已注明；**v1.2 增 S2-5/S2-3/P1-6**
 - [x] 与基础层/数据层接口逐项对齐（`cache_policy`/`feed_cache_get|put`/`build_batch_response`/`page_data`/`restart_window_snapshot`/`watchdog_restart_skip_reason`/`metrics`）
-- [x] 偏差 **29 项**全部登记（**不改 SAD / 不改 PRD / 不改 config.md**）
+- [x] 偏差 **31 项**全部登记（**不改 SAD / 不改 PRD / 不改 config.md**）
+- [x] **v1.4**：gzip 协商 `_accepts_gzip` + `Vary: Accept-Encoding`（BR-SRV-34 / §1.1#11 / §5.8 / §6.2#7 / T44）；`main()` 预热 `warm_transport`（BR-SRV-35 / §1.1#12 / §5.9 / T45）；线程账 +9
 - [x] **v1.3（N1 回退）**：业务端点降级 = `200 + error 体`（§1.1#9 / §2.1 yaml + 状态表 / §2.2 `_send_json_shape` / §2.9 `_json_payload_has_data` 删除 / §2.10 / §4.1 BR-SRV-5b / §5.2 注 + §5.8 伪代码 / §6.1 / §9 / §10#18·#24·#29 / §11.3）；`_send_json` 无 `status`；`http_503_total` 计数点 3；降级体可缓存
 - [x] **v1.3（N1 回退）**：`/healthz` 的 503 明确为**端点自身语义**（BR-SRV-21 / §5.2 / §6.1 / §9 / §10#29），不构成业务端点先例
 
@@ -1742,6 +1797,15 @@ def _send_error(self, msg, write_body=True):                             # ★ �
 | 6 | `/healthz` 503 定位为**端点自身语义**（非业务端点先例） | BR-SRV-21 / §5.2 / §6.1 / §9 / §10#29 | v1.2：未区分端点归属 |
 | 7 | 测试 `SRV-T36` 语义反转（error-only ⇒ **200**，`http_503_total` **不增**） | §8 T36 | v1.2：断言 503 |
 
+### 11.4 v1.4 契约同步对照（响应 gzip + 启动预热 · 以代码为准）
+
+| # | 同步项 | 落点 | 与 v1.3 的差异 |
+|---|--------|------|---------------|
+| 1 | `_accepts_gzip(header)` 按 RFC 9110 §12.5.3 解析 `Accept-Encoding`（`gzip;q=0` 拒绝、`GZIP`/`*` 接受） | §1.1#11 / §4.6 BR-SRV-34 / §5.8 / §6.2#7 / §8 T44 / §10#30 | v1.3：无（响应恒不压缩） |
+| 2 | `_send_text` 对 `len(body) >= GZIP_MIN_BYTES(1024)` 且被接受的响应 `gzip.compress(level=1)` + `Content-Encoding: gzip` | §5.8 / §1.3（`import gzip`） | v1.3：无 |
+| 3 | **`Vary: Accept-Encoding` 在 `gzipped or cache` 时无条件发**（含 `cache=False` 的 gzip 响应） | §5.8 / §6.2#7 | v1.3：仅 `varies_on_host` 时发 `_BASE_URL_VARY` |
+| 4 | `main()` 新增 daemon 线程 `warm_transport`（预热上游传输；不阻塞启动/`/healthz`，失败静默） | §1.1#12 / §4.6 BR-SRV-35 / §5.9 / §2.9 线程账 / §8 T45 / §10#31 / §1.3·§2.10 import | v1.3：main() 3 处改动，无预热线程 |
+
 ### 10.1 既有测试的必改清单（供 code-developer / tester 依此同步）
 
 | 测试 | 现状 | 必改点 | 理由 |
@@ -1753,6 +1817,8 @@ def _send_error(self, msg, write_body=True):                             # ★ �
 | 新增 | — | `SRV-T*` **35 条** | 本详设 §8 |
 
 > 本文档与 `config.md` **v1.3** / `cache.md` **v1.3** / `metrics.md` v1.1 / `stock_api.md` **v1.2** / `market_api.md` **v1.3** / `cdp_engine.md` v1.1 / `stream.md` **v1.2** 共同构成 P6c 优化专项的模块级详设；**server.py 的编码可与 stream.md 并行**（二者无共享文件的写冲突：server 仅延迟 import stream 的 `push_loop`/`run_stream_server`）。
+>
+> **v1.4 修订**：**P7b 契约同步（响应 gzip + 启动预热 · 以代码为准）**——见 §11.4 对照表（4 组同步项）；§10 偏差扩至 **31 项**（新增 #30/#31）；测试要点扩至 **45 条**（新增 T44/T45）。**未改代码、未改其他文档**。
 >
 > **v1.3 修订（N1 回退）**：**业务端点降级恢复 `200 + error 体`**——见 §11.3 对照表（7 组同步项）；`_json_payload_has_data` 删除、`_send_json` 去 `status`、`http_503_total` 计数点 3、降级体可缓存；§10 偏差扩至 **29 项**（新增 #29）；测试要点仍 **43 条**（`SRV-T36` 语义反转）。**未改代码、未改其他文档（仅本文件 + `_PROGRESS.md`）**。
 >

@@ -48,7 +48,8 @@ from .config import (
 )
 from .cache import (fetch_json, feed_cache_get, feed_cache_put,
                     _feed_fetch_locks, _feed_fetch_locks_lock,
-                    build_batch_response, _fill_missing, FetchError)
+                    build_batch_response, _fill_missing, FetchError,
+                    warm_transport)
 from .utils import (
     generate_rss, generate_error_rss, generate_opml, count_rss_items,
     parse_cls_items, parse_jin10_items, parse_wallstreetcn_items,
@@ -535,6 +536,36 @@ _HOST_RE = re.compile(r'^[A-Za-z0-9](?:[A-Za-z0-9.\-]{0,253}[A-Za-z0-9])?'
                       r'(?::\d{1,5})?$')
 _HOST_IPV6_RE = re.compile(r'^\[[0-9A-Fa-f:.]{2,45}\](?::\d{1,5})?$')
 _BASE_URL_VARY = 'Host, X-Forwarded-Host, X-Forwarded-Proto'
+
+
+def _accepts_gzip(header):
+    """True when ``Accept-Encoding`` explicitly accepts gzip (RFC 9110 §12.5.3).
+
+    Parses the comma-separated coding list with optional ``;q=`` weights:
+    coding tokens are case-insensitive, ``*`` accepts anything not explicitly
+    refused, and ``q=0`` means "not acceptable".  A naive substring test used
+    to gzip responses for clients that had explicitly refused gzip
+    (``gzip;q=0``) while missing uppercase (``GZIP``).
+    """
+    best = None
+    for part in header.split(','):
+        tokens = part.split(';')
+        coding = tokens[0].strip().lower()
+        if not coding:
+            continue
+        q = 1.0
+        for param in tokens[1:]:
+            key, _, val = param.partition('=')
+            if key.strip().lower() == 'q':
+                try:
+                    q = float(val.strip())
+                except ValueError:
+                    q = 0.0
+        if coding == 'gzip':
+            best = q                      # explicit coding wins over '*'
+        elif coding == '*' and best is None:
+            best = q
+    return best is not None and best > 0
 
 
 def _valid_host_header(host):
@@ -1223,12 +1254,13 @@ class RSSHandler(BaseHTTPRequestHandler):
         body_bytes = body.encode('utf-8')
         gzipped = False
         if (len(body_bytes) >= config.GZIP_MIN_BYTES
-                and 'gzip' in self.headers.get('Accept-Encoding', '')):
+                and _accepts_gzip(self.headers.get('Accept-Encoding', ''))):
             body_bytes = gzip.compress(body_bytes, config.GZIP_COMPRESSLEVEL)
             gzipped = True
         self.send_response(status_code)
         self.send_header('Content-Type', content_type)
         self.send_header('Content-Length', str(len(body_bytes)))
+        vary_parts = []
         if gzipped:
             self.send_header('Content-Encoding', 'gzip')
         if cache:
@@ -1237,11 +1269,15 @@ class RSSHandler(BaseHTTPRequestHandler):
             scope = 'private' if varies_on_host else 'public'
             self.send_header('Cache-Control',
                              f'{scope}, max-age={self._cache_age()}')
-            # Vary: Accept-Encoding always (body depends on it when gzip-ready);
-            # host-sensitive base URL additionally varies on host headers.
-            vary = ('Host, X-Forwarded-Host, X-Forwarded-Proto, Accept-Encoding'
-                    if varies_on_host else 'Accept-Encoding')
-            self.send_header('Vary', vary)
+            if varies_on_host:
+                vary_parts.append(_BASE_URL_VARY)
+        # The representation depends on Accept-Encoding whenever it could have
+        # been gzipped — even for uncacheable responses, a shared cache must not
+        # reuse the gzip body for a client that cannot decode it.
+        if gzipped or cache:
+            vary_parts.append('Accept-Encoding')
+        if vary_parts:
+            self.send_header('Vary', ', '.join(vary_parts))
         self.end_headers()
         if write_body:
             self.wfile.write(body_bytes)
@@ -1466,6 +1502,11 @@ def main():
 
     from .utils import warm_jin10_headers
     threading.Thread(target=warm_jin10_headers, daemon=True).start()
+    # Pre-warm the upstream transport (DNS + one pooled connection per SSE
+    # hot-path host) so the first real refresh of a cold process is not fully
+    # cold.  Daemon thread: it never delays startup or /healthz, and
+    # `warm_transport` is total/best-effort, so a dead upstream is silent.
+    threading.Thread(target=warm_transport, daemon=True).start()
     threading.Thread(target=init_cdp, daemon=True).start()
     threading.Thread(target=_cdp_memory_watchdog, daemon=True).start()
     threading.Thread(target=_fundflow_prefetch_loop, daemon=True).start()
