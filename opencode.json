@@ -91,12 +91,12 @@
           "tests/**": "allow"
         },
         "bash": {
-          "python -m py_compile": "allow",
-          "python -m unittest": "allow",
-          "git diff": "allow",
-          "git status": "allow",
-          "git log": "allow",
-          "*": "deny"
+          "*": "deny",
+          "python -m py_compile *": "allow",
+          "python -m unittest *": "allow",
+          "git status *": "allow",
+          "git log *": "allow",
+          "git diff *": "allow"
         }
       },
       "prompt": "{file:.opencode/skills/code-developer/SKILL.md}"
@@ -105,8 +105,8 @@
       "description": "代码质量门禁，评审代码并输出结构化报告",
       "mode": "subagent",
       "permission": {
-        "edit": { "*": "deny", "doc/review/**": "allow", "doc/tester/drift-report.md": "allow" },
-        "write": { "*": "deny", "doc/review/**": "allow", "doc/tester/drift-report.md": "allow" },
+        "edit": { "*": "deny", "doc/review/**": "allow" },
+        "write": { "*": "deny", "doc/review/**": "allow" },
         "bash": "deny"
       },
       "prompt": "{file:.opencode/skills/code-reviewer/SKILL.md}"
@@ -125,7 +125,17 @@
           "doc/tester/**": "allow",
           "tests/**": "allow"
         },
-        "bash": "allow"
+        "bash": {
+          "*": "deny",
+          "python *": "allow",
+          "python3 *": "allow",
+          "docker compose *": "allow",
+          "docker ps *": "allow",
+          "docker logs *": "allow",
+          "docker stats *": "allow",
+          "curl *": "allow",
+          "git *": "allow"
+        }
       },
       "prompt": "{file:.opencode/skills/tester/SKILL.md}"
     },
@@ -135,7 +145,17 @@
       "permission": {
         "edit": { "*": "deny", ".opencode/skills/**": "allow", ".opencode/rules/**": "allow", ".opencode/scripts/log-skill.sh": "allow", ".opencode/scripts/log-feedback.sh": "allow" },
         "write": { "*": "deny", ".opencode/skills/**": "allow", ".opencode/rules/**": "allow", ".opencode/scripts/log-skill.sh": "allow", ".opencode/scripts/log-feedback.sh": "allow" },
-        "bash": "allow"
+        "bash": {
+          "*": "deny",
+          "python *": "allow",
+          "python3 *": "allow",
+          "git status *": "allow",
+          "git log *": "allow",
+          "git diff *": "allow",
+          "git show *": "allow",
+          ".opencode/scripts/*.sh *": "allow",
+          ".opencode/project/scripts/*.sh *": "allow"
+        }
       },
       "prompt": "{file:.opencode/skills/self-evolve/SKILL.md}"
     },
@@ -148,8 +168,6 @@
           "_MEMORY_CACHE.md": "allow",
           ".opencode/project/**": "allow",
           ".opencode/scripts/**": "allow",
-          "doc/review/**": "allow",
-          "doc/tester/**": "allow",
           "API.md": "allow",
           "README.md": "allow",
           "AGENTS.md": "allow",
@@ -166,8 +184,6 @@
           "_MEMORY_CACHE.md": "allow",
           ".opencode/project/**": "allow",
           ".opencode/scripts/**": "allow",
-          "doc/review/**": "allow",
-          "doc/tester/**": "allow",
           "API.md": "allow",
           "README.md": "allow",
           "AGENTS.md": "allow",
@@ -180,14 +196,13 @@
           ".gitignore": "allow"
         },
         "bash": {
-          "git status": "allow",
-          "git log": "allow",
-          "git diff": "allow",
-          "git diff --stat": "allow",
-          "git diff --check": "allow",
-          "git fetch": "allow",
-          "git pull": "allow",
-          "git push": "allow",
+          "*": "deny",
+          "git status *": "allow",
+          "git log *": "allow",
+          "git diff *": "allow",
+          "git fetch *": "allow",
+          "git pull *": "allow",
+          "git push *": "allow",
           "git add *": "allow",
           "git commit *": "allow",
           "git branch *": "allow",
@@ -201,17 +216,16 @@
           "git show *": "allow",
           "git rebase *": "allow",
           "git cherry-pick *": "allow",
-          "python -m py_compile": "allow",
-          "python -m unittest": "allow",
+          "python -m py_compile *": "allow",
+          "python -m unittest *": "allow",
           "docker compose *": "allow",
           "docker stats *": "allow",
           "docker ps *": "allow",
           "docker logs *": "allow",
           "docker inspect *": "allow",
           "docker exec *": "allow",
-          ".opencode/scripts/*.sh": "allow",
-          "curl *": "allow",
-          "*": "deny"
+          ".opencode/scripts/*.sh *": "allow",
+          "curl *": "allow"
         },
         "read": "allow",
         "glob": "allow",

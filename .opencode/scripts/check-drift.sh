@@ -17,11 +17,11 @@ echo ""
 echo "--- 漂移检测 ---"
 # 优先级: 命令行传入评审报告 > 旧版独立漂移报告 > 自动查找最新评审报告
 REVIEW_REPORT="${1:-}"
-if [ -z "$REVIEW_REPORT" ] && [ ! -f "$PROJECT_DIR/doc/tester/drift-report.md" ]; then
+if [ -z "$REVIEW_REPORT" ] && [ ! -f "$PROJECT_DIR/doc/review/drift-report.md" ]; then
   REVIEW_REPORT=$(ls -t ${PROJECT_DIR}/doc/review/*_代码评审.md 2>/dev/null | head -1)
 fi
 DRIFT_SOURCE="$REVIEW_REPORT"
-[ -z "$DRIFT_SOURCE" ] && [ -f "$PROJECT_DIR/doc/tester/drift-report.md" ] && DRIFT_SOURCE="$PROJECT_DIR/doc/tester/drift-report.md"
+[ -z "$DRIFT_SOURCE" ] && [ -f "$PROJECT_DIR/doc/review/drift-report.md" ] && DRIFT_SOURCE="$PROJECT_DIR/doc/review/drift-report.md"
 
 if [ -n "$DRIFT_SOURCE" ]; then
   # 提取评审报告漂移节内容
