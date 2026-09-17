@@ -1001,6 +1001,92 @@ class WarmTransportTests(_CacheTestCase):
                 cache_mod.warm_transport(hosts=[self.KEY], count=1), 0)
 
 
+class TransportShutdownTests(_CacheTestCase):
+    """cache.close_all / cache.close_transport: process-exit socket teardown.
+
+    Fixes ``ResourceWarning: unclosed <ssl.SSLSocket ...>`` — idle kept-alive
+    connections used to outlive the pool and be reclaimed by the GC at exit.
+    """
+
+    KEY = ('http', 't', 80)
+    KEY2 = ('https', 't2', 443)
+
+    def _pool_with_idle(self):
+        pool = cache_mod._ConnectionPool(max_per_host=4, idle_ttl=60)
+        return pool
+
+    def test_close_all_closes_idle_and_empties_buckets(self):
+        pool = self._pool_with_idle()
+        a, b = _FakeConnection(), _FakeConnection()
+        pool.release(self.KEY, a)
+        pool.release(self.KEY2, b)
+        pool._live[self.KEY] = 1
+        pool._live[self.KEY2] = 1
+
+        pool.close_all()
+
+        self.assertTrue(a.closed)
+        self.assertTrue(b.closed)
+        self.assertEqual(pool._idle, {})                   # all host buckets gone
+        self.assertEqual(pool._live.get(self.KEY, 0), 0)
+        self.assertEqual(pool._live.get(self.KEY2, 0), 0)
+
+    def test_close_all_is_idempotent_and_total(self):
+        pool = self._pool_with_idle()
+        conn = _FakeConnection()
+        conn.close()                                       # already closed
+        pool.release(self.KEY, conn)
+        pool._live[self.KEY] = 1
+
+        pool.close_all()                                   # must not raise
+        pool.close_all()                                   # empty pool, idempotent
+        self.assertTrue(conn.closed)
+
+    def test_close_all_leaves_in_use_connections_open(self):
+        pool = self._pool_with_idle()
+        idle, checked_out = _FakeConnection(), _FakeConnection()
+        pool.release(self.KEY, idle)
+        pool._live[self.KEY] = 2                           # 1 idle + 1 in use
+
+        pool.close_all()
+
+        self.assertTrue(idle.closed)
+        self.assertFalse(checked_out.closed)               # not the pool's to close
+        self.assertEqual(pool._live[self.KEY], 1)          # in-use slot retained
+
+    def test_acquire_after_close_all_dials_fresh(self):
+        pool = self._pool_with_idle()
+        pool.release(self.KEY, _FakeConnection())
+        pool._live[self.KEY] = 1
+        pool.close_all()
+
+        fresh = _FakeConnection()
+        with mock.patch.object(cache_mod, '_open_connection', return_value=fresh):
+            conn, reused, ephemeral = pool.acquire(self.KEY, 5)
+        self.assertIs(conn, fresh)
+        self.assertFalse(reused)
+        self.assertFalse(ephemeral)                        # real pooled slot
+        self.assertEqual(pool.stats['new'], 1)
+
+    def test_close_transport_wraps_module_pool_and_never_raises(self):
+        pool = self._pool_with_idle()
+        conn = _FakeConnection()
+        pool.release(self.KEY, conn)
+        pool._live[self.KEY] = 1
+        with mock.patch.object(cache_mod, '_pool', pool):
+            cache_mod.close_transport()
+            cache_mod.close_transport()                    # idempotent
+        self.assertTrue(conn.closed)
+
+    def test_close_transport_swallows_a_broken_pool(self):
+        class _Broken:
+            def close_all(self):
+                raise RuntimeError('boom')
+
+        with mock.patch.object(cache_mod, '_pool', _Broken()):
+            cache_mod.close_transport()                    # total: no raise
+
+
 class DnsResolverTests(unittest.TestCase):
     @staticmethod
     def _infos(host, port):

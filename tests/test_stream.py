@@ -397,29 +397,39 @@ class HttpIntegrationTests(unittest.TestCase):
     def test_sse_stream_receives_quote_frame(self):
         sid, _ = create_group(['sh600519'], ['quote'])
         conn = http.client.HTTPConnection('127.0.0.1', self.port)
-        conn.request('GET', f'/stream/quote/{sid}')
-        resp = conn.getresponse()
-        self.assertEqual(resp.status, 200)
-        self.assertEqual(resp.getheader('Content-Type'), 'text/event-stream')
-        self.assertEqual(resp.getheader('Cache-Control'), 'no-cache')
+        try:
+            conn.request('GET', f'/stream/quote/{sid}')
+            resp = conn.getresponse()
+            try:
+                self.assertEqual(resp.status, 200)
+                self.assertEqual(resp.getheader('Content-Type'), 'text/event-stream')
+                self.assertEqual(resp.getheader('Cache-Control'), 'no-cache')
 
-        with patch.dict('china_finance_rss.stream._FIELD_HANDLERS',
-                        {'quote': lambda codes, deadline=None:
-                         {'sh600519': {'name': '贵州茅台'}}}):
-            snapshot = _refresh_pool(['sh600519'])
-            _broadcast(snapshot)
+                with patch.dict('china_finance_rss.stream._FIELD_HANDLERS',
+                                {'quote': lambda codes, deadline=None:
+                                 {'sh600519': {'name': '贵州茅台'}}}):
+                    snapshot = _refresh_pool(['sh600519'])
+                    _broadcast(snapshot)
 
-        event_line = resp.readline().decode('utf-8').strip()
-        self.assertEqual(event_line, 'event: quote')
-        id_line = resp.readline().decode('utf-8').strip()
-        self.assertTrue(id_line.startswith('id: '))
-        data_line = resp.readline().decode('utf-8').strip()
-        self.assertTrue(data_line.startswith('data: '))
-        resp.readline()  # 空行结束该事件
-        import json as _json
-        payload = _json.loads(data_line[6:])
-        self.assertEqual(payload['items']['sh600519']['quote']['name'], '贵州茅台')
-        conn.close()
+                event_line = resp.readline().decode('utf-8').strip()
+                self.assertEqual(event_line, 'event: quote')
+                id_line = resp.readline().decode('utf-8').strip()
+                self.assertTrue(id_line.startswith('id: '))
+                data_line = resp.readline().decode('utf-8').strip()
+                self.assertTrue(data_line.startswith('data: '))
+                resp.readline()  # 空行结束该事件
+                import json as _json
+                payload = _json.loads(data_line[6:])
+                self.assertEqual(payload['items']['sh600519']['quote']['name'], '贵州茅台')
+            finally:
+                # The server advertises `Connection: close`, so will_close=True and
+                # HTTPConnection.getresponse() calls close() *before* binding the
+                # response to __response — the response (and the socket's makefile
+                # ref, _io_refs) is orphaned.  conn.close() alone is therefore a
+                # no-op and the raw socket fd leaks until GC (ResourceWarning).
+                resp.close()
+        finally:
+            conn.close()
 
     def test_sse_stream_unknown_group_returns_404(self):
         conn = http.client.HTTPConnection('127.0.0.1', self.port)

@@ -95,12 +95,13 @@ def fetch(url, timeout=REQUEST_TIMEOUT):
     t0 = time.time()
     try:
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        resp = urllib.request.urlopen(req, timeout=timeout)
-        data = resp.read()
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = resp.read()
         elapsed = time.time() - t0
         return (resp.status, data, elapsed)
     except urllib.error.HTTPError as e:
-        data = e.read()
+        with e:
+            data = e.read()
         elapsed = time.time() - t0
         return (e.code, data, elapsed)
     except Exception as e:

@@ -60,8 +60,8 @@ EXPECTED_SECTORS = {
 def fetch_json(url, timeout=30):
     start = time.time()
     try:
-        resp = urllib.request.urlopen(url, timeout=timeout)
-        body = resp.read()
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            body = resp.read()
         elapsed = time.time() - start
         data = json.loads(body)
         return elapsed, 200, data

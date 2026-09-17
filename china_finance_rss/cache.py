@@ -5,6 +5,7 @@ Layer-0 pure cache/contract layer: imports only stdlib + ``config`` + ``metrics`
 It never imports ``server`` / ``stream`` / ``stock_api`` / ``market_api``.
 """
 
+import atexit
 import http.client
 import logging
 import random
@@ -541,9 +542,57 @@ class _ConnectionPool:
             self._live[key] = max(0, self._live.get(key, 1) - 1)
         _close_quietly(conn)
 
+    def close_all(self):
+        """Close every *idle* pooled connection and empty the buckets.
+
+        Process-exit teardown.  Without it the kept-alive sockets outlive the
+        pool and are reclaimed by the GC at interpreter shutdown, which emits a
+        ``ResourceWarning: unclosed <ssl.SSLSocket ...>`` (one per retained
+        connection) on every run — noise in tests and logs, and a genuinely
+        unclosed socket in production.
+
+        Only idle connections are touched: a checked-out connection is not the
+        pool's to close (closing it would abort an in-flight request), so its
+        ``_live`` slot is kept and it may still be released back later.  The
+        bookkeeping swap happens under ``_lock`` (bucket snapshot, no IO) and
+        each ``close()`` runs *after* the lock is released, preserving the
+        module's "never hold a lock across IO" discipline.
+
+        Total and idempotent: an empty pool, a repeated call, or an
+        already-closed connection is a no-op, never an error.
+        """
+        with self._lock:
+            drained = []                                # [(conn)] — one flat list
+            for key, bucket in self._idle.items():
+                for conn, _idle_since in bucket:
+                    drained.append(conn)
+                self._live[key] = max(0, self._live.get(key, 0) - len(bucket))
+            self._idle = {}                             # all host buckets emptied
+        for conn in drained:                            # ★ lock released: close IO
+            _close_quietly(conn)
+
 
 _pool = _ConnectionPool(HTTP_POOL_MAX_PER_HOST, HTTP_POOL_IDLE_TTL)
 _resolver = _DNSResolver(HTTP_DNS_CACHE_TTL)
+
+
+def close_transport():
+    """Close the keep-alive pool's idle sockets (process-exit teardown).
+
+    Module-level public hook so the owner of ``_pool`` also owns its cleanup.
+    Registered with :mod:`atexit` at import time (below): the pool is created at
+    import, so its teardown belongs there too — a caller that only imports
+    ``cache`` (the test suite, a one-shot fetch script) still gets the cleanup,
+    which registering in ``server.main()`` could not provide.  Total function:
+    it never raises and repeated calls are no-ops.
+    """
+    try:
+        _pool.close_all()
+    except Exception:                                   # never let exit raise
+        pass
+
+
+atexit.register(close_transport)
 
 
 class _PooledResponse:
