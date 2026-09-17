@@ -136,8 +136,8 @@ _DOTTED_STOCK_CODE = re.compile(r'^(\d{6})\.(SH|SZ|BJ)$', re.IGNORECASE)
 def canonical_code(code):
     """Return the canonical stock code, or ``None`` when ``code`` is invalid.
 
-    Canonical form is the lowercase exchange-prefixed spelling the upstream
-    ``secu_code`` parameter uses: ``sh600519`` / ``sz000001`` / ``bj430047``.
+    Canonical form is the **internal identity key** — the lowercase
+    exchange-prefixed spelling: ``sh600519`` / ``sz000001`` / ``bj430047``.
     Accepted inputs (case-insensitive, surrounding whitespace stripped):
 
       * ``sh600519`` / ``SH600519``
@@ -149,6 +149,12 @@ def canonical_code(code):
     cache/pool/ledger key must go through this helper so one stock cannot mint
     two identities.
 
+    This key is deliberately **not** always the upstream wire spelling:
+    x-quote accepts the prefixed form for SH/SZ but the dotted ``430047.BJ``
+    form for BSE, so URL construction goes through :func:`upstream_secu_code`.
+    Keeping the identity fixed while only URL construction converts is what
+    lets one stock stay one pool/cache/ledger key.
+
     Frozen interface: ``server.py`` / ``stream.py`` consume it by this name.
     """
     if not isinstance(code, str):
@@ -159,6 +165,35 @@ def canonical_code(code):
         return f'{dotted.group(2).lower()}{dotted.group(1)}'
     lowered = text.lower()
     return lowered if VALID_STOCK_CODE.match(lowered) else None
+
+
+def upstream_secu_code(code):
+    """Return the ``secu_code`` spelling x-quote.cls.cn actually accepts.
+
+    Upstream accepts **two different formats**, measured against
+    ``https://x-quote.cls.cn/quote/stock/{basic,volume,detail}``:
+
+      * **Shanghai / Shenzhen** — the lowercase exchange-prefixed form, i.e.
+        the canonical code itself: ``sh600519`` / ``sz000001``.  The dotted
+        form (``600519.SH``) returns an all-null "empty shell" (basic) or an
+        empty ``data`` dict (volume).
+      * **Beijing (北交所 / BSE)** — the dotted, uppercase-suffixed form
+        ``430047.BJ`` / ``832000.BJ``.  The prefixed form (``bj430047``)
+        returns that same all-null shell, which is why every BSE quote used to
+        arrive blank while SH/SZ stayed healthy.
+
+    ``code`` is the internal canonical form (:func:`canonical_code` — the
+    pool/cache/ledger identity key, whose value domain is unchanged).  This
+    helper is the **single authority** for the upstream spelling, so the
+    conversion lives only in URL construction and the identity never forks.
+    An unrecognised input is returned verbatim (ingress already validates).
+    """
+    canon = canonical_code(code)
+    if canon is None:
+        return code
+    if canon.startswith('bj'):
+        return f'{canon[2:]}.BJ'
+    return canon
 
 
 # Batch limits
@@ -206,9 +241,9 @@ _BASIC_INFO_HEADERS = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.cls.
 
 # Five-level order book REST API (direct access, no CDP / no sign).
 # `field=five` selects the 21-field five-band payload; the same endpoint
-# without it serves volume aggregates.  `secu_code` must be the lowercase
-# exchange-prefixed spelling (canonical_code) — the dotted form returns an
-# empty `data` dict.
+# without it serves volume aggregates.  `secu_code` must be the upstream wire
+# spelling from `upstream_secu_code` (prefixed `sh600519` for SH/SZ, but the
+# dotted `430047.BJ` for BSE — the prefixed BSE form returns an empty dict).
 _STOCK_DEPTH_URL = 'https://x-quote.cls.cn/quote/stock/volume'
 _STOCK_DEPTH_HEADERS = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.cls.cn/stock'}
 

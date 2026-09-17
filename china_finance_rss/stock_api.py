@@ -35,7 +35,7 @@ from .config import (
     _FUNDFLOW_HEADERS, _STOCK_DETAIL_BASE_URL, _STOCK_DETAIL_HEADERS,
     _STOCK_DEPTH_URL, _STOCK_DEPTH_HEADERS,
     _TIMELINE_BASE_URL, _TIMELINE_HEADERS, cache_policy, canonical_code,
-    stock_nav_page_names,
+    stock_nav_page_names, upstream_secu_code,
 )
 from .utils import cls_sign_params
 
@@ -630,7 +630,7 @@ def _announcement_url(stock_code):
     """Build signed announcement API URL — requires CLS sign."""
     params = {
         'app': 'CailianpressWeb', 'os': 'web', 'sv': '8.7.9',
-        'secu_code': stock_code,
+        'secu_code': upstream_secu_code(stock_code),
     }
     params['sign'] = cls_sign_params(params)
     return f'{_ANNOUNCEMENT_BASE_URL}?{urlencode(params)}'
@@ -852,7 +852,7 @@ def fetch_cls_fundflow(stock_code, deadline=None, ttl=None, refresh_epoch=None):
     this domain sets the tick its per-tick refresh is a genuine upstream call.
     """
     domain = 'fundflow'
-    url = f'{_FUNDFLOW_BASE_URL}?secu_code={stock_code}'
+    url = f'{_FUNDFLOW_BASE_URL}?secu_code={upstream_secu_code(stock_code)}'
     ttl = cache_policy(domain)['ttl'] if ttl is None else ttl
     metrics.incr('upstream_fetch_total', key=domain)                  # BR-SA-28
     err = None
@@ -880,7 +880,7 @@ def fetch_cls_timeline(stock_code, deadline=None, ttl=None, refresh_epoch=None):
     ``refresh_epoch`` behaves as in :func:`fetch_cls_fundflow`.
     """
     domain = 'timeline'
-    url = f'{_TIMELINE_BASE_URL}?secu_code={stock_code}'
+    url = f'{_TIMELINE_BASE_URL}?secu_code={upstream_secu_code(stock_code)}'
     ttl = cache_policy(domain)['ttl'] if ttl is None else ttl
     metrics.incr('upstream_fetch_total', key=domain)
     err = None
@@ -929,7 +929,7 @@ def fetch_cls_announcement(stock_code, deadline=None, ttl=None):
 def fetch_cls_stock_detail(stock_code, deadline=None, ttl=None):
     """Fetch CLS stock detail — REST only."""
     domain = 'quote'
-    url = f'{_STOCK_DETAIL_BASE_URL}?secu_code={stock_code}'
+    url = f'{_STOCK_DETAIL_BASE_URL}?secu_code={upstream_secu_code(stock_code)}'
     ttl = cache_policy(domain)['ttl'] if ttl is None else ttl
     metrics.incr('upstream_fetch_total', key=domain)
     raw = _fetch_rest_json(url, _STOCK_DETAIL_HEADERS, ttl, deadline)
@@ -937,6 +937,22 @@ def fetch_cls_stock_detail(stock_code, deadline=None, ttl=None):
         return raw.get('data')
     metrics.incr('upstream_fail_total', key='upstream_error')          # semantic failure
     raise FetchError('upstream_error', url=url)
+
+
+# Validity probe for the upstream `basic` payload (BSE / wrong-spelling shell
+# defence).  x-quote answers a wrong `secu_code` spelling with HTTP 200 +
+# `code:200` + a 41-key all-null object — not an error code — so a fetcher that
+# trusts `code == 200` alone caches and streams a "frame full of nulls".  A real
+# quote always names the instrument and/or carries a last price.
+_BASIC_INFO_KEY_FIELDS = ('secu_name', 'last_px')
+
+
+def _basic_info_is_valid(raw):
+    """True when ``raw`` carries real instrument data (not the all-null shell)."""
+    data = raw.get('data')
+    if not isinstance(data, dict) or not data:
+        return False
+    return any(data.get(f) not in (None, '') for f in _BASIC_INFO_KEY_FIELDS)
 
 
 def fetch_cls_basic_info(stock_code, deadline=None, ttl=None,
@@ -955,6 +971,10 @@ def fetch_cls_basic_info(stock_code, deadline=None, ttl=None,
     phase-1 quote, and a missing depth is written as ``None`` — never a
     fabricated all-zero order book.
 
+    Phase 1 is the fatal leg, and a ``code:200`` payload with no instrument
+    data (the all-null shell upstream returns for a wrong ``secu_code``
+    spelling) counts as a failed fetch — never a cacheable quote.
+
     ``refresh_epoch`` (scheduled refresh only) reaches **phase 1 and phase 3**
     — the two steady-state calls — so a per-tick quote refresh really re-fetches
     both the quote and its order book instead of being served by the previous
@@ -967,14 +987,17 @@ def fetch_cls_basic_info(stock_code, deadline=None, ttl=None,
     ttl = cache_policy(domain)['ttl'] if ttl is None else ttl
     result, err = None, None
     # Phase 1: quote/identity (fatal)
-    url = f'{_BASIC_INFO_BASE_URL}?secu_code={stock_code}'
+    url = f'{_BASIC_INFO_BASE_URL}?secu_code={upstream_secu_code(stock_code)}'
     metrics.incr('upstream_fetch_total', key=domain)
     try:
         raw = _rest_fetch(url, _BASIC_INFO_HEADERS, ttl, deadline,
                           refresh_epoch)
-        if raw.get('code') == 200:
+        if raw.get('code') == 200 and _basic_info_is_valid(raw):
             result = raw
         else:
+            # Covers both a real error code and the all-null "empty shell"
+            # upstream returns for a wrong `secu_code` spelling — the latter
+            # must never be cached or streamed as a successful quote.
             err = FetchError('upstream_error', url=url)
             metrics.incr('upstream_fail_total', key='upstream_error')
     except FetchError as exc:
@@ -986,7 +1009,7 @@ def fetch_cls_basic_info(stock_code, deadline=None, ttl=None,
     sector = _basic_sector_get(stock_code) if result is not None else None
     if sector is None and result is not None \
             and (deadline is None or time() < deadline):
-        detail_url = f'{_STOCK_DETAIL_BASE_URL}?secu_code={stock_code}'
+        detail_url = f'{_STOCK_DETAIL_BASE_URL}?secu_code={upstream_secu_code(stock_code)}'
         metrics.incr('upstream_fetch_total', key=domain)
         try:
             detail_raw = _fetch_rest_json(detail_url, _STOCK_DETAIL_HEADERS, ttl, deadline)
@@ -1001,8 +1024,8 @@ def fetch_cls_basic_info(stock_code, deadline=None, ttl=None,
             result['data'] = {}
         result['sector_name'] = sector
     # Phase 3: five-level order book (non-fatal, additive).  `fetch_cls_stock_depth`
-    # never raises and returns None for bj*/index/empty payloads, so a depth
-    # outage can never withhold the quote.  Attached here (not in
+    # never raises and returns None for index / unknown / empty payloads, so a
+    # depth outage can never withhold the quote.  Attached here (not in
     # `handle_cls_basic_infos`) so it rides the same `quote` terminal-cache
     # entry: a quote cache hit already carries its depth, no extra upstream call.
     if result is not None:
@@ -1032,14 +1055,13 @@ def fetch_cls_stock_depth(stock_code, deadline=None, ttl=None,
     """Fetch the five-level order book (五档盘口) for ``stock_code``, or None.
 
     Source: ``GET /quote/stock/volume?secu_code=<code>&field=five`` — a plain
-    REST endpoint (no sign, no WS, no Chrome).  ``secu_code`` is the lowercase
-    exchange-prefixed canonical spelling; the dotted form returns an empty
-    payload.
+    REST endpoint (no sign, no WS, no Chrome).  ``secu_code`` is the upstream
+    wire spelling from :func:`config.upstream_secu_code` (prefixed for SH/SZ,
+    dotted ``430047.BJ`` for BSE); the wrong form returns an empty payload.
 
     **Empty-value semantics (never fabricate data):**
 
-      * empty ``data`` dict (``bj*`` Beijing codes, unknown/invalid codes) →
-        ``None``
+      * empty ``data`` dict (unknown/invalid codes) → ``None``
       * every five-level price/amount field is ``0`` (indexes such as
         ``sh000001`` / ``sz399001`` have no order book) → ``None``
       * otherwise the ``data`` dict: 20 band fields (``b_px_1..5``,
@@ -1058,7 +1080,7 @@ def fetch_cls_stock_depth(stock_code, deadline=None, ttl=None,
     steady-state cost would silently fall to 1 call/code/tick with a stale book.
     """
     domain = 'depth'
-    url = f'{_STOCK_DEPTH_URL}?secu_code={stock_code}&field=five'
+    url = f'{_STOCK_DEPTH_URL}?secu_code={upstream_secu_code(stock_code)}&field=five'
     ttl = cache_policy(domain)['ttl'] if ttl is None else ttl
     metrics.incr('upstream_fetch_total', key=domain)                  # BR-SA-28
     try:
@@ -1191,13 +1213,13 @@ def _direct_fetch(url, headers, domain, deadline=None, ttl=None):
 
 def _fundflow_direct_fetch(stock_code, deadline=None):
     """Fetch fund flow via CDP browser context (anti-ban), REST fallback."""
-    return _direct_fetch(f'{_FUNDFLOW_BASE_URL}?secu_code={stock_code}',
+    return _direct_fetch(f'{_FUNDFLOW_BASE_URL}?secu_code={upstream_secu_code(stock_code)}',
                          _FUNDFLOW_HEADERS, 'fundflow', deadline)
 
 
 def _timeline_direct_fetch(stock_code, deadline=None):
     """Fetch timeline via CDP browser context (anti-ban), REST fallback."""
-    return _direct_fetch(f'{_TIMELINE_BASE_URL}?secu_code={stock_code}',
+    return _direct_fetch(f'{_TIMELINE_BASE_URL}?secu_code={upstream_secu_code(stock_code)}',
                          _TIMELINE_HEADERS, 'timeline', deadline)
 
 

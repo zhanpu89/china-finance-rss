@@ -198,6 +198,39 @@ class CanonicalCodeTests(unittest.TestCase):
         self.assertTrue(config.VALID_STOCK_CODE.match('600519.SH'))
 
 
+class UpstreamSecuCodeTests(unittest.TestCase):
+    """P1: the upstream wire spelling differs per exchange — SH/SZ keep the
+    prefixed canonical form, BSE needs the dotted uppercase-suffixed form
+    (``bj430047`` → ``430047.BJ``).  ``canonical_code`` stays the internal
+    identity key; only URL construction converts.
+    """
+
+    def test_bse_maps_to_the_dotted_uppercase_form(self):
+        self.assertEqual(config.upstream_secu_code('bj430047'), '430047.BJ')
+        self.assertEqual(config.upstream_secu_code('bj832000'), '832000.BJ')
+
+    def test_shanghai_and_shenzhen_are_unchanged(self):
+        self.assertEqual(config.upstream_secu_code('sh600519'), 'sh600519')
+        self.assertEqual(config.upstream_secu_code('sz000001'), 'sz000001')
+
+    def test_accepted_dotted_input_normalises_to_the_wire_form(self):
+        self.assertEqual(config.upstream_secu_code('430047.BJ'), '430047.BJ')
+        self.assertEqual(config.upstream_secu_code('600519.SH'), 'sh600519')
+
+    def test_invalid_input_is_returned_verbatim(self):
+        for raw in (None, 600519, '', '   ', 'sh60051', '600519', 'xx600519'):
+            self.assertEqual(config.upstream_secu_code(raw), raw, repr(raw))
+
+    def test_canonical_identity_is_not_changed_by_the_wire_mapping(self):
+        # The mapping is a pure read: the canonical key/value domain is fixed.
+        for raw in ('bj430047', '430047.BJ', 'sh600519', '600519.SH'):
+            before = config.canonical_code(raw)
+            config.upstream_secu_code(raw)
+            self.assertEqual(config.canonical_code(raw), before)
+        self.assertEqual(config.canonical_code('430047.BJ'), 'bj430047')
+        self.assertEqual(config.canonical_code('bj430047'), 'bj430047')
+
+
 class TradingHolidayTests(unittest.TestCase):
     def test_default_holidays_empty_do_not_change_behaviour(self):    # P2
         self.assertEqual(config.TRADING_HOLIDAYS, frozenset())
