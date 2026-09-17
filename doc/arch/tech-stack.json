@@ -1,6 +1,6 @@
 {
   "project": "china-finance-rss",
-  "version": "1.6",
+  "version": "1.7",
   "generatedAt": "2026-09-17",
   "primaryLanguage": "python",
   "moduleRoot": "china_finance_rss",
@@ -11,8 +11,8 @@
       "framework": "http.server (ThreadingHTTPServer + BaseHTTPRequestHandler)",
       "orm": "none (内存态，无 ORM)",
       "concurrency": "threading + concurrent.futures.ThreadPoolExecutor",
-      "cache": "自研内存缓存 (cache.py: URL 缓存 / 负缓存 / 端点缓存 / feed 缓存)",
-      "push": "SSE (text/event-stream, 全量快照帧)：ts + 全码在位的 items（缺数据为 null）+ codes_total/fields/missing/missing_count + 条件 errors/stale/stale_count；同组帧对象共享同一引用；响应 Connection: close",
+      "cache": "自研内存缓存 (cache.py: URL 缓存 / 负缓存 / 端点缓存 / feed 缓存)；v1.7 另含 HTTP 传输层——每 (scheme,host,port) keep-alive 连接池（HTTP_POOL_MAX_PER_HOST=24，≥ BATCH_MAX_WORKERS=20）+ 进程内 DNS TTL 缓存（HTTP_DNS_CACHE_TTL=300）+ 启动预热 warm_transport（仅握手），全部 stdlib http.client/socket",
+      "push": "SSE (text/event-stream, 全量快照帧)：ts + 全码在位的 items（缺数据为 null）+ codes_total/fields/missing/missing_count + 条件 errors/stale/stale_count；v1.7：items[code].quote 内含可选 depth（五档盘口，只增；空 dict/全 0/指数/非普通股/未知码 ⇒ 该键不出现，不伪造）；帧发送层去重（内容摘要剔除 ts，未变不发；新连接强制首发）；同组帧对象共享同一引用；响应 Connection: close",
       "cdp": "Chrome DevTools Protocol (cdp_engine.py, websocket 为可选延迟导入)；页面数 CDP_STOCK_PAGES **env 驱动**（2C2G 部署档位=4，+2 常驻=6 内容页，另有 2 个 webui renderer）",
       "test": "unittest (python -m unittest discover -s tests -v)"
     },
@@ -124,9 +124,9 @@
         { "pattern": "tests/test_*.py", "type": "mustStartWith", "expect": "test_" }
       ],
       "handlers": "HTTP/业务处理器一律 handle_*；返回 dict 不抛异常（批量走 build_batch_response，单体走 error 客体；/cls/hotplate 为分区 error 客体）。v1.4 澄清：管道层（_run_batch/_process_chunk/_handle_cached_batch）返回 (results, errors) 二元组，批量 handler 内部调 build_batch_response 组装为 dict 后返回；server._handle_stock_batch 只做入参归一化 + 截断 + dropped 注入 + 键回写，不二次组装",
-      "fetch": "上游取数器一律 fetch_*；按码取数器签名至少含 (code, deadline=None)（v1.4 实为 (code, deadline=None, ttl=None)，ttl 供 INV-1a 同源同变量；后续可继续追加可选形参），非码取数器（如 fetch_cls_telegraph(feed_url=None)）不受此限。所有 HTTP 取数必须经 cache.fetch_json（唯一出口，URL 缓存 + 负缓存 + 单飞），长链路须把 deadline 透传为 fetch_json(deadline=)——其超期闸门位于正缓存之后",
-      "config": "禁止在非 config.py 模块中出现裸 TTL 数字字面量，一律经 config.cache_policy(domain) 派生；上游编码由域指定（fetch_json(..., encoding=...)）；v1.4 新增：**股票代码归一化一律经 config.canonical_code**（唯一权威，禁止任何模块出现本地代码正则/别名表），帧尺寸估算一律经 config.stream_frame_bytes",
-      "metrics": "v1.5: 观测写入一律经 metrics.incr/set_gauge；指标名须在 metrics._KNOWN 注册表内（未注册仅告警不阻断）；业务锁内不得发布指标（http_503_total 有 3 个计数点：_reject_503 主端口准入 / healthz / stream 连接上限；业务端点降级恒 200 + error 客体、不产生 503）"
+      "fetch": "上游取数器一律 fetch_*；按码取数器签名至少含 (code, deadline=None)（v1.7 实为 (code, deadline=None, ttl=None, refresh_epoch=None)：ttl 供 INV-1a 同源同变量、refresh_epoch 供 SSE 定时刷新强制每拍回源，后续可继续追加可选形参），非码取数器（如 fetch_cls_telegraph(feed_url=None)）不受此限。所有 HTTP 取数必须经 cache.fetch_json（唯一出口，URL 缓存 + 负缓存 + 单飞 + keep-alive 连接池/DNS 缓存），长链路须把 deadline 透传为 fetch_json(deadline=)——其超期闸门位于正缓存之后；个股取数须做关键字段非空校验以防上游「HTTP 200 + 空壳」（ADR-020）",
+      "config": "禁止在非 config.py 模块中出现裸 TTL 数字字面量，一律经 config.cache_policy(domain) 派生；上游编码由域指定（fetch_json(..., encoding=...)）；v1.4 新增：**股票代码归一化一律经 config.canonical_code**（唯一权威，禁止任何模块出现本地代码正则/别名表），帧尺寸估算一律经 config.stream_frame_bytes；v1.7 新增：**上游线路拼写一律经 config.upstream_secu_code**（沪/深=前缀形、北交所=点号大写 430047.BJ；与身份键 canonical_code 分离，禁止本地拼装），SSE 节拍一律经 stream.tick_interval(fields)（= 订阅域最短 tier TTL，禁止硬编码 8s）",
+      "metrics": "v1.5: 观测写入一律经 metrics.incr/set_gauge；指标名须在 metrics._KNOWN 注册表内（未注册仅告警不阻断）；业务锁内不得发布指标（http_503_total 有 3 个计数点：_reject_503 主端口准入 / healthz / stream 连接上限；业务端点降级恒 200 + error 客体、不产生 503）。v1.7: upstream_fetch_total 的域键含 depth（quote/depth/fundflow/timeline/f10/announcement/longhu/margin/sector），每个逻辑取数恰好 +1"
     },
     "fileStructure": {
       "package": "china_finance_rss/ (扁平包，不新增子包)",

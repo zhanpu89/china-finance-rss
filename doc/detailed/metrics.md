@@ -1,7 +1,8 @@
 # metrics.py 详细设计（新增模块）
 
-> **版本** v1.2 · **状态** 已契约同步（P7b：以 `china_finance_rss/metrics.py` 实现为准回写）· **日期** 2026-09-16 · **作者/产出** task-decomposer
-> 本版修订（P7b 契约同步，**只改文档、不改代码**）：① `snapshot()` 改为**锁内浅拷贝 + 锁外深拷贝**（dict `v.copy()`、list `list(v)`）；② **零值恒定发布**（`_DEFAULTS` 兜底，19 键在 `snapshot()` 中恒出现）；③ `set_gauge` 新增 **`_LABELED_GAUGES` 形状守卫**（与 `incr` 对称）。
+> **版本** v1.3 · **状态** 已契约同步（P7b 传输层批次：以 `china_finance_rss/metrics.py` + `stream.py` 计数点实现为准）· **日期** 2026-09-17 · **作者/产出** task-decomposer
+> **v1.3 变更（以代码为准）**：① `upstream_fetch_total{domain}` 的 domain 集合**新增 `depth`**（`config.DOMAIN_MATRIX` 现 12 域，§3.2）；② 补记 **`stream_tick_degraded_total` / `stream_tick_slip_total` 的"进程首个真正刷新轮豁免"**（实现落点在 `stream._push_once`；仅一轮、次轮起照常计数、**空池轮不消耗豁免**，§3.2/§4 BR-MET-13/§8 MET-T17）。**`metrics.py` 本身零代码变更**（注册表 19 名与 `_DEFAULTS` 不变）。
+> **v1.2 变更（P7b 契约同步，**只改文档、不改代码**）**：① `snapshot()` 改为**锁内浅拷贝 + 锁外深拷贝**（dict `v.copy()`、list `list(v)`）；② **零值恒定发布**（`_DEFAULTS` 兜底，19 键在 `snapshot()` 中恒出现）；③ `set_gauge` 新增 **`_LABELED_GAUGES` 形状守卫**（与 `incr` 对称）。
 > 沿用 v1.1：REV-DES-02（`cache_hit_ratio` 公式/命名）/04（依赖图）/05（`_warned` 锁口径）/07（元数据）+ 逆向建议 3（MET-T8 注册表子集断言）+ 编排层裁决 #4/#5 + 偏差 D-6 登记
 > 模块路径 `china_finance_rss/metrics.py` · 归属 **基础层（Layer 0 叶子，零业务依赖）**
 > 上游 SAD `doc/arch/SAD.md` v1.2（§2.6 / §2.2 R-4 / §4.2 / ADR-010）
@@ -93,21 +94,22 @@ _LABELED_GAUGES: frozenset[str]            # ★ P7b：值为 label→number 映
 | `stream_frame_distinct` | gauge | — | `stream._broadcast` | S10/E7 |
 | `stream_frame_peak_bytes` | gauge | — | `stream._broadcast` | S10/E7 |
 | `stream_tick_duration_ms` | gauge | — | `stream.push_loop` | S10/E5 |
-| `stream_tick_slip_total` | counter | — | `stream.push_loop` | S10/R8 |
+| `stream_tick_slip_total` | counter | — | `stream.push_loop`（`_push_once`） | S10/R8 |
 | `stream_refresh_lag_ticks` | gauge | — | `stream.push_loop`（分片轮转） | S10/AR-1 |
-| `stream_tick_degraded_total` | counter | — | `stream.push_loop` | S10/AR-1 |
+| `stream_tick_degraded_total` | counter | — | `stream.push_loop`（`_push_once`） | S10/AR-1 |
 | `stream_slow_client_total` | counter | — | `stream._serve_sse` 摘除路径 | S10/C-3 |
 | `cache_entries` | gauge(dict) | `url`/`feed`/`quote`/`fundflow`/`timeline`/`f10`/`announcement`/`longhu`/`sector` | 各缓存写入点 | S10/E6 |
 | `cache_hit_ratio` | gauge(float) | — | `cache._cache_put`（由本地 `_cache_stats` 派生） | Q1 观测项（**非 AC**） |
 | `negative_cache_size` | gauge(int) | — | `cache._record_failure`/`_clear_negative` | S10/S3 |
 | `upstream_fail_total` | counter | `upstream_timeout`/`upstream_error`/`cdp_unavailable` | `cache.fetch_json` / `stock_api` | S10/S3 |
-| `upstream_fetch_total` | counter | 域名（`quote`/`feed`/…） | 各域取数点 | AR-6/Q3⑤ |
+| `upstream_fetch_total` | counter | 域名（`quote`/`depth`/`fundflow`/`timeline`/`plate`/`feed`/`announcement`/`longhu`/`margin`/`f10`/`sector`/`news_url`） | 各域取数点 | AR-6/Q3⑤ |
 | `code_cooldown_list` | gauge(list) | — | `stock_api`（共享失败状态层导出） | S10/S6 |
 | `cdp_restart_window` | gauge(dict) | — | `cdp_engine`：`{state, window_start, window_end}` | S10/S4 |
 | `healthz_stale_total` | counter | — | `server.build_health_payload`（准入失败） | S8/S10 |
 | `healthz_inflight` | gauge(int) | — | `server.build_health_payload` | S8/S10 |
 
 > `cdp_restart_window.state ∈ {'idle','restarting','unavailable'}`；`code_cooldown_list` 元素形状 `[domain, code, cooldown_until]`（SAD §2.3 D-6）。
+> **首个刷新轮豁免（v1.3）**：`stream_tick_degraded_total`（`duration > _TICK_BUDGET_FRACTION × tick`）与 `stream_tick_slip_total`（`duration >= tick`）由 `stream._push_once` 计数；**进程的第一个"真正刷新轮"豁免**（`cold_first = not _first_refresh_done`）——该轮付的是一次性冷路径成本（空连接池 / 空 DNS 缓存 / sector 冷缓存），属启动代价而非退化。**仅一轮**：`_first_refresh_done` 置真后次轮起照常计数（真实退化永不被掩盖）；**空池轮不消耗豁免**（`codes` 为空的分支不进入计数/豁免逻辑，`stream_refresh_lag_ticks` 复位 0）。
 > **零值恒定发布（P7b）**：`snapshot()` 对 `_KNOWN` 中**每一个**名字都输出一个值——`_counters`/`_gauges` 里没有的键回落到 `_DEFAULTS`（`0` / `{}` / `0.0` / `[]`）。监控据此区分"从未发生"与"从未埋点"（BUG-P6C-04）。`_DEFAULTS` 是**只读兜底元数据**，**从不写入** `_counters`/`_gauges` ⇒ 某指标的首次 `incr` 仍由自己确定形状（int vs 标签 dict，BR-MET-1）。
 > **`cache_hit_ratio` 口径（REV-DES-02）**：`cache_hit_ratio = round(hit / (hit + miss), 4)`，分母 0 → `0.0`；`hit`/`miss` 为 `cache._cache_stats{hit,miss}` **本地计数**（受 `_cache_lock` 保护，段 1 自增），**不作为独立指标名注册**——全仓**不存在** `cache_hit_total`/`cache_miss_total`。唯一发布点 = `cache._cache_put`（写路径），命中路径零额外加锁。
 > 注册表**不新增名称**（SAD 契约冻结）；本表之外的写入会被 warning（BR-MET-3）。**冻结的运行时强制**：BR-MET-3 仅告警（不阻断业务），"键 ⊆ 注册表"由 **MET-T8(b) 集成断言**在 CI 层强制（见 §8/§10#6）。
@@ -135,6 +137,7 @@ _LABELED_GAUGES: frozenset[str]            # ★ P7b：值为 label→number 映
 | **BR-MET-10** | **`snapshot()` 两段式拷贝**：`_lock` 内只做**浅拷贝**——dict 用 `v.copy()`（**list 用 `list(v)`**），标量原样；深拷贝（`_clone`）在**锁外**执行。⇒ `/healthz` 轮询不会为一次完整深拷贝而长时间阻塞业务写入。**锁内必须同时浅拷贝 list**：否则锁外克隆会迭代一个仍在被业务原地修改的 list（`list changed size during iteration` / 值撕裂）。 |
 | **BR-MET-11** | **零值恒定发布**：`snapshot()` 结果包含 `_KNOWN` 全部 19 名；缺失者取 `_DEFAULTS[name]` 的克隆。已写入的值**恒优先**（兜底只补缺，不覆盖）。`assert set(_DEFAULTS) == _KNOWN` 在导入期保证"注册表 ↔ 零值表"永不脱节。 |
 | **BR-MET-12** | **`set_gauge` 形状守卫（与 `incr` 对称）**：① 无 `key` 写**标签化 gauge**（∈ `_LABELED_GAUGES`）且当前值已是 dict ⇒ `log.warning` + **忽略**（禁止整体覆盖）；② 有 `key` 写**非标签化 gauge** ⇒ `log.warning` + **忽略**（禁止无标签 gauge 悄悄长出标签 dict）；③ 有 `key` 且已有值为非 dict/不存在 ⇒ 建为该 name 的 dict 再写入（BR-MET-4）。非标签化 gauge 的**值与 dict 合法**（如 `cdp_restart_window`），故不能用运行时类型测试代替白名单。 |
+| **BR-MET-13** | **首个真正刷新轮豁免（v1.3，落点 `stream._push_once`）**：`stream_tick_degraded_total` / `stream_tick_slip_total` 对**进程第一个 `codes` 非空轮**不计数（`cold_first`），此后照常；**空池轮（`codes` 为空）既不计数也不消耗豁免**（`_first_refresh_done` 只在非空轮置真）。⇒ 冷启动的一次性成本不被误报为退化，而真实退化（次轮起的超预算/滑 tick）仍被观测。 |
 ---
 
 ## 5. 伪代码
@@ -314,6 +317,7 @@ def reset():                                                      # BR-MET-9
 | **MET-T14** 快照锁内浅拷贝（P7b） | 持 `_lock` 期间 `snapshot()` 返回；另起线程对 `_gauges` 里的 list 值**原地 append** ⇒ 克隆不抛 `changed size during iteration`、结果自洽（浅拷贝快照为"某时刻的成员集"） | BR-MET-10 |
 | **MET-T15** gauge 形状守卫（P7b） | ① `set_gauge('cache_entries', 5)`（无 key，`_LABELED_GAUGES` 且已 dict）⇒ 忽略 + warning，已有标签保留；② `set_gauge('code_cooldown_list', 1, key='x')` ⇒ 忽略 + warning，值不变；③ `set_gauge('cdp_restart_window', {...})`（无 key 的 dict 值）**合法**，不被守卫拦 | BR-MET-12 |
 | **MET-T16** 静态表自检（P7b） | `set(_DEFAULTS) == _KNOWN`；`_LABELED_GAUGES <= _KNOWN`；导入即断言（脱节 ⇒ 启动失败） | BR-MET-11/12 |
+| **MET-T17** `upstream_fetch_total{depth}` 与首轮豁免（v1.3） | ① `stock_api.fetch_cls_stock_depth` 成功 ⇒ `snapshot()['upstream_fetch_total']['depth'] >= 1`；`set(snapshot()) ⊆ _KNOWN` 仍成立（MET-T8b）。② `stream._push_once` 首个 `codes` 非空轮即使 `duration > tick` 也**不**增 `stream_tick_degraded_total`/`stream_tick_slip_total`；**次轮**同样超时则两者各 +1；前置一个空池轮**不消耗**豁免（紧随其后的首个非空轮仍豁免） | AR-6/E2/S10 |
 
 ---
 
@@ -333,6 +337,8 @@ def reset():                                                      # BR-MET-9
 | `cache_hit_ratio`（Q1 观测项） | 非 AC（PRD 未列） |
 | **零值恒定发布 / 锁内浅拷贝**（BR-MET-10/11） | **AC-S10**（`/healthz` 快照恒含全名、且不被深拷贝阻塞）|
 | **gauge 形状守卫**（BR-MET-12） | AC-S10（观测不得破坏业务状态）|
+| **`upstream_fetch_total{depth}`（v1.3）** | AR-6 / Q3⑤（上游负载核算覆盖五档盘口域） |
+| **首个刷新轮豁免（v1.3 / BR-MET-13）** | AC-S10（冷启动不误报退化；真实退化仍可见）/ **E2** |
 
 ---
 
@@ -351,6 +357,8 @@ def reset():                                                      # BR-MET-9
 | 9 | **P7b · `snapshot()` 拷贝分段** | SAD §2.6 只说"返回快照" | 锁内**浅拷贝**（dict `.copy()`、list `list(v)`）、锁外深拷贝（BR-MET-10） | `/healthz` 轮询不得为一次完整深拷贝长阻塞业务写；list 必须同批浅拷贝，否则锁外克隆会迭代活对象 |
 | 10 | **P7b · 零值恒定发布** | SAD §2.6 未定义"未发生"与"未埋点"的区分 | `_DEFAULTS` 兜底；`snapshot()` 恒含 19 名；`assert set(_DEFAULTS) == _KNOWN`（BR-MET-11） | 监控需要 `stream_frame_dropped_total == 0` 而非"键缺失"；兜底表**不写入** registry ⇒ 不改变首次 `incr` 定形语义 |
 | 11 | **P7b · gauge 形状守卫** | SAD 未定义 gauge 的标签形状规则 | 新增 `_LABELED_GAUGES = {'cache_entries'}` 白名单 + `set_gauge` 两条守卫（BR-MET-12） | gauge 值本身可以是 dict（`cdp_restart_window`）⇒ 不能用运行时类型测试判断"是否标签化"；与 `incr` 的形状守卫对称 |
+| 12 | **v1.3 · `upstream_fetch_total{depth}`** | SAD §2.6 记分板按 `DOMAIN_MATRIX` 定域；v1.2 文档 domain 示例未含 `depth` | `depth` 域新增（`config.md` §3.1，v1.4）⇒ 其 `upstream_fetch_total` 标签合法，注册表"全名断言"（MET-T8b）不新增指标名、仅新增标签值 | 注册表**不新增名称**（仍 19 名）；标签值是域名 → 随 `DOMAIN_MATRIX` 演进，不需要新注册 |
+| 13 | **v1.3 · 首个刷新轮豁免** | SAD §2.6/§4.2 未定义"冷启动 vs 退化"的区分 | 实现落在 `stream._push_once`（`_first_refresh_done`/`cold_first`），metrics.md 仅登记口径（BR-MET-13） | 冷进程首轮付空池/空 DNS/sector 冷缓存的**一次性**成本；不豁免会把每次冷启动都记成退化，豁免多轮则会掩盖真实退化 ⇒ **仅一轮、空池轮不消耗** |
 
 > **编排层裁决回执（2026-09-15）**：#4 metrics 增 `key=`/`reset()` ✅（向后兼容；`key` 是 `cache_entries{…}`/`upstream_fail_total{kind}` 记法的唯一落地载体，SAD §2.6 将补注）；#5 `cache_hit_ratio` 发布点 ✅（§3.2 已补公式 + 唯一发布点，实现由 `cache.md` §5.2 承接）。
 
@@ -365,5 +373,6 @@ def reset():                                                      # BR-MET-9
 - [x] AC 追溯：S10 主承载，E5/E7/S3/S4/S5/S6/S8/S9 载体齐备
 - [x] **v1.2（P7b）**：`snapshot()` 锁内浅拷贝 + 锁外深拷贝（BR-MET-10）、零值恒定发布 19 键（BR-MET-11）、`set_gauge` 的 `_LABELED_GAUGES` 形状守卫（BR-MET-12）——§2/§3.1/§4/§5/§6/§7/§8 MET-T13..T16 全部与实现一致
 - [x] **v1.2（P7b）**：`reset()` 后快照**非空**（19 名零值），MET-T11 已据实改写
+- [x] **v1.3**：`upstream_fetch_total` domain 补 `depth`（§3.2/T-MET-T17）；首个刷新轮豁免口径（§3.2/BR-MET-13/§8 MET-T17/§9/§10#12·13）；**`metrics.py` 零代码变更**（仍 19 名）
 
 
