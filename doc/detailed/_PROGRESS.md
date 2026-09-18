@@ -9,7 +9,7 @@
 - 批次 2：**数据层三模块**（stock_api / market_api / cdp_engine）→ ✅ 完成（均 **v1.1**，已按评审修订）
 - 批次 3：**上层两模块**（server / stream）→ ✅ 评审闭环（v1.1）→ ✅ P7b 契约同步（v1.2）→ ✅ v1.3 收尾（`server.md` N1 回退）
 - **本次（r5 容量/冷启动契约同步）**：把多轮实现的真实行为**以代码为准**回写 `stream.md`（→ **v1.3**）/ `stock_api.md`（→ **v1.3**）/ `server.md`（→ **v1.4**）（+ 本文件）——**未改代码、未改 SAD/PRD/其他详设**
-- 版本（**以各文档头部为准，已核对**）：`config.md` = **v1.4**（前轮）· `cache.md` = **v1.7**（★ P3a → P3a-r1 → **P7b 回填 D-3**）· `server.md` = **v1.8**（★ P3a → P3a-r1 → P3a-r2 → **P7b 回填 D-1/D-2**）· `stream.md` = **v1.3** · `stock_api.md` = **v1.3** · `market_api.md` = **v1.3** · `metrics.md` / `cdp_engine.md` = **v1.2**
+- 版本（**以各文档头部为准，已核对**）：`config.md` = **v1.4**（★ 溯源仍滞后 SAD v1.2 / PRD v0.3 — **待办见下**）· `cache.md` = **v1.10**（★ P3a → P3a-r1 → P7b 回填 D-3 → **P8 F1/F5** → **P8 F8** → **P2-1 fail-safe 收口 + 溯源 PRD v0.8**）· `server.md` = **v1.11**（★ P3a → P3a-r1 → P3a-r2 → P7b 回填 D-1/D-2 → **P8 F1–F7** → **P8 F8** → **P2-1 措辞收口 + 溯源 SAD v1.9/PRD v0.8**）· `stream.md` = **v1.3** · `stock_api.md` = **v1.3** · `market_api.md` = **v1.3** · `metrics.md` = **v1.5**（★ P8 F3 + **F8 自检/溯源修正**）· `cdp_engine.md` = **v1.2**
 - 路径：纯后端（无前端/小程序 → Step 4 跳过）
 - 门禁：每份含 9 节（职责/契约/数据结构/业务规则/伪代码/错误处理/并发安全/测试要点/AC 追溯）+ 偏差标注 + 自检；§3 为 yaml 代码块
 
@@ -68,7 +68,7 @@
 |---|------------------|-----------|--------|
 | ① | **SAD 未承接 RSS 条件请求（D-1，P1 级契约缺口）** | SAD 回填：§2.4（或 server 行）增"RSS 响应缓存校验器与 304 语义"「弱 ETag 派生口径（**剔除 `lastBuildDate`/`ttl`/`pubDate` 的内容**）」「`<ttl>` 为 advisory、**最小 1 分钟**」；并显式声明**仍为拉模型**、未启用 keep-alive。**由"可选"改判为必做** | system-architect |
 | ② | **PRD 无对应 AC（D-2）** | PRD v0.7 增 AC（如「AC-A13 RSS 条件请求：内容未变 ⇒ 304 零 body；`<ttl>` advisory、最小 1 分钟」）或由 SAD 正式承接 ①；**当前唯一追溯目标是工作文件 `_MEMORY_CACHE.md`，一旦覆写即失去需求锚点** | prd-writer |
-| ③ | **详设头部溯源版本（D-5 / P2-09）** | **✅ 本轮已就地修正**：`server.md` / `cache.md` 头部由 `SAD v1.3`/`v1.2` + `PRD v0.3` → **实际 SAD v1.7 / PRD v0.6**。⚠️ **剩余（不在本轮写范围）**：`config.md` 头部仍写 SAD v1.2、`metrics.md` 头部仍写 SAD v1.2 / PRD v0.3 ⇒ 建议编排层下次调度 task-decomposer 时同批修正（口径同上） | ✅ task-decomposer（server/cache 已完成；config/metrics 待编排层） |
+| ③ | **详设头部溯源版本（D-5 / P2-09）** | **✅ 本轮已就地修正**：`server.md` / `cache.md` 头部由 `SAD v1.3`/`v1.2` + `PRD v0.3` → **实际 SAD v1.7 / PRD v0.6**。⚠️ **剩余（不在本轮写范围）**：`config.md` 头部仍写 SAD v1.2、`metrics.md` 头部仍写 SAD v1.2 / PRD v0.3 ⇒ 建议编排层下次调度 task-decomposer 时同批修正（口径同上） | ✅ task-decomposer（★ 2026-09-18：`server.md` v1.11 / `cache.md` v1.10 / `metrics.md` v1.5 已完成至 **SAD v1.9 / PRD v0.8**；**仅剩 `config.md`（范围外、保留登记）**） |
 | ④ | **「本专项 R1」与 SAD/PRD R1–R20 同名不同义（D-4）** | 统一改称 **`US-RSS-1` / `AC-RSS-1`**（或每次出现写全「本专项 R1（`_MEMORY_CACHE.md`）」）；避免跨文档把"内容未变⇒304"误读为 SAD 根因 R1。本轮已在 `server.md` 头部加命名说明并保留限定语 | 编排层统一（SAD/PRD 编号权）+ 各详设 |
 | ⑤ | **对外文档同步面缺分叉 5 契约语句（D-6 → 并入 P1-03）** | `API.md` / `README.md` / 变更日志须补：`ETag`/`Last-Modified`/`304`/`<ttl>` 语义 + **「`<ttl>` 非时效保证，短线请用 SSE」** + RSS 样例体现 `<ttl>` 元素（**放行前置**）；★ 见上方契约影响 #1–#5 与本文件 #4 | 编排层（API.md/README/变更日志） |
 | ⑥ | **"304 只省 body、不省回源"（评审五残余风险）** | `API.md` 写明：TTL 到期仍回源重生成；若上游窗口内静默改内容，客户端最长滞后一个 TTL。另注明"**降级 feed 不应作为 304 缓存的判断依据**"（同一错误表示会 304，监控勿误读） | 编排层（API.md） |
@@ -94,6 +94,129 @@
 | **D-3** | `cache.md` T-CACHE-32「浅拷贝隔离负例」**已在 P6c 实现**，但文档未标注 | `cache.md` §8 用例 + §9 映射 + §11 自检 | ✅ 标注 **已实现** = `tests/test_cache.py::FeedEntryAccessorTests::test_t_cache_32_shallow_copy_isolates_the_container` |
 | **顺带·P2-3** | `_send_text`（200）与 `_send_not_modified`（304）**各写一份** `Cache-Control`/`Vary`——**实现现状，非设计变更**；`SRV-T62` 为兜底断言 | `server.md` §5.8（如实记录） | ✅ 记录现状与 T62 关系（不抽公共函数 / 不改设计） |
 | **顺带·§8 映射** | 实现把 `SRV-T52b` 拆为 **5 个 unittest 方法** | `server.md` §8 表后注 | ✅ 编号计数不变（总 64） |
+
+
+## ★ P8 对抗性盲审 F1–F7 契约化（`server.md` v1.9 / `cache.md` v1.8 / `metrics.md` v1.4 · 只改文档，不改代码）
+
+> 依据：P8 对抗性盲审（**P0=0 / 2×P1 + 8×P2**）+ 编排层裁定。**本轮只改** `doc/detailed/{server,cache,metrics,_PROGRESS}.md`；**未改代码 / SAD / PRD / API.md / README.md / `.opencode`**。
+
+| # | 修复 | 落点 | 契约产出 |
+|---|------|------|---------|
+| **F1** | **P1-1 根治**：`Last-Modified` = 表示最后一次变更的时刻 | feed 条目新增 `fingerprint`/`last_modified`；`feed_cache_put` 与**同一键上一条目（★ 即使已过期）**比指纹 ⇒ 相同继承、不同取写入时刻；不变式 `ETag 变 ⟺ Last-Modified 前进` | **BR-SRV-38 改写** + **BR-CACHE-33** |
+| **F2** | **P1-2 根治**：feed 缓存键覆盖表示全部变化维度 | `PUBLIC_BASE_URL` 已设 ⇒ `path`；未设 ⇒ `path + '\x00' + base_url`；键对 cache 不透明；`_feed_fetch_locks` 按同一键建锁；放大风险已论证 | **BR-SRV-45** |
+| **F3** | **P2-6**：新增 `http_304_total` | `metrics._KNOWN` + `_DEFAULTS` 同步注册（19 → **20**）；`_send_not_modified` **单点**计数；只需计数不需分母 | **BR-SRV-46** + **BR-MET-14** |
+| **F4** | **P2-4**：feed `max-age` authority 由 `news_url` 改 `feed` | `_CACHE_AGE_DOMAINS` 5 path 改 `'feed'`；**数值不变、契约不变**；不变式 `_feed_ttl_minutes() == ceil(max-age/60)` | **BR-SRV-47** |
+| **F5** | **P2-5**：`feed_cache_put` 返回写入条目 | 返回六字段浅拷贝（非 None）；`_get_or_fetch_feed` 直接消费、**删除 put 后第二次查询**（消除「200 带 ETag 却不带 `Last-Modified`」窗口） | **BR-SRV-48** + **BR-CACHE-34** |
+| **F6** | **P2-7 仅文档化**：HTTP/1.0 304 EOF 收尾 | 304 无 `Content-Length`；RFC 9110 §8.6 禁写 `Content-Length: 0`；本轮不升 `protocol_version`/keep-alive | **BR-SRV-49** + §10#36 |
+| **F7** | 测试补充 | 新增 `SRV-T63..T70`（8 条）+ 改写 `SRV-T55`（自造陈旧条目、不依赖时序）；`T-CACHE-33/34` 新增、`T-CACHE-32` 扩六字段；`MET-T18` 新增 | 测试 **64 → 72**（server）+ cache/metrics 用例 |
+| **F8** ★ 后补 | **P1-1 根治**（`CR-RSS-20260918-003`，评审推荐方案 1）：feed 取数锁表与键空间同界收敛 | cache 新增 `feed_fetch_acquire/release` + `_feed_fetch_refs`（`acquire` 返回锁前计数 +1、`release` 归零两表同删）；`_get_or_fetch_feed` 改 `acquire` / `try…finally release`；BR-SRV-45 **补正**（原放大论证只覆盖上游请求，未覆盖锁表内存与本地生成） | **BR-SRV-50** + **BR-CACHE-35** + `SRV-T71/T72` + `T-CACHE-35` |
+
+### 编号清单（只增不删；改写用原号并注明）
+
+- **改写**：`BR-SRV-38`（`Last-Modified` 时间源）、`BR-SRV-7`/`BR-SRV-42`（RSS `max-age` 域 → `feed`）、`BR-CACHE-32`（条目六字段 + `last_modified` 为 Last-Modified 源）。
+- **新增**：`BR-SRV-45`（F2）/ `BR-SRV-46`（F3）/ `BR-SRV-47`（F4）/ `BR-SRV-48`（F5）/ `BR-SRV-49`（F6）；`BR-CACHE-33`（F1 指纹继承）/ `BR-CACHE-34`（F5 返回值）；`BR-MET-14`（F3）。
+- **新增测试**：`SRV-T63..T70`（8 条）+ `T-CACHE-33`/`T-CACHE-34`（2 条）+ `MET-T18`（1 条）；**改写** `SRV-T55`、`T-CACHE-32`、`SRV-T11`、`SRV-T46/T47`/`FeedDoubleCheckTests` 打桩。
+
+### 契约影响（需编排层 / 其它文档同步 · 本 agent 不改）
+
+1. **`API.md` / `README.md` / 变更日志**：F3 新增 `http_304_total`（`/healthz.metrics` 只增一个键，属"只增"）；F1 的 `Last-Modified` 语义澄清（"表示最后一次变更"）；F4 无对外数值变化（**无需**外部文档改动，仅 authority 内部收敛）；F2 无对外接口变化。
+2. **SAD 回填（system-architect）**：§2.6 计分板注册表 19 → 20（F3）；§2.1 D4 / §2.4 可补"RSS `max-age` authority = `feed`"（F4）；`feed` 缓存键含 `base_url` 的说明（F2）。
+3. **`config.md`**：`DOMAIN_MATRIX` 无改动，无需同步。
+
+### ⚠️ 发现的契约冲突（**只报告，不自行修改其它文档**）
+
+1. **`metrics.md` v1.3 的"注册表不新增名称（SAD 契约冻结）" vs F3**：F3 要求新增 `http_304_total`。本版在 `metrics.md` v1.4 内已按编排层裁定改口径（并留痕），但**SAD §2.6 计分板仍记 19 名** ⇒ 存在 SAD↔详设注册表不一致，需 system-architect 回填（见上"契约影响 #2"）。
+2. **SAD §2.1 D4 的"承诺=行为"推导以 `news_url`/`feed` 同 L3 为前提**：F4 改 authority 后推导不再依赖"两域恰好同 L3"，属**强化**；SAD 若原样保留旧措辞不构成矛盾，但建议补一句"RSS max-age 取 `feed` 域"。
+3. **`test_t55` 旧断言实际上是 P1-2 的伪绿**：该用例此前"通过"依赖 path 键缓存旧表示，**与 F2 的键语义直接冲突**——已在 `server.md` §8/§10.1 标注改写（**属测试迁移，不改其它文档**）。
+4. **`cache.md` BR-CACHE-32（v1.5–v1.7）** 与 `server.md` BR-SRV-38 旧文均称 `entry['time']` 为 Last-Modified 权威：本版已在**两份文档内**同步改写为 `entry['last_modified']`，`time` 保留给 `refresh_epoch`（BR-CACHE-31）——无跨文档冲突残留。
+5. **【★ v1.10 / F8 更正】`server.py`/`cache.py` 的 F1–F6 代码已实现**（本文件旧版"仍未实现"条目**作废**）：F1–F6 已落地，通过 §8 的 **72 条**用例（含 **`SRV-T66` 304 计数**等 **504 用例场景**），并已过代码评审 **`CR-RSS-20260918-003`**（`doc/review/rss-conditional-get_p8修复_代码评审_专家版.md`，结论 ✅ 通过；但判 **P1-1（`_feed_fetch_locks` 无界增长）对外部署前必修**）。本轮 **F8** 即按该评审"**方案 1：引用计数 / 惰性回收**"契约化（`server.md` BR-SRV-50 / `cache.md` BR-CACHE-35）：**★ 2026-09-18 状态更新（F8 已实现）**——`server.py::_get_or_fetch_feed` 已走 `feed_fetch_acquire` / `try…finally feed_fetch_release`，`cache.py` 两原语 + `_feed_fetch_refs` 就位（`server.md` §10.1 / `cache.md` §8 的 `SRV-T71/T72`、`T-CACHE-35` 已落地）；同轮 **P2-1..P2-4** 全部修复（详见下方「P2-1..P2-4 修复 + 溯源收口」）；**全量测试 511 用例全绿**。
+
+
+## ★ P8 F8 契约化（`server.md` v1.10 / `cache.md` v1.9 / `metrics.md` v1.5 · 只改文档，不改代码）
+
+> 依据：代码评审 `CR-RSS-20260918-003`（`doc/review/rss-conditional-get_p8修复_代码评审_专家版.md`，判 **P1-1 = F2 引入、对外部署前必修**）+ 编排层裁定（采纳推荐**方案 1：引用计数 / 惰性回收**）。**本轮只改** `doc/detailed/{server,cache,metrics,_PROGRESS}.md`；**未改代码 / SAD / PRD / API.md / README.md / `.opencode`**；**只增不删 BR 编号**。
+
+### F8 契约（锁表与键空间同界收敛）
+
+| 项 | 内容 | 落点 |
+|----|------|------|
+| **根因（F2 引入）** | `_feed_fetch_locks`（`cache.py:901`）+ `_feed_fetch_locks_lock`（`:902`）以 `cache_key` 为键 `setdefault` 建 `threading.Lock`（消费点 `server._get_or_fetch_feed` `:1346-1347`），**全仓无任何删除/淘汰**。历史 `系统_代码评审报告_001.md` TS-4 曾因"`pop` 与持锁线程竞态 ⇒ 同一键双抓"**主动移除 `pop`** ⇒ "只增不减"是既有取舍。**F2 把键空间从 5 条固定 path 变成 "path × 请求派生 base_url"**，而 `_valid_host_header`（`server.py:591`）**只校验格式、不校验归属** ⇒ 任意合法主机名都能造新键 | BR-SRV-45 补正 |
+| **后果 1** | **永久内存增长**（每键约 300–450 B，外部可无界触发，直至 OOM） | BR-SRV-45 补正 / BR-SRV-50 |
+| **后果 2** | **本地生成放大**：键数超过 `feed_cache` 上限 100 后每个新 Host 必 miss ⇒ 一次 `generate_rss` + sha256、LRU 持续抖动（**上游请求仍被 URL 级缓存兜住 ⇒ 只放大本地 CPU，不放大上游**） | BR-SRV-45 补正 |
+| **方案（评审推荐 1）** | **引用计数 / 惰性回收**：新增 cache 层原语 **`feed_fetch_acquire(key) -> Lock`** / **`feed_fetch_release(key)`**，**两者都持 `_feed_fetch_locks_lock`**；`acquire` 返回锁**之前**计数 +1（必要时建 `Lock`）；`release` 递减、**归零即 `pop` 键及其计数**（**两表同删**，避免计数表成为新的无界表）。新增 `_feed_fetch_refs: dict[cache_key -> int]` | BR-CACHE-35 / BR-SRV-50 |
+| **为什么不能简单重加 `pop`** | 归零前 `pop` 会让"已取出锁但尚未进入 `with`"的线程与后来者拿到**两把不同的锁** ⇒ 同一键双抓（TS-4 原事故）。**不变式**：只要还有线程持有或即将获取该键的锁，计数 ≥1，该键不可能被 `pop` | BR-CACHE-35 / BR-SRV-50 |
+| **正确性论证** | `pop` 只发生在计数归零时（无持有者/等待者）；随后到达的线程创建新锁，其双检仍命中前一个持有者已写入的缓存条目 ⇒ **不产生重复取数**（第二次真取数只可能因条目确实已过期） | BR-CACHE-35 / BR-SRV-50 |
+| **调用纪律** | `acquire` / **`try ... finally: release`**（异常路径也必须释放，否则计数泄漏 ⇒ 锁表退化为只增不减） | BR-SRV-50 / `server.md` §5.4 |
+| **有界性结论** | 锁表规模收敛于"**并发在飞的键数**"，而非"累计见过的键数"；`PUBLIC_BASE_URL` 已设时键恒为 5 条 path。**可选运营缓解（备注）**：部署侧强制设 `PUBLIC_BASE_URL` | BR-SRV-50 / BR-CACHE-35 |
+
+### 新增编号 / 测试
+
+- **新增 BR**：**`BR-SRV-50`**（F8，`server.md` §4.7）/ **`BR-CACHE-35`**（F8，`cache.md` §4.3）。**改写（补正）**：`BR-SRV-45` 的"放大风险论证"**保留原论证并加限定**（原论证只覆盖上游请求，未覆盖锁表内存与本地生成）。
+- **新增测试**：`server.md` **`SRV-T71`**（收敛性：串行 N=50 个不同 Host 后 `len(_feed_fetch_locks) == 0`，断言"不随 N 增长"）/ **`SRV-T72`**（并发不双抓：`fetch_func` 仅 1 次；异常路径计数归零）→ 测试 **72 → 74**；`cache.md` **`T-CACHE-35`**（原语级：计数成对 / 同锁 / 不双抓 / 异常不泄漏 / 不随 N 增长）。
+- **`metrics.md` v1.5（顺带 3 处文档修正之 1 + 溯源）**：更正 v1.4 自检句「`metrics.py` 零代码变更」（与 BR-MET-14 互斥）；溯源 `SAD v1.2`/`PRD v0.3` → **`SAD v1.9`/`PRD v0.8`**。
+- **`cache.md` v1.9（顺带 3 处文档修正之 2）**：§2.4 双检步骤 ② 由 `再次 feed_cache_get(path)` 更正为 **`再次 feed_cache_get_entry(cache_key)`**（与 `server.md` §2.5 / `SRV-T70` 的"`feed_cache_get_entry` 恰好 2 次"一致）；头部溯源 `SAD v1.7` → **`SAD v1.9`**。
+- **`server.md` v1.10（顺带 3 处文档修正之 3）**：`BR-SRV-46` 加 **P2-5 口径备注**——`http_304_total` 在**构造 304 响应时**计数，故极少数"计数已增但响应未送达客户端"（客户端中途断开 / `send_response` 抛错）的情况**会计入**，这是**有意语义**（"服务端决定返回 304 的次数"，非"客户端成功收到的次数"）。
+
+### Step 2.5 链式推导（7 规则，F8）
+
+| 规则 | 结论 |
+|------|------|
+| 规则零（需求缺口） | **无新对外端点/新 HTTP 参数**；新增 2 个 cache 层内部公开原语（`feed_fetch_acquire/release`）→ **无需用户确认新接口** |
+| 规则一（读写配对） | `acquire`/`release` **必须成对**（`try/finally`）——新增的读写配对约束本身即本契约核心 |
+| 规则二（状态机） | 锁表键状态机：`不存在 --acquire--> count=1 --acquire--> count=n --release--> count=n-1 --release to 0--> pop（不存在）`；**禁止** `count>0` 时 `pop`（穷举封闭） |
+| 规则三（跨模块依赖） | `server → cache` 新增 `feed_fetch_acquire/release`（同向、无环）；替换原 `_feed_fetch_locks`/`_feed_fetch_locks_lock` 直接 import；**不改 cache→server 反向** |
+| 规则四（数据生命周期） | 锁表条目生命周期 = "首次 acquire 创建 → 每次 acquire/release 增减计数 → 计数归零删除"；**有界 = 并发在飞键数** |
+| 规则五（异步流程） | 无异步/无任务状态/无死信（纯同步锁原语） |
+| 规则六（权限/隔离） | 无鉴权/多租户；不改 `layerIsolation`（`threading` 已在 allowlist） |
+
+### 契约影响（需编排层 / 其它文档同步 · 本 agent 不改）
+
+1. **`API.md` / `README.md` / 变更日志**：F8 **无对外接口变化**（内部锁表生命周期）⇒ **无需**外部文档改动；仅 `PUBLIC_BASE_URL` 作为可选运营缓解值得在部署文档说明。
+2. **SAD 回填（system-architect）**：SAD/PRD 未定义 feed per-键 锁表生命周期；若需入 SAD §2.2/§4，可补"feed 取数锁表按并发键数有界、引用计数归零回收"（`server.md` BR-SRV-50 / `cache.md` BR-CACHE-35 已按实现钉死）。
+
+### ⚠️ 发现的契约冲突（**只报告**）
+
+1. **✅ 已闭环（2026-09-18）**：`server.md` v1.11 头部已更正为 **SAD v1.9 / PRD v0.8**；`cache.md` v1.10 头部 PRD 已更正 **v0.6 → v0.8**（SAD v1.9 于 v1.9 版已更正）；`metrics.md` v1.5 已更正 SAD v1.9 / PRD v0.8。**除下条 `config.md` 外无剩余滞后。**
+2. **⏳ 仍待办（本轮范围外，任务书明确排除）**：`config.md` 头部仍写 **SAD v1.2 / PRD v0.3**（v1.4 文档未同步）——属既存溯源滞后（本文件 P3a 章 §③ 早已登记），**保留登记**，建议编排层下次调度 task-decomposer 时同批修正为 **SAD v1.9 / PRD v0.8**。
+
+
+## ★ P2-1..P2-4 修复 + 溯源收口（`server.md` v1.11 / `cache.md` v1.10 · 只改文档，不改代码）
+
+> 依据：代码评审 `doc/review/rss-conditional-get_p8修复_代码评审_专家版.md`（`CR-RSS-20260918-003`，P1-1 必修 + P2-1..P2-4）的**实现落地事实** + code-developer 的 `>>DOC_SYNC` 标记（P2-1）。**本轮只改** `doc/detailed/{server,cache,_PROGRESS}.md`；**未改代码 / SAD / PRD / API.md / README.md / `.opencode`**；**无 BR 语义变更**。
+
+### 实现事实（以代码为准）
+
+| 项 | 实现事实（代码） | 文档收口 |
+|----|----------------|---------|
+| **F8 已实现** | `cache.py`：`feed_fetch_acquire`（计数 +1 后返回锁）/ `feed_fetch_release`（归零两表同删）+ `_feed_fetch_refs`；`server.py::_get_or_fetch_feed` 经 `acquire` / `try…finally release` | `server.md` BR-SRV-50 / `cache.md` BR-CACHE-35（契约 v1.9 / v1.10 已钉死，**实现对齐**） |
+| **P2-1 修复** | `cache.py::feed_cache_get_entry` 读 `entry.get('last_modified')`；`feed_cache_put` 继承分支读 `prev.get('last_modified')`（缺省 `None`）；`fingerprint` 两处本为 `.get` | `cache.md` v1.10：§2.4 / §3.1 / BR-CACHE-32/33 / §5.3 / §8 T-CACHE-32/33 / §10#27；`server.md` v1.11：§2.5 访问器契约注 + BR-SRV-38（**措辞收口**） |
+| **P2-2 修复** | `tests/test_server_http.py::test_t55`：自造陈旧条目 + 断言继承值（`last_modified` 继承） | 测试用例侧（文档 §8 `SRV-T55` 已记改写口径，无需再改） |
+| **P2-3 修复** | `tests/test_server_http.py::test_t69`：增加两域分叉受控断言 | 测试用例侧（文档 §8 `SRV-T69` 口径不变） |
+| **P2-4 修复** | `tests/test_cache.py::test_t_cache_33_fingerprint_inherits_across_expiry`：第二次 `put` 前置 `_last_feed_sweep=0.0` 强制触发①，断言清扫确已发生 + 继承仍成立 | `cache.md` v1.10 §8 `T-CACHE-33`（补 ⑥⑦） |
+| **测试** | **全量 511 用例全绿**（`server.md` §8 的 74 条含 `SRV-T71/T72`；`cache.md` T-CACHE-32..35 含 legacy fail-safe 负例） | 本文件登记 |
+
+### P2-1 语义（fail-safe，写死）
+
+- **非六字段条目（legacy / 注入）缺 `last_modified`** ⇒ 读为 **`None`** ⇒ **不发 `Last-Modified` 头、禁用 IMS**（`If-None-Match` 仍按 ETag 正常评估），**而非抛 `KeyError` 经 `_guard` 变降级体**（降级体是"上游失败"语义；缺字段只是"该条目无变更时刻"，二者必须区分）。
+- **继承分支**：`prev` 指纹匹配但缺 `last_modified` ⇒ 新条目 `last_modified=None`（**不前进为写入时刻**——前进会误发"已变更"信号）。
+- **`fingerprint` 核对通过**：`entry.get('fingerprint')` / `prev.get('fingerprint')` **本就是 `.get`**，无需改。
+
+### 溯源更正
+
+- `server.md`：**SAD v1.7 → v1.9**、**PRD v0.6 → v0.8**；接口权威栏 `cache.md` v1.9 → **v1.10**。
+- `cache.md`：**PRD v0.6 → v0.8**（SAD v1.9 已在上版更正）。
+- **`config.md`（SAD v1.2 / PRD v0.3）不在本轮范围，保留待办**（见上「P8 F8 契约化 → ⚠️ 冲突 #2」）。
+
+### 版本
+
+- `server.md` **v1.10 → v1.11**、`cache.md` **v1.9 → v1.10**（变更记录已写：**措辞收口 + 溯源更正，无 BR 语义变更**）。
+- `config.md` / `metrics.md` / `stream.md` / `stock_api.md` / `market_api.md` / `cdp_engine.md` **本轮未改**。
+
+### ⚠️ 发现的冲突（只报告）
+
+1. **`config.md` v1.4 头部溯源仍滞后**（写 SAD v1.2 / PRD v0.3，实际 v1.9 / v0.8）——本轮范围外，保留登记（见上）。
+2. **`metrics.md` v1.5 变更块（历史行）** 仍写 "`server.md` → v1.10、`cache.md` → v1.9"——属该版**历史快照**（现行：`server.md` v1.11 / `cache.md` v1.10），**不回改**，跨文档阅读以各文档头部为准。
+3. **`cache.md` 历史变更行（v1.5–v1.9）** 仍含 `entry['last_modified']` / `prev['last_modified']` 直接下标表述——属**历史记录**；正文（§2.4 / §3.1 / §4.3 / §5.3）已全部收口为 `.get(..., None)`，**不回改历史行**（与"只增不删"惯例一致）。
 
 
 ## ★ r5 契约同步（`stream.md` v1.3 / `stock_api.md` v1.3 / `server.md` v1.4 · 以代码为准）
@@ -364,12 +487,12 @@
 | # | 文档 | 状态 |
 |---|------|------|
 | 1 | `doc/detailed/config.md` | ✅ **v1.4（批次 1 → v1.1 → P7b v1.2 → AC-S3 v1.3 → ★ 传输/容量 env v1.4）**（`PROBE_TIMEOUT` 脚注更正：阶梯封顶 = `cache._PROBE_BUDGET_CAP=5.0`；★ v1.4 补登 `BATCH_MAX_WORKERS=20`/`STREAM_PER_FETCH_EST=0.3`/`HTTP_POOL_*`/`HTTP_DNS_CACHE_TTL`/`HTTP_WARM_*`、L0 档 + `quote`→L0 + `depth` 域、`upstream_secu_code`、`warm_hosts()`；§10#19..23）**——**版本以文档头部为准** |
-| 2 | `doc/detailed/cache.md` | ✅ **v1.7（批次 1 → v1.1 → P7b v1.2 → AC-S3 v1.3 → ★ 传输层 v1.4 → ★ P3a v1.5 → ★ P3a-r1 v1.6 → ★ P7b 回填 D-3 v1.7）**（v1.4：`_ConnectionPool` + `_DNSResolver` + `cache.urlopen` 打桩缝 + `warm_transport` + `fetch_json` 第 6 位 `refresh_epoch`（BR-CACHE-31）；v1.5：`feed_cache_get_entry` 访问器（BR-CACHE-32）供 RSS Last-Modified；`feed_cache_get` 签名/语义不变；★ **v1.6（P3a-r1）：T-CACHE-32 扩浅拷贝隔离负例 + 头部溯源 SAD v1.7/PRD v0.6**；★ **v1.7（P7b 回填 D-3）：T-CACHE-32 标注 ✅ 已实现 = `tests/test_cache.py::FeedEntryAccessorTests::test_t_cache_32_shallow_copy_isolates_the_container`；无实现/契约变更**）**——**版本以文档头部为准** |
-| 3 | `doc/detailed/metrics.md` | ✅ v1.2（批次 1 → P7b） |
+| 2 | `doc/detailed/cache.md` | ✅ **v1.10（批次 1 → v1.1 → P7b v1.2 → AC-S3 v1.3 → ★ 传输层 v1.4 → ★ P3a v1.5 → ★ P3a-r1 v1.6 → ★ P7b 回填 D-3 v1.7 → ★ P8 F1/F5 v1.8 → ★ P8 F8 v1.9 → ★ P2-1 fail-safe + 溯源 v1.10）**（v1.4：`_ConnectionPool` + `_DNSResolver` + `cache.urlopen` 打桩缝 + `warm_transport` + `fetch_json` 第 6 位 `refresh_epoch`（BR-CACHE-31）；v1.5：`feed_cache_get_entry` 访问器（BR-CACHE-32）供 RSS Last-Modified；`feed_cache_get` 签名/语义不变；★ **v1.6（P3a-r1）：T-CACHE-32 扩浅拷贝隔离负例 + 头部溯源 SAD v1.7/PRD v0.6**；★ **v1.7（P7b 回填 D-3）：T-CACHE-32 标注 ✅ 已实现 = `tests/test_cache.py::FeedEntryAccessorTests::test_t_cache_32_shallow_copy_isolates_the_container`；无实现/契约变更**；★ **v1.8（P8 F1/F5）：feed 条目 `fingerprint`/`last_modified` + `feed_cache_put` 返回写入条目（BR-CACHE-33/34）**；★ **v1.9（P8 F8）：`feed_fetch_acquire`/`feed_fetch_release` + `_feed_fetch_refs` 引用计数原语（BR-CACHE-35）、§2.4 双检措辞更正为 `feed_cache_get_entry`、头部溯源 SAD v1.9**；★ **v1.10（P2-1 fail-safe + 溯源）：`last_modified` 读 `entry.get`/`prev.get(..., None)`（legacy / 非六字段条目 ⇒ `None` ⇒ 不发 `Last-Modified`、禁用 IMS，不抛 `KeyError` 经 `_guard` 变降级体）、BR-CACHE-33 口径收口（无 BR 语义变更）、§8 T-CACHE-32/33 补负例、§10#27、头部 PRD v0.6 → v0.8**）**——**版本以文档头部为准** |
+| 3 | `doc/detailed/metrics.md` | ✅ **v1.5（批次 1 → P7b v1.2 → ★ v1.3 depth 域 + 首轮豁免 → ★ P8 F3 v1.4 注册 `http_304_total`（20 名）→ ★ v1.5 F8 顺带修正自检句"`metrics.py` 零代码变更" + 溯源 SAD v1.9/PRD v0.8）**（v1.4：`_KNOWN`/`_DEFAULTS` 19→20、`server._send_not_modified` 单点计数、BR-MET-14/MET-T18；★ v1.5：**本版确实改了 `metrics.py`**——注册表各新增 1 名，与 BR-MET-14 一致） |
 | 4 | `doc/detailed/stock_api.md` | ✅ **v1.3（批次 2 → P7b v1.2 → ★ r5 契约同步 v1.3）**（depth 域 + 三阶段 basic_info + 空壳防御 + `upstream_secu_code` 全量应用 + `BATCH_MAX_WORKERS=20` + `refresh_epoch` 贯通；偏差 26·测试 39） |
 | 5 | `doc/detailed/market_api.md` | ✅ **v1.3（批次 2 → v1.1 → P7b v1.2 → AC-S3 裁决 v1.3）**（BR-MKT-11 封顶更正为 `_PROBE_BUDGET_CAP`；§10#9；§12 变更记录） |
 | 6 | `doc/detailed/cdp_engine.md` | ✅ v1.2（批次 2 → P7b） |
-| 7 | `doc/detailed/server.md` | ✅ **v1.8（批次 3 → P7b v1.2 → N1 回退 v1.3 → ★ r5 契约同步 v1.4 → ★ P3a v1.5 → ★ P3a-r1 v1.6 → ★ P3a-r2 v1.7 → ★ P7b 回填 D-1/D-2 v1.8）**（v1.4：gzip 协商 `_accepts_gzip`+`Vary`、`main()` `warm_transport`；v1.5：RSS 条件请求 `ETag`(弱)/`Last-Modified`/`304`——`_feed_etag`、`_send_not_modified`（无 body/无 `Content-Encoding`）、INM>IMS 优先级、RSS `<ttl>`（分钟）、`_get_or_fetch_feed` 返回 `(xml,last_modified)`；★ **v1.6（P3a-r1）：`_feed_etag` canonical 投影扩展 item 级 `<pubDate>` 全量剔除 + 双向不变式（C1）；§10.1 迁移第 4 条 `h.headers={}`（C2）；`<ttl>` 契约语句（C3）；`dt.timestamp()` 入 try（C4）；BR-SRV-39 措辞（C5）；§10#36 依据（C6）；14 条缺失用例（C7）**；★ **v1.7（P3a-r2 复审 P2 收口）：P2-a `SRV-T52b` 用例定义细化（受控时钟 + 红/绿方向 + 纯函数断言）、P2-b BR-SRV-37 第二子句限定、P2-c §10.1 FeedDoubleCheck 2-tuple 返回值断言、P2-d §10.1 第 3 条 `:440/:450`、P2-f §1.1 标题 13 条**；★ **v1.8（P7b 回填 D-1/D-2）：§10.1 补第 5 条 `GuardTests::test_rss_degrade_is_valid_feed` 迁移 + 迁移计数 4→5（D-1）；eastmoney `<ttl>` 口径 5 处 → 6 处调用点/5 handler（D-2）；顺带 P2-3 两写入点 + T62 兜底、§8 T52b 拆 5 方法计数不变**；BR-SRV-36..44、§11.5、偏差 37 项·测试 **64 条**） |
+| 7 | `doc/detailed/server.md` | ✅ **v1.11（批次 3 → P7b v1.2 → N1 回退 v1.3 → ★ r5 v1.4 → ★ P3a v1.5 → ★ P3a-r1 v1.6 → ★ P3a-r2 v1.7 → ★ P7b 回填 D-1/D-2 v1.8 → ★ P8 F1–F7 v1.9 → ★ P8 F8 v1.10 → ★ P2-1 措辞收口 + 溯源 v1.11）**（v1.4：gzip 协商 `_accepts_gzip`+`Vary`、`main()` `warm_transport`；v1.5：RSS 条件请求 `ETag`(弱)/`Last-Modified`/`304`——`_feed_etag`、`_send_not_modified`（无 body/无 `Content-Encoding`）、INM>IMS 优先级、RSS `<ttl>`（分钟）、`_get_or_fetch_feed` 返回 `(xml,last_modified)`；★ **v1.6（P3a-r1）：`_feed_etag` canonical 投影扩展 item 级 `<pubDate>` 全量剔除 + 双向不变式（C1）；§10.1 迁移第 4 条 `h.headers={}`（C2）；`<ttl>` 契约语句（C3）；`dt.timestamp()` 入 try（C4）；BR-SRV-39 措辞（C5）；§10#36 依据（C6）；14 条缺失用例（C7）**；★ **v1.7（P3a-r2）：P2-a `SRV-T52b` 细化、P2-b BR-SRV-37 限定、P2-c §10.1 2-tuple 断言、P2-d `:440/:450`、P2-f §1.1 13 条**；★ **v1.8（P7b 回填 D-1/D-2）：§10.1 第 5 条迁移 + 计数 4→5、eastmoney `<ttl>` 6 处调用点/5 handler**；★ **v1.9（P8 F1–F7）：`Last-Modified`=表示变更时刻（BR-SRV-38 改写 + BR-CACHE-33）、feed 键含 `base_url`（BR-SRV-45）、`http_304_total`（BR-SRV-46）、`max-age` authority=`feed`（BR-SRV-47）、`feed_cache_put` 返回条目（BR-SRV-48）、HTTP/1.0 304 EOF（BR-SRV-49）、`SRV-T63..T70`（测试 64→72）**；★ **v1.10（P8 F8）：`_get_or_fetch_feed` 经 `feed_fetch_acquire/release` 引用计数回收（BR-SRV-50）+ BR-SRV-45 放大风险论证补正 + `SRV-T71/T72`（测试 72→74）+ BR-SRV-46 加 P2-5 口径备注**；★ **v1.11（P2-1 措辞收口 + 溯源）：§2.5 访问器契约注 + BR-SRV-38 补 legacy 条目 \`None\` 来源（**措辞收口、无 BR 语义变更**）、头部 **SAD v1.7→v1.9 / PRD v0.6→v0.8**、接口权威 \`cache.md\` → v1.10**；偏差 **44 项**·测试 **74 条**） |
 | 8 | `doc/detailed/stream.md` | ✅ **v1.3（批次 3 → P7b v1.2 → ★ r5 契约同步 v1.3）**（帧 schema 全码 + `missing`/`stale`/`errors`、last-known 结转、`_refresh_pool` 5 参 + 字段并集 + tick 预算、整 tick 网格 + 异常退避、lag C1/空池=0、准入 cap 单帧余量（9→8）、fail-closed 字段、canonical_code、`Connection: close`；★ **v1.3：节拍=最短订阅域（quote L0 4s）、`coverage` 213/426/6400、`coverage_codes` tick4 **106/53**、`refresh_epoch` 每拍真回源、帧发送层去重（`_frame_signature`/`sent_any`）、空闲唤醒 + 冷首轮豁免、`quote` 可含 `depth`**；偏差 33 项·测试 48） |
 | 9 | `doc/detailed/编码规范.md` | ⏳ 待生成 |
 | 10 | `doc/detailed/项目规则.md` | ⏳ 待生成 |

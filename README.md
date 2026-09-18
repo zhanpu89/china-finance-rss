@@ -28,11 +28,13 @@ http://localhost:8053/opml.xml
 ```
 
 RSS responses carry a weak `ETag` and support conditional requests: send
-`If-None-Match` and an unchanged feed returns **`304 Not Modified` with no body**
-(no `Content-Encoding` either). Poll with `If-None-Match` at ≥30s — each feed also
-carries `<ttl>` (minutes), which is an **advisory cache hint, not a freshness
-promise**; for fresher-than-a-minute news use the SSE stream on port 8054 (4s).
-304 saves the response body, not the upstream fetch. See `API.md` §1 and §6.3.
+`If-None-Match` **or** `If-Modified-Since`, and an unchanged feed returns
+**`304 Not Modified` with no body** (no `Content-Encoding` either). Both channels
+behave alike, because `Last-Modified` only advances when the feed content actually
+changes. Poll at ≥30s — each feed also carries `<ttl>` (minutes), which is an
+**advisory cache hint, not a freshness promise**; for fresher-than-a-minute news use
+the SSE stream on port 8054 (4s). A 304 saves the response body, not the upstream
+fetch (see `API.md` §1 and §6.3).
 
 ## JSON Stock APIs
 
@@ -73,7 +75,7 @@ http://localhost:8053/healthz?check=1
 | --- | --- | --- |
 | `PORT` | `8053` | Server port |
 | `REQUEST_TIMEOUT` | `10` | Upstream request timeout |
-| `PUBLIC_BASE_URL` | auto | Public URL for RSS self-links & OPML |
+| `PUBLIC_BASE_URL` | auto | Public URL for RSS self-links & OPML. **Worth setting in production**: with it unset, self-links are derived from the request `Host`, so the feed cache is keyed per host (correct — it stops one forged `Host` from rewriting every reader's subscription link — but it means per-host cache entries and a little extra local work) |
 | `CDP_URL` | `http://localhost:9222` | Chrome DevTools URL |
 | `MAX_WORKERS` | `20` | Max concurrent request threads |
 | `BATCH_MAX_WORKERS` | `20` | Per-batch upstream fan-out (keep ≤ `HTTP_POOL_MAX_PER_HOST`) |
