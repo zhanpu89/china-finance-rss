@@ -2,11 +2,35 @@
 # 检查代码产出物（含编译/类型检查）
 # 退出码: 0=通过, 1=失败
 
-SRC_DIR="src"
 ERRORS=0
 
-if [ ! -d "$SRC_DIR" ]; then
-  echo "❌ src 目录不存在"
+# ---- 工作目录固定为项目根（下方相对路径以此为基准）----
+PROJECT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
+cd "$PROJECT_DIR" || exit 1
+
+# ---- 源码目录解析（兼容 src/ 布局与扁平包布局）----
+# 优先读项目镜像 .opencode/project/manifest.json 的 source_dirs（项目权威画像），
+# 否则回落传统的 src/。单一目录语义（多目录时取第一个并告警）。
+SRC_DIR=""
+if [ -f ".opencode/project/manifest.json" ] && command -v python3 &>/dev/null; then
+  SRC_DIR=$(python3 -c "import json;d=json.load(open('.opencode/project/manifest.json'));print(' '.join(d.get('source_dirs') or []))" 2>/dev/null)
+fi
+if [ -z "$SRC_DIR" ] && [ -d "src" ]; then
+  SRC_DIR="src"
+fi
+if [ -n "$SRC_DIR" ]; then
+  DIR_COUNT=$(echo "$SRC_DIR" | wc -w)
+  if [ "$DIR_COUNT" -gt 1 ]; then
+    echo "⚠️  manifest 声明多个源码目录（$SRC_DIR），本脚本按单一目录检查，取第一个"
+    SRC_DIR=$(echo "$SRC_DIR" | awk '{print $1}')
+  fi
+  if [ ! -d "$SRC_DIR" ]; then
+    echo "❌ 源码目录不存在: $SRC_DIR"
+    exit 1
+  fi
+  echo "源码目录: $SRC_DIR"
+else
+  echo "❌ 未找到源码目录（无 src/，且 .opencode/project/manifest.json 未声明 source_dirs）"
   exit 1
 fi
 
@@ -26,10 +50,7 @@ fi
 EMPTY_FILES=$(find "$SRC_DIR" -type f -empty 2>/dev/null | wc -l)
 [ "$EMPTY_FILES" -gt 0 ] && echo "⚠️  空文件: $EMPTY_FILES 个" && ERRORS=$((ERRORS + EMPTY_FILES))
 
-# ---- 项目类型检测 ----
-PROJECT_DIR="$(dirname "$0")/../.."
-cd "$PROJECT_DIR" || exit 1
-
+# ---- 项目类型检测（工作目录已在上方固定为项目根）----
 PROJECT_TYPE="unknown"
 # 单类型检测（均带 unknown 守卫，防止互相覆盖）
 [ -f "pom.xml" ] || [ -f "build.gradle" ] || [ -f "build.gradle.kts" ] && [ "$PROJECT_TYPE" = "unknown" ] && PROJECT_TYPE="java"

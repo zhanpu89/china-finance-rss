@@ -27,6 +27,19 @@ PROJECT_TYPE="unknown"
 
 echo "项目类型: $PROJECT_TYPE"
 
+# ---- 测试目录与测试命令解析（优先项目镜像 manifest.json）----
+# 扁平包布局（无 src/test）与"项目自带 unittest 命令"场景此前会被静默跳过（exit 2 ⇒ 当作跳过）。
+TEST_CMD=""
+if [ -f ".opencode/project/manifest.json" ] && command -v python3 &>/dev/null; then
+  TEST_CMD=$(python3 -c "import json;d=json.load(open('.opencode/project/manifest.json'));print(d.get('test_command') or '')" 2>/dev/null)
+  MANIFEST_TEST_DIRS=$(python3 -c "import json;d=json.load(open('.opencode/project/manifest.json'));print(' '.join(d.get('test_dirs') or []))" 2>/dev/null)
+  if [ -n "$MANIFEST_TEST_DIRS" ]; then
+    SRC_TEST_DIR=$(echo "$MANIFEST_TEST_DIRS" | awk '{print $1}')
+    echo "测试目录（manifest.json）: $SRC_TEST_DIR"
+  fi
+fi
+[ -n "$TEST_CMD" ] && echo "测试命令（manifest.json）: $TEST_CMD"
+
 # ---- 解析 scope（从 _MEMORY_CACHE.md 或环境变量）----
 # 分级测试 T1 定向：有 modules scope → 只跑受影响模块测试 + 全局冒烟；无 → T2 全量
 SCOPE_MODULES=""
@@ -46,7 +59,11 @@ fi
 
 if [ -n "$SCOPE_MODULES" ]; then
   echo "变更范围: 模块 [$SCOPE_MODULES]（来源: $SCOPE_SOURCE）"
-  echo "执行模式: T1 定向（受影响模块 + 全局冒烟）"
+  if [ -n "$TEST_CMD" ]; then
+    echo "执行模式: 项目自带命令全量（manifest.json 声明；不做 scope 收窄）"
+  else
+    echo "执行模式: T1 定向（受影响模块 + 全局冒烟）"
+  fi
 else
   echo "执行模式: T2 全量"
 fi
@@ -124,7 +141,10 @@ CACHE_HIT=false
 CACHE_DIR="/tmp/opencode/test-cache"
 CACHE_KEY=""
 FP=""
-if [ -n "$SCOPE_MODULES" ]; then
+# 注意：仅当「无项目自带测试命令」时才用 T1 定向指纹。有 TEST_CMD 时执行的始终是
+# 项目全量命令，定向指纹（按 src/$m 扫描）会对不上真实被执行的测试文件 ⇒ 退化成
+# 空串常量 ⇒ 永久命中缓存（假绿）。故有 TEST_CMD 时一律走下面的 T2 全量指纹。
+if [ -n "$SCOPE_MODULES" ] && [ -z "$TEST_CMD" ]; then
   CACHE_KEY=$(echo "$SCOPE_MODULES" | tr ' ' '-' | tr -d '/\\')
   # T1 定向：扫描受影响模块的源码+测试文件
   FP=""
@@ -307,7 +327,13 @@ $T"
 
   python|polyglot)
     echo "  📦 Python 测试..."
-    if [ -n "$SCOPE_MODULES" ]; then
+    if [ -n "$TEST_CMD" ]; then
+      # 项目自带测试命令（manifest.json 声明）优先：T1/T2 同源。
+      # 此处不做 scope 收窄——manifest 声明的命令即项目权威入口，按 scope 改写它反而会失真。
+      echo "    执行: $TEST_CMD"
+      TEST_OUTPUT=$($TEST_CMD 2>&1)
+      EXIT_CODE=$?
+    elif [ -n "$SCOPE_MODULES" ]; then
       # T1 定向：只跑受影响模块的测试 + 全局冒烟（test_health/test_smoke 必有）
       # 只收集存在的目标，避免 pytest 因路径不存在而报错
       SCOPED_TARGETS=""
