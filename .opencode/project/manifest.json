@@ -15,5 +15,33 @@
   "dependencies": "stdlib-only",
   "http_stack": "http.server.BaseHTTPRequestHandler/BoundedThreadPoolServer",
   "external_integrations": ["cls.cn", "eastmoney", "10jqka", "jin10", "wallstreetcn", "chrome-cdp"],
+
+  "doc_profile": {
+    "_comment": "门的语义是「概念必须有落点」；命名可由项目声明。空数组/空串 = 项目声明为 N/A（脚本会打印显式提示，不静默跳过）。",
+    "prd": {
+      "required_sections": ["背景", "目标", "需求|功能", "验收标准|AC|Acceptance"]
+    },
+    "detailed": {
+      "required_sections": ["职责|功能描述", "业务规则|BR-", "接口|契约", "测试"],
+      "optional_sections": [],
+      "interface_section": "接口|契约",
+      "interface_fence": "yaml|json|python",
+      "data_section": "数据结构|DDL|数据",
+      "data_fence": "",
+      "rule_docs": [],
+      "_rule_docs_note": "项目规则/编码规范不在 doc/detailed/，而在 .opencode/rules/ + AGENTS.md ⇒ 声明为空即 N/A"
+    }
+  },
+
+  "integration": {
+    "base_url": "http://127.0.0.1:8053",
+    "health_path": "/healthz?check=0",
+    "lifecycle": "reuse-only",
+    "reuse_running": true,
+    "report_file": "doc/tester/integration-gate-report.md",
+    "_lifecycle_note": "reuse-only：门禁只验证已在运行的服务，绝不自行拉起/停止（本仓由 docker compose 常驻；另起或杀进程组会拆掉评测实例）。服务不可达时 exit 2 并提示先启动。",
+    "_report_note": "独立于 tester 维护的 doc/tester/integration-report.md，门禁不得覆盖评测报告"
+  },
+
   "init_ts": "2026-09-15T00:00:00Z"
 }

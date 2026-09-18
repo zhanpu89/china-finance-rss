@@ -21,6 +21,10 @@ COPY china_finance_rss/ china_finance_rss/
 RUN pip install --no-cache-dir -r requirements.txt
 
 ENV PORT=8053 PYTHONUNBUFFERED=1 MAX_WORKERS=20
+# 只写 EXPOSE 8054 是不够的：config.STREAM_HOST 默认 127.0.0.1，裸
+# `docker run -p 8054:8054` 会把 SSE 端口绑到容器回环 ⇒ 宿主不可达，与 EXPOSE
+# 声明的意图不符（docker-compose.yml 已显式设 STREAM_HOST=0.0.0.0，此处对齐）。
+ENV STREAM_HOST=0.0.0.0
 EXPOSE 8053 8054
 
 CMD ["python", "-m", "china_finance_rss.server"]

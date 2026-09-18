@@ -18,7 +18,61 @@ ERRORS=0
 PASS_COUNT=0
 FAIL_COUNT=0
 SKIP_COUNT=0
-REPORT_FILE="doc/tester/integration-report.md"
+# 读取项目集成画像（.opencode/project/manifest.json → integration）；缺失时保持通用默认。
+# ★ 报告默认写到**独立文件**：门禁不得覆盖 tester 维护的 doc/tester/integration-report.md
+#   （那是评测证据留存，不是门禁日志）。
+manifest_get() {  # 用法: manifest_get <点分路径> [默认值]
+  python3 - "$@" <<'PY' 2>/dev/null || printf '%s\n' "${2:-}"
+import json, sys
+path = sys.argv[1]
+default = sys.argv[2] if len(sys.argv) > 2 else ''
+try:
+    node = json.load(open('.opencode/project/manifest.json'))
+except Exception:
+    node = None
+for part in path.split('.'):
+    if not isinstance(node, dict) or part not in node:
+        node = None
+        break
+    node = node[part]
+print(default if node is None else node)
+PY
+}
+REPORT_FILE="$(manifest_get integration.report_file 'doc/tester/integration-report.md')"
+HEALTH_PATH="$(manifest_get integration.health_path '/health')"
+BASE_URL_CFG="$(manifest_get integration.base_url '')"
+REUSE_RUNNING="$(manifest_get integration.reuse_running 'false')"
+LIFECYCLE="$(manifest_get integration.lifecycle 'manage')"
+
+if [ "$REPORT_FILE" = "doc/tester/integration-report.md" ] \
+   && [ -f "doc/tester/integration-report.md" ]; then
+  echo "⚠️  门禁报告与 tester 评测报告同名，改用 integration-gate-report.md 以免覆盖评测证据"
+  REPORT_FILE="doc/tester/integration-gate-report.md"
+fi
+
+# ---- 服务生命周期探测（先于端口/启动逻辑，供后续步骤统一判定）----
+# 门禁不应另起/另杀服务：本仓由 docker compose 常驻，重复拉起会端口冲突，
+# 或把正在评测的实例拆掉。可达即复用，只做只读端点验证。
+SKIP_START=""
+PROBE_CODE="000"
+if [ -n "$BASE_URL_CFG" ] && command -v curl &>/dev/null; then
+  PROBE_CODE=$(curl -s -o /dev/null -w "%{http_code}" "${BASE_URL_CFG}${HEALTH_PATH}" 2>/dev/null || echo "000")
+fi
+echo "集成画像: base_url=${BASE_URL_CFG:-（未声明）} health=${HEALTH_PATH} lifecycle=${LIFECYCLE} 探测=${PROBE_CODE}"
+
+if [ "$LIFECYCLE" = "reuse-only" ]; then
+  # 项目声明「门禁不拥有服务生命周期」：只验证在跑的实例，绝不自行拉起/停止。
+  if [ "$PROBE_CODE" = "000" ]; then
+    echo "❌ lifecycle=reuse-only 且 ${BASE_URL_CFG}${HEALTH_PATH} 不可达 —— 门禁不负责拉起服务。"
+    echo "   请先启动（本仓：docker compose up -d）后再跑 P6d 集成验证。"
+    exit 2
+  fi
+  echo "ℹ️  复用已运行的服务（lifecycle=reuse-only）⇒ 不启动、也不停止任何进程"
+  SKIP_START=1
+elif [ "$REUSE_RUNNING" = "true" ] && [ "$PROBE_CODE" != "000" ]; then
+  echo "ℹ️  检测到已运行的服务（${BASE_URL_CFG}${HEALTH_PATH} → $PROBE_CODE）⇒ 复用，不启动也不停止任何进程"
+  SKIP_START=1
+fi
 
 # ---- 解析 scope（从 _MEMORY_CACHE.md 或环境变量）----
 ENDPOINTS=()
@@ -26,16 +80,26 @@ SCOPE_SOURCE="默认（健康检查）"
 
 if [ -f "_MEMORY_CACHE.md" ]; then
    # 格式兼容: ">>SCOPE: endpoints=X" (code-developer 标记) / "modules: X | endpoints: Y" (缓存模板) / "endpoints=X"
-   SCOPE_LINE=$(grep -oE '(endpoints[=:][^|#]+)' _MEMORY_CACHE.md 2>/dev/null | head -1)
+   # 优先取显式的机器可读标记 >>SCOPE:（code-developer 产出），其次回落到散文里的 endpoints: 描述
+   SCOPE_LINE=$(grep -oE '>>SCOPE:[^#]*endpoints[=:][^|#]+' _MEMORY_CACHE.md 2>/dev/null | head -1)
+   if [ -z "$SCOPE_LINE" ]; then
+     SCOPE_LINE=$(grep -oE '(endpoints[=:][^|#]+)' _MEMORY_CACHE.md 2>/dev/null | head -1)
+   fi
    if [ -n "$SCOPE_LINE" ]; then
      SCOPE_DATA=$(echo "$SCOPE_LINE" | sed -E 's/.*endpoints[=:]//' | tr ',' '\n')
-     if [ -n "$SCOPE_DATA" ]; then
-       while IFS= read -r ep; do
-         ep=$(echo "$ep" | xargs)
-         [ -n "$ep" ] && ENDPOINTS+=("$ep")
-       done <<< "$SCOPE_DATA"
-       SCOPE_SOURCE="_MEMORY_CACHE.md"
-     fi
+      if [ -n "$SCOPE_DATA" ]; then
+        while IFS= read -r ep; do
+          ep=$(echo "$ep" | xargs)
+          # ★ 只接受真正的路径 token：scope 行常夹人类描述（如「5 个 RSS feed（/x、/y）」），
+          #   原实现会把整段描述当端点去 curl ⇒ 假失败。
+          if printf '%s' "$ep" | grep -Eq '^/[A-Za-z0-9._/-]*(\?[A-Za-z0-9._=&%-]*)?$'; then
+            ENDPOINTS+=("$ep")
+          else
+            [ -n "$ep" ] && echo "  ℹ️  忽略非路径 scope token: $ep"
+          fi
+        done <<< "$SCOPE_DATA"
+        [ ${#ENDPOINTS[@]} -gt 0 ] && SCOPE_SOURCE="_MEMORY_CACHE.md"
+      fi
    fi
    # Also read modules scope (for pure internal change detection) — 兼容 ">>SCOPE: modules=X" 和 "modules: X |"
    SCOPE_MODULES=$(grep -oE '(modules[=:][^|#]+)' _MEMORY_CACHE.md 2>/dev/null | head -1 | sed -E 's/.*modules[=:]//' | tr ',' ' ')
@@ -54,7 +118,10 @@ fi
 
 # 无 scope 时默认健康检查
 if [ ${#ENDPOINTS[@]} -eq 0 ]; then
-  ENDPOINTS=("GET /health" "GET /api/health")
+  # 无 scope 时默认健康检查：项目声明的 integration.health_path 是唯一权威
+  # （通用 /api/health 只作为「未声明」时的并列兜底）。
+  ENDPOINTS=("GET ${HEALTH_PATH:-/health}")
+  [ -z "$HEALTH_PATH" ] && ENDPOINTS+=("GET /api/health")
   SCOPE_SOURCE="默认（健康检查兜底）"
 fi
 
@@ -124,17 +191,17 @@ if [ -f ".env" ]; then
   ENV_PORT=$(grep -E "^PORT=" .env | cut -d= -f2 | xargs)
   [ -n "$ENV_PORT" ] && PORT="$ENV_PORT"
 fi
-echo "服务端口: $PORT"
+if [ -z "$SKIP_START" ]; then echo "服务端口: $PORT"; fi
 
 # ---- 端口冲突检测 ----
-if command -v ss &>/dev/null; then
+if [ -z "$SKIP_START" ] && command -v ss &>/dev/null; then
   PORT_IN_USE=$(ss -tlnp "sport = :$PORT" 2>/dev/null | tail -n +2 | head -1)
-elif command -v lsof &>/dev/null; then
+elif [ -z "$SKIP_START" ] && command -v lsof &>/dev/null; then
   PORT_IN_USE=$(lsof -i TCP:$PORT 2>/dev/null | tail -n +2 | head -1)
 else
   PORT_IN_USE=""
 fi
-if [ -n "$PORT_IN_USE" ]; then
+if [ -n "$PORT_IN_USE" ] && [ -z "$SKIP_START" ]; then
   echo "⚠️  端口 $PORT 已被占用，尝试备用端口..."
   # 找下一个可用端口
   for alt_port in $(seq $((PORT + 1)) $((PORT + 100))); do
@@ -149,6 +216,8 @@ if [ -n "$PORT_IN_USE" ]; then
   done
   echo "  备用端口: $PORT"
 fi
+
+# ---- 复用判定已在上方完成（SKIP_START / PROBE_CODE）
 
 # ---- 启动服务 ----
 SERVER_PID=""
@@ -216,7 +285,7 @@ if [ -z "$START_CMD" ]; then
   fi
 fi
 
-if [ -n "$START_CMD" ]; then
+if [ -z "$SKIP_START" ] && [ -n "$START_CMD" ]; then
   echo ""
   echo "启动服务: $START_CMD"
   # 在后台启动服务，stdout/stderr 导入日志文件
@@ -238,6 +307,12 @@ if [ -n "$START_CMD" ]; then
   echo "等待服务就绪..."
   READY=false
   for i in $(seq 1 60); do
+    # 优先用项目声明的健康路径（2xx/4xx/5xx 有响应即视为已监听），其次通用 /health、/api/health
+    if command -v curl &>/dev/null && curl -s -o /dev/null -w "%{http_code}" "http://localhost:$PORT$HEALTH_PATH" 2>/dev/null | grep -qE "^[245]"; then
+      READY=true
+      echo "  ✅ 服务就绪（${i}s）"
+      break
+    fi
     if command -v curl &>/dev/null && curl -s -o /dev/null -w "%{http_code}" "http://localhost:$PORT/health" 2>/dev/null | grep -q "200"; then
       READY=true
       echo "  ✅ 服务就绪（${i}s）"
@@ -258,9 +333,13 @@ if [ -n "$START_CMD" ]; then
   fi
 else
   echo ""
-  echo "⚠️  无法自动启动服务（未识别启动命令）"
-  echo "   请确认服务已在运行，或设置 PORT 环境变量"
-  echo "   继续执行端点检测..."
+  if [ -n "$SKIP_START" ]; then
+    echo "ℹ️  已复用运行中的服务，跳过启动步骤（只做只读端点验证）"
+  else
+    echo "⚠️  无法自动启动服务（未识别启动命令）"
+    echo "   请确认服务已在运行，或设置 PORT 环境变量"
+    echo "   继续执行端点检测..."
+  fi
 fi
 
 # ---- 清理函数 ----
@@ -282,7 +361,11 @@ trap cleanup EXIT INT TERM
 echo ""
 echo "端点验证:"
 
-BASE_URL="http://localhost:$PORT"
+if [ -n "$BASE_URL_CFG" ]; then
+  BASE_URL="$BASE_URL_CFG"
+else
+  BASE_URL="http://localhost:$PORT"
+fi
 
 for ep in "${ENDPOINTS[@]}"; do
   # 解析 "METHOD /path"

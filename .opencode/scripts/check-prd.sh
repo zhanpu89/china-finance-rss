@@ -1,9 +1,35 @@
 #!/usr/bin/env bash
 # 检查 PRD 产出物
 # 退出码: 0=通过, 1=失败
+#
+# 项目适配（v1.1）：必需章节名可由 .opencode/project/manifest.json 的
+#   doc_profile.prd.required_sections 声明（概念级要求不变，允许项目用本地命名承接）。
+# ★ v1.1 修复：原写法 `验收标准\|AC\|Acceptance` 是 BRE 转义，却用 `grep -E` 执行
+#   ⇒ 在 ERE 下 `\|` 匹配的是**字面量竖线**，该条**永不命中**、恒为假警告
+#   （本仓 PRD 明明有「## 3. 三指标需求定义与验收标准」却被判缺少验收标准节）。
 
 PRD_DIR="doc/prd"
 ERRORS=0
+
+# 读取项目文档画像；未声明时回落到通用默认值。
+doc_profile() {  # 用法: doc_profile <kind> <key> [默认值...]
+  python3 - "$@" <<'PY' 2>/dev/null || printf '%s\n' "${@:3}"
+import json, sys
+kind, key, *defaults = sys.argv[1:]
+try:
+    vals = json.load(open('.opencode/project/manifest.json')) \
+        .get('doc_profile', {}).get(kind, {}).get(key)
+except Exception:
+    vals = None
+if vals is None:
+    vals = list(defaults)
+elif isinstance(vals, str):          # 标量必须整体输出，否则会被逐字符拆开
+    vals = [vals]
+elif not isinstance(vals, (list, tuple)):
+    vals = [str(vals)]
+print('\n'.join(str(v) for v in vals))
+PY
+}
 
 if [ ! -d "$PRD_DIR" ]; then
   echo "❌ PRD 目录不存在: $PRD_DIR"
@@ -32,7 +58,14 @@ for f in "${FILES[@]}"; do
 done
 
 # 检查关键章节（仅 Markdown 标题）
-REQUIRED_SECTIONS=("背景" "目标" "功能" "验收标准\|AC\|Acceptance")
+readarray -t REQUIRED_SECTIONS < <(doc_profile prd required_sections \
+  "背景" "目标" "需求|功能" "验收标准|AC|Acceptance")
+if [ -f ".opencode/project/manifest.json" ]; then
+  echo "必需章节（来源: manifest.json doc_profile.prd）: ${REQUIRED_SECTIONS[*]}"
+else
+  echo "必需章节（来源: 通用默认）: ${REQUIRED_SECTIONS[*]}"
+fi
+
 for f in "${FILES[@]}"; do
   # 文件基本结构
   if ! grep -q "^## " "$f" 2>/dev/null; then
@@ -42,8 +75,10 @@ for f in "${FILES[@]}"; do
 
   # 必备内容节（跳过概览文档，它结构不同）
   BASENAME=$(basename "$f")
+  SIZE=$(wc -c < "$f")
   if [[ "$BASENAME" != _* ]] && [ "$SIZE" -gt 500 ]; then
     for section in "${REQUIRED_SECTIONS[@]}"; do
+      [ -z "$section" ] && continue
       if ! grep -Eq "^## .*($section)" "$f" 2>/dev/null; then
         echo "⚠️  $BASENAME 缺少 $section 节"
         ERRORS=$((ERRORS + 1))
