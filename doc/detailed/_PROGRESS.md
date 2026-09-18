@@ -195,7 +195,7 @@
 | **AC-S3 模式 B 分档 P95**（高密度 ≤5s / 低密度 ≤10s） | `SAD §2.2`（AR-9 / AR-13）/ `cache.md §10#11` / `config.md §2.3`·§10#18 | 需**分两轮采集**（高 / 低密度**不得合并**，合并会被高密度样本覆盖）；需**真实故障 / 交易时段**实测。 |
 | 「慢而未死」上游出现频度 ↔ `_HISTORY_AGE=600s` 相对占比 | `SAD §2.2` AR-9 | 需**实测**（决定老化窗口是否合适）。 |
 | env 覆盖后**重跑 AC-S3 校准**（`NEG_TTL` / `PROBE_TIMEOUT > 5` / `_HISTORY_AGE`） | `config.md §2.3` / `cache.md §10#11`·#18 | 默认值下 CI 已覆盖；**覆盖即属运维变更、须重跑**。 |
-| **AC-E4 吞吐**（可断言口径：错误率 0 + 后 3min P99 劣化 ≤20%） | `SAD §4.2` | 需**压测 / 观测**。 |
+| **AC-E4 吞吐**（可断言口径：错误率 0 + 后 3min P99 劣化 ≤20%） | `SAD §4.2` | **✅ 已压测（2026-09-18 收盘后 / 非交易时段观测）**：真实负载形态全绿（loadtest 混合 10 并发 700/700 OK · avg 60ms / max 219ms · 35 req/s；stress_all 15 并发除 `/stock/f10` 外 p95<0.4s · 内存稳定 620MiB）；极端并发（380 线程）级联饿死已定位为 `f10_batch` 60s CDP 慢尾占满公共 worker 池所致，f10 非热路径（REV-DES-21 已裁定）⇒ 场景不成立、不做工程改造。AC 口径（错误率 0 + P99 劣化）属交易时段 / 持续观测项，保留实测。 |
 | `cache_hit_ratio ≥90%`（SAD 内部**设计目标**，**非 AC**） | `SAD §4.2` / Q1 | 待 **P6c 实测**；若 <84% 再走 PRD 修订。 |
 | **AC-A3 / AC-A8** | `config.md` CFG-T1/T2/T4/T12 · `server.md` SRV-T11/T16/T30/T43/T69 · `cache.md` T-CACHE-32..36 | 详设侧以**注入 `now` / 打桩的确定性用例**覆盖（**非"待实测"登记项**）；如需**真实盘中**回归观测，则需**交易时段**。 |
 
@@ -931,3 +931,17 @@
 
 **保持不动**：全部 SAD v1.3 钉死项（stream 侧 **7 项全 ✅**、server 侧 8 项中 6 ✅ 已转为 ✅，见 server §4 与 `SRV-T14` 更新）；既有测试真正破坏面仍为 **4 条**（全在 stream，未新增）。
 
+
+
+## ★ 压测观测记录（2026-09-18 · 非交易时段 / 收盘后）
+
+> 范围：**只记录观测，未改代码 / 未改契约 / 未改其他文档**。方法：`tests/{stress_test,stress_all,loadtest}.py` 对 8053 端口全套压测（容器已由用户重建并验证代码 == 工作区 HEAD）。
+
+### 观测结论
+
+1. **真实负载形态（健康）**：
+   - `loadtest.py` 混合 10 并发（含 `/`、`/healthz`、`/opml.xml`、`/cls/hotplate`、`/stock/fundflow`）：700 请求 700 OK · 35 req/s · avg 60ms · max 219ms。
+   - `stress_all.py` 15 并发 660 请求：628 OK / 32 Fail——**32 Fail 全部为 `/stock/f10`**（已知 REV-DES-21 非热路径），其余 11 个端点（RSS 5 + 面板 4 + fundflow/timeline/announcement/basic_info/data）p95 < 0.4s；内存 621→620MiB **稳定**（预算 1.5GiB）。
+   - `/stock/f10` 单只验证：`sh600519` 缓存命中 1.8ms 完整数据；`sh600030` CDP 导航 3.3s 完整数据；批量 5 码 26.4s（60s budget 内）200，3 码完整 + 2 码按既有 `cdp_unavailable` 降级语义返回（`_errors` 结构，契约不变）。
+2. **极端并发（不代表真实业务）**：`stress_test.py`（20 并发 × 20 端点 = 380 线程）第 2 轮出现全量客户端失败（status=-1 @0.0s）。定位：`/stock/f10_batch` 60s CDP 串行导航慢尾（`_BATCH_BUDGET_CDP=60`）占满 20-worker 公共池 → `BoundedThreadPoolServer._reject_503` 负载丢弃（裸 503 不经 `log_message`，访问日志不可见）。**触发条件需 20 并发 `f10_batch` 同时命中**——f10 非热路径（REV-DES-21 已裁定：极少调用、不构成问题）⇒ **该场景真实业务不成立，不做工程改造**（不设 CDP 并发闸门、不改 `MAX_WORKERS`/`MAX_INFLIGHT`）。
+3. **回归**：`python -m unittest discover -s tests` = **514 全绿（5.4s）**；`py_compile` 通过。服务代码零改动，仅新增压测辅助脚本 `.opencode/scripts/{run-stress.sh,inspect-logs.sh}`（含 `--since` 修复与 503 隐形问题的说明）。
