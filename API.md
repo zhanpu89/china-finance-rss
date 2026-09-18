@@ -20,6 +20,16 @@ Base URL: `http://localhost:8053`
 
 所有 RSS 端点返回 `application/rss+xml`（RSS 2.0）。支持 `HEAD` 和 `GET` 方法。
 
+**条件请求**：5 个 feed 均支持 `If-None-Match` / `If-Modified-Since`。
+
+- **200** 必带弱 `ETag`（`W/"<sha256>"`）；存在真实缓存条目时另带 `Last-Modified`。
+- **内容未变 ⇒ `304 Not Modified`**：**无 body**（也无 `Content-Encoding` / `Content-Length` / `Content-Type`）；响应头仍带 `ETag`、`Last-Modified`、`Cache-Control`（与 200 同值）与 `Vary`。
+- **优先级**：`If-None-Match` **优先于** `If-Modified-Since`（前者存在时后者被完全忽略）；支持 `*`、逗号分隔多值、弱比较（**只认字面大写 `W/`**；小写 `w/` 不匹配）。日期头无法解析时**忽略并返回 200**（不会 4xx/5xx）。
+- **可选、无迁移负担**：不带条件头的客户端行为与旧版**逐字一致**。
+- ⚠️ **304 省的是响应体（实测 ~37–45KB/次），不省上游回源**：服务端缓存 TTL 到期后仍会回源重生成（这正是 ETag 能保持稳定的前提）。职责分工——**缓存 TTL 管上游新鲜度，ETag 管客户端带宽**。
+- ⚠️ `Last-Modified` = 服务端缓存条目的**写入时刻**，因此**仅携带 `If-Modified-Since`** 的客户端跨 TTL 边界时会拿到 200；**携带 `If-None-Match` 不受影响**（推荐优先用 ETag）。
+- ⚠️ 范围：**仅这 5 个 feed**。`/opml.xml`、`/` 与全部 JSON 端点**不支持**条件请求（带条件头也照常返回 200）。
+
 ---
 
 ### `GET /cls/telegraph`
@@ -628,8 +638,14 @@ Base URL: `http://localhost:8053`
 | 个股行情（含五档） | ≥4s | L0 盘中 TTL=4s（上游本身 3s 一跳） |
 | 分时 / 资金流 | ≥8s | L1 盘中 TTL=8s |
 | 板块 | ≥12s | L2 盘中 TTL=12s |
-| 快讯 RSS | ≥30s 或 ETag/Last-Modified 感知 | L3 盘中 TTL=30s |
+| 快讯 RSS | ≥30s，且**务必带 `If-None-Match`** | L3 盘中 TTL=30s；内容未变 ⇒ **304 零 body**（省 ~37–45KB/次） |
 | 龙虎榜 / 两融 / F10 | ≥300s~600s | L4 日更级 |
+
+**RSS `<ttl>`（advisory，别当成时效承诺）**：5 个 feed 的 `<channel>` 内新增 `<ttl>` 元素（**单位为分钟**的整数；盘中 `1`、非盘 `3`）。它只是给聚合器的**缓存提示**，标准最小粒度就是 1 分钟，**不会让数据更新更快**，因此：
+
+- **不要**据此把轮询降到 1 分钟——那只会浪费请求（服务端 TTL 仍是 30s，拿不到更新数据）；
+- 需要 **<60s** 的新鲜度请改用 **SSE（4s 节拍，端口 8054）**；
+- 推荐做法：**以 `ETag` 条件请求为主、轮询间隔 ≥30s**；`Cache-Control: max-age`（盘中 30 / 非盘 180）才是服务端更强的新鲜度承诺。
 
 **批量查询**：个股端点支持逗号分隔批量（上限 50 码）——**尽可能批量**。50 码一次请求 vs 50 次请求：单飞只对并发同 URL 生效，不同 code 是不同上游 URL，批量是唯一能减少回源次数的手段。
 

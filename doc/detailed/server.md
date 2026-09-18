@@ -1,20 +1,25 @@
 # server.py 详细设计
 
-> **版本** v1.4 · **状态** 已同步实现（P7b + N1 回退 + **传输预热 / gzip 协商** 契约同步 · 以代码为准）· **日期** 2026-09-17 · **作者/产出** task-decomposer
+> **版本** v1.8 · **状态** 增量设计（**P3a · RSS 条件请求 ETag / Last-Modified / 304**；P3a-r1 评审定向修 · P3a-r2 复审 P2 收口 · **P7b 漂移回填 D-1/D-2**，**只增不改**）· **日期** 2026-09-18 · **作者/产出** task-decomposer
+> **v1.8 变更（P7b 漂移回填 · 只改文档，不改代码/设计裁定 · 对照 `doc/review/rss-conditional-get_代码评审_专家版.md` CR-RSS-20260918-001 D5）**：① **【D-1】** §10.1 补**第 5 条**测试迁移——`tests/test_server_http.py::GuardTests::test_rss_degrade_is_valid_feed`（:80）直接调 `_guard(shape='rss')` 并把返回值当 XML；§2.3/§5.1 已把 rss 形状钉死为 2-tuple ⇒ 照 v1.7 清单施工**必红**（`ET.fromstring(tuple)` ⇒ `TypeError`，且拿不到 `last_modified` 无从断言 IMS 不可评估）。**实现阶段已按详设裁定机械迁移**（解包 `xml, last_modified = srv._guard(...)` + `assertIsNone(last_modified)`）；本版补登使文档与实现一致。② **【D-1 计数】** §11 迁移计数 **4 → 5**（§10.1 计数口径注 / §11 自检 / v1.7 注同步标注）。③ **【D-2】** eastmoney 的 `<ttl>` 调用点由「5 处」更正为 **6 处调用点 / 5 个 handler**——`handle_eastmoney_kuaixun` 有**两个** `generate_rss` 站点（常规返回 + 「无匹配 ⇒ 空 feed」提前返回），**两处均传** `ttl=_feed_ttl_minutes()`（罕见路径的 feed 表示与常规路径一致；`<ttl>` 已剔除出 ETag，不影响条件请求）；落点 BR-SRV-43 / §2.10 / §5.8 / §11.5。④ **【顺带 · P2-3 如实记录】** `_send_text`（200）与 `_send_not_modified`（304）**各写一份** `Cache-Control`/`Vary`——**实现现状，非设计变更**；`SRV-T62`（200/304 头逐字 diff）即该漂移面的兜底断言（§5.8）。⑤ **【顺带】** §8 注明实现把 `SRV-T52b` 拆为 **5 个 unittest 方法**，**编号计数不变**（总 64）。**未改任何设计裁定（BR 编号 / 算法 / 取值 / 优先级 / 出范围项）、未改代码、未改 SAD/PRD/API.md/README.md/`.opencode`；`cache.md` 同步 v1.6 → v1.7（D-3）。**
+> **v1.7 变更（P3a-r2 复审 P2 机械收口 · 只修精确性，不引入新设计 · 对照 `doc/review/rss-conditional-get_详细设计评审_复审_专家版.md` REV-DES-20260918-002）**：① **【P2-a · `SRV-T52b` 用例定义细化（防假绿）】**——`formatdate(timeval=None)` 与 `int(time.time())` 均为**秒级**，同一秒两次回落值相同 ⇒ 不 patch 时**即便无 C1 修复也会绿**；故**明确要求 patch 时钟**（源 `srv.formatdate` / `srv.time.time` / `utils.formatdate`，或等价受控源）使两次回落确定取 **`t` / `t+1`**，并声明**红/绿方向**（若 `pubDate` 仍在哈希区 ⇒ 两次 ETag 必不同 ⇒ 该断言**必须红**；C1 后必绿）；**另补纯函数断言**「仅 `<pubDate>` 值不同、其余逐字节相同的两个 XML ⇒ `_feed_etag` 相同」（不依赖时钟，直接锁死投影规则）；三个 feed（eastmoney `showtime` / ths `ctime` / jin10 `time`）的 handler 层覆盖**保持不变**。② **【P2-b】** BR-SRV-37 双向不变式的**第二子句补限定**为「**除 `pubDate`/`lastBuildDate`/`ttl` 三项外的**任一字节变化 ⇒ ETag 必不同」（§6.2#8③ 同步显式化）。③ **【P2-c】** §10.1 `FeedDoubleCheckTests` 补「返回值断言改 **2-tuple `(xml, time)`**」（否则照清单施工会红）。④ **【P2-d】** §10.1 第 3 条标题 `（:440）` → `（:440 / :450）`。⑤ **【P2-f】** §1.1 标题「职责（11 条）」→「**（13 条）**」（既有遗留）。**未改任何设计裁定（BR 编号 / 算法 / 取值 / 优先级 / 出范围项）、未改契约、未改代码；`cache.md` 无 P2 落点故保持 v1.6。**
+> **v1.6 变更（P3a-r1 评审定向修 · 对照 `doc/review/rss-conditional-get_详细设计评审_专家版.md`）**：① **【C1 / P1-01 · 阻断项】ETag canonical 投影扩展至 item 级 `<pubDate>`**——`_feed_etag` 在既有剔除 `<lastBuildDate>`/`<ttl>`（各 `count=1`）之外，**全量**（`count=0`，item 多条）把 `<pubDate>…</pubDate>` 内容空白化为 `<pubDate/>`；修复 3/5 feed 因 item 级"当前时间回落"（`server.py:107` eastmoney `showtime` / `server.py:133` ths `ctime` / `utils.py:241` jin10 `time`）每次 TTL 到期重生成 ETag 变化 ⇒ **永远 200** 的静默失效；BR-SRV-37 不变式改写为**双向**（内容未变 ⇒ ETag 不变【不误 200】∧ 内容变 ⇒ ETag 变【不误 304】），`<pubDate>` 语义取舍明确为**可接受权衡**（BR-SRV-37 / §5.4 注）。② **【C2 / P1-02】§10.1 打桩迁移清单补第 4 条** `h.headers = {}`（`_serve_feed` 自 v1.5 起读 `self.headers`，`RSSHandler.__new__` 实例否则 `AttributeError`）；§11 自检计数"三条"→"**4 条**"。③ **【C3 / P1-03】`<ttl>` 契约语句写死**（BR-SRV-43 / §5.8）：**聚合器缓存提示、非时效保证**；**最小粒度 1 分钟**；**推荐轮询 = ETag 条件请求优先、间隔 ≥30s**；需 <60s 新鲜度请用 SSE（4s）。④ **【C4 / P2-01】**`_if_modified_since_not_modified` 的 `dt.timestamp()` **移入 `try`**、`except` 增 `OSError`；`§6.2#8⑤` 措辞收敛。⑤ **【C5】BR-SRV-39 弱前缀措辞**改为**大小写敏感、只接受字面 `W/`**。⑥ **【C6】§10#36 补依据**（RFC 9110 §8.6：304 不得带等于 200 体长的 `Content-Length`，写 `0` **违规**；HTTP/1.0 + EOF 收尾）。⑦ **【C7】补 14 条缺失用例**（新增 `SRV-T52b`/`SRV-T56b`/`SRV-T61`/`SRV-T62`，扩 T47/T48/T49/T50/T51/T54/T57/T58/T59；测试 60→**64 条**）+ `generate_rss` `ttl>0` 护栏。⑧ **【C8】**契约影响（漂移 8 项）见 `_PROGRESS.md`；头部溯源修正为 **SAD v1.7 / PRD v0.6**。
+> **v1.5 变更（契约级同步 · 只增不改）**：为 5 个 RSS feed 增加 **HTTP 条件请求**支持——① **弱 ETag** `W/"<sha256>"`，派生自**规范化后**的 feed XML：**剔除 `<lastBuildDate>` 与 `<ttl>`** 两个"非内容元数据"元素后再哈希（**严禁裸 body 哈希**——`<lastBuildDate>=formatdate(timeval=None)` 每次重生成都变，裸哈希会导致 TTL 到期后内容未变也返回 200，**功能静默失效**，见 BR-SRV-37 / §10#32）；② **Last-Modified** 取 feed 缓存条目 `entry['time']`（新增 `cache.feed_cache_get_entry(path) -> dict|None`，**`feed_cache_get` 签名与语义不变**——BR-SRV-38 / `cache.md` BR-CACHE-32）；③ **304 响应**由专用方法 `_send_not_modified()` 生成：**无 body / 无 `Content-Encoding` / 无 `Content-Length`**，**必带 `ETag` + `Cache-Control`（与 200 同值）+ `Vary`（Host 三件套 + `Accept-Encoding`）**，**不写缓存**；`HEAD` 同样可得 304（BR-SRV-39/40/41）；④ **条件头优先级**：`If-None-Match` **优先于** `If-Modified-Since`（RFC 9110 §13.1.3），支持 `*` / 逗号列表 / `W/` 弱前缀（弱比较），IMS 用 `email.utils.parsedate_to_datetime` **秒级**比较、**非法日期头忽略 → 200**（绝不 400/500）（BR-SRV-39/40）；⑤ RSS 2.0 `<ttl>`（**分钟**整数）= `max(1, (cache_policy('feed')['ttl']+59)//60)`（盘中 30s→`1`、非盘 180s→`3`），位置在 `</lastBuildDate>` 与 `<atom:link>` 之间，**同样剔除出 ETag**（BR-SRV-43）；⑥ **出范围（仅登记）**：`protocol_version` 升 HTTP/1.1 启用 keep-alive、`/opml.xml` 与 `/` 的条件请求（BR-SRV-44）。**既有 200 语义、`Vary`/`private` 反投毒、业务降级恒 200 口径全部保持。**
 > **v1.4 变更（契约级同步 · 以代码为准）**：① **`main()` 新增 daemon 线程 `warm_transport`**（启动即预热上游传输：DNS + 每 SSE 热路径主机 1 条池化连接；**仅握手、不发业务请求**；`threading.Thread(target=warm_transport, daemon=True).start()`，**不阻塞启动/`/healthz`**，失败静默——`cache.warm_transport` 为总函数）；② **gzip 协商**：`_accepts_gzip(header)` 按 RFC 9110 §12.5.3 解析 `Accept-Encoding`（逗号分隔 token + `;q=` 权重、coding 大小写不敏感、`*` 兜底、**`gzip;q=0` = 明确拒绝**、`GZIP`/`*` 接受）；`_send_text` 对 `len(body) >= config.GZIP_MIN_BYTES(1024)` 且被接受的响应 `gzip.compress(level=config.GZIP_COMPRESSLEVEL=1)` 并发 `Content-Encoding: gzip`；**`Vary: Accept-Encoding` 在 `gzipped or cache` 时无条件发出**（= 所有可缓存响应 + 任何 gzip 响应，**含 `cache=False` 的 gzip**，防共享缓存把 gzip 体复用给不支持它的客户端）。
 > **v1.3 变更（N1 回退 · 编排层裁决）**：Ⓝ① **业务端点降级恢复 `200 + error 体`**——`_send_json_shape` **恒 `_send_json(payload)`（200）**，不再按 payload 内容判 503；**`_json_payload_has_data` 已删除**（`_guard` 仍产出 `{'error': …}` / `_error` 客体，只是状态码不再随之变化）。Ⓝ② **`_send_json` 去掉 `status` 形参**（签名回落为 `_send_json(data, write_body=True, cache=True)`）。Ⓝ③ **`http_503_total` 计数点 4→3**：仅剩**连接准入拒绝**（`_reject_503`）、**流端口准入拒绝**（`stream._serve_sse` 超 `MAX_STREAM_CONNS`）、**`/healthz`**（其 503 是端点自身语义，**不构成业务端点先例**）。Ⓝ④ **降级体重新可缓存**：`_send_json_shape` 以 `cache=cache` 传参 ⇒ 降级 JSON 按域 TTL 拿 `Cache-Control: public, max-age=<domain ttl>`（v1.2 的"503 ⇒ 不缓存"消失）。
 > **v1.2 变更（契约级同步 · 对照表见 §11.1；① 已于 v1.3 回退）**：① ~~**纯 error 包装的 JSON payload ⇒ 503**~~（**已回退，见上**；`_json_payload_has_data` 已删除）② `/healthz` payload 缺 `status` 或含 `error` ⇒ **503**（不只 `status=='degraded'`；**v1.3 保留**）③ `_HealthBatch` 增 **`settle()`**；`build_health_payload` 先建账再调用 + `except BaseException: settle(); raise`；`_run_health_checks(base_url, batch=None)` ④ `_fanout_executor` 的等待受 **`_FANOUT_WAIT_BUDGET=REQUEST_TIMEOUT`** 约束（超期 `cancel()` + `FetchError('upstream_timeout')`）⑤ `_base_url()`：`PUBLIC_BASE_URL` 优先，否则 **Host 格式校验** + `Vary` + `Cache-Control: private`（`_send_text(varies_on_host=…)`）⑥ `_cache_age()` 改用 `urlparse(self.path).path` ⑦ **4 面板的 cache-age 域改 `quote`**（L1，非 `f10` 的 300）⑧ **`/stock/*` 码归一**：`_parse_stock_codes`（canonical 折叠去重）+ `_rekey_batch_response`（响应键回用户原拼写）；截断按归一后码数；非法码值 ⇒ 逐码 `null`（非 400）⑨ **`/market/margin` 非法 `market` ⇒ 400**（`VALID_MARKETS` 前置校验）⑩ `_PANEL_HANDLERS` + `_JSON_DISPATCHED_PATHS` 导入期断言 ⑪ `do_GET`/`do_HEAD` 断连捕获扩为 **`OSError`** ⑫ `BoundedThreadPoolServer.request_queue_size = LISTEN_BACKLOG` ⑬ `handle_ths_longhu` 席位配对 `broker_idx` **无条件自增** + 错位告警；encoding 取自 `cache_policy('longhu')['encoding']` ⑭ import 块更正（`page_data`/`FetchError`/`LISTEN_BACKLOG`；删 `handle_cls_stock`/`fetch_cls_*`/`strip_html`/`escape_xml`）
 > **v1.1 变更**：P1-1 healthz 准入位覆盖在飞任务（`_HealthBatch`）· P1-2 `/cls/hotplate`·`/cls/plate`·`/ths/longhu` ≤3 并发（AC-E2）· P1-3 hotplate 全分区失败补顶层 `error` · P1-4 `max_inflight` 形参（流端口显式 110）· P2-1/2/3/4/5 表述收口
 > 模块路径 `china_finance_rss/server.py` · 归属 **Layer 3（HTTP 入口 / 编排层）**
-> 上游 SAD `doc/arch/SAD.md` **v1.3**（§2.1 D4 + plate stagger · §2.3 D-3/D-5 · §2.4 统一调用顺序 · §2.6 healthz · §3 server.py 行 · ADR-002/006/007/011/012）
-> 上游 PRD `doc/prd/perf-stability-optimization.md` v0.3（AC-S1/A5/A8/A9/S5/S7/S8/S10；R1/R2/R4/R15/R17/R19）
-> 基础层/数据层接口权威：`config.md` v1.1 · `cache.md` v1.1 · `metrics.md` v1.1 · `stock_api.md` v1.0 · `market_api.md` v1.0 · `cdp_engine.md` v1.0
+> 上游 SAD `doc/arch/SAD.md` **v1.7**（★ v1.6 溯源修正：设计时点快照原误记为 v1.3；权威以 SAD 头部为准）（§2.1 D4 + plate stagger · §2.3 D-3/D-5 · §2.4 统一调用顺序 · §2.6 healthz · §3 server.py 行 · ADR-002/006/007/011/012）
+> 上游 PRD `doc/prd/perf-stability-optimization.md` **v0.6**（★ v1.6 溯源修正：原误记为 v0.3；权威以 PRD 头部为准）（AC-S1/A5/A8/A9/S5/S7/S8/S10；R1/R2/R4/R15/R17/R19）
+> ★ **编号命名说明（v1.6 / C8④）**：本文档（及 `cache.md`）中的「**本专项 R1**」指 `_MEMORY_CACHE.md` 工作文件的"内容未变 ⇒ ETag 不变 ⇒ 304"，与 SAD/PRD 已用的 **R1–R20**（根因编号）**同名不同义**；跨文档阅读时请以「本专项 R1」全称辨识。建议编排层统一改称 `US-RSS-1` / `AC-RSS-1`（本 agent 不改 SAD/PRD 编号）。
+> 基础层/数据层接口权威：`config.md` v1.4 · `cache.md` **v1.7**（v1.5 新增 `feed_cache_get_entry`；v1.6 扩 T-CACHE-32 负例 + 溯源；★ v1.7 标注 T-CACHE-32 已实现——接口不变）· `metrics.md` v1.2 · `stock_api.md` v1.3 · `market_api.md` v1.3 · `cdp_engine.md` v1.2
 > 跨模块约定（已锁定）：`doc/detailed/_PROGRESS.md` §B
 > 端锁定 🟠 STABLE（**不改路由、不改 API 签名**；仅 `/healthz` 只增字段 + `feeds[].status` 取值修正〔待编排层批准/同步〕）
 
 ## 1. 模块职责与边界
 
-### 1.1 职责（11 条）
+### 1.1 职责（13 条）
 
 1. **路由分发（唯一入口）**：`RSSHandler._handle_request` 分派 `14 个 JSON 分支 + 5 个 RSS + / + /opml.xml + /healthz`；**shape 由 `_JSON_SHAPES` 路由表派生**（SAD §2.4「由路由表派生 shape、不写死数字」）。
 2. **统一异常边界 `_guard(fn, *, shape, ...)`**：任何 handler 异常**不冒泡**（R1），按 `shape ∈ {batch, object, rss, text}` 产出结构化降级体。
@@ -29,6 +34,7 @@
 10. **码身份归一（P1-6）**：`/stock/*` 入口经 `_parse_stock_codes` 折叠（`config.canonical_code`）去重后再计 `_MAX_BATCH_SIZE`；响应经 `_rekey_batch_response` 回请求原拼写，值与键集**不因归一而变**。
 11. **响应压缩协商（v1.4 / AC-E1）**：`_accepts_gzip(header)` 按 RFC 9110 解析 `Accept-Encoding`（`gzip;q=0` 拒绝、大小写不敏感、`*` 兜底）；大响应（≥ `GZIP_MIN_BYTES`）gzip 后发 `Content-Encoding`；`Vary: Accept-Encoding` 在 `gzipped or cache` 时必发。
 12. **上游传输预热（v1.4 / 冷启动）**：`main()` 起 `warm_transport` daemon 线程（DNS + 池化连接握手，无业务请求），使进程首个 refresh 不再全冷（冷扇出实测 ≈4.2s > 0.8×tick 预算）；预热不阻塞启动与 `/healthz`。
+13. **RSS 条件请求（v1.5 / 下游轮询带宽）**：5 个 `ROUTES` feed 的 `GET`/`HEAD` 支持 `If-None-Match`（**优先**）/`If-Modified-Since`；内容未变 ⇒ **304（零 body）**，且 304 不压缩、不写缓存；200 带弱 `ETag` 与（有缓存条目时）`Last-Modified`；`<ttl>` 由 `generate_rss` 输出（分钟）指导轮询间隔。**`/opml.xml`、`/` 不在范围**（BR-SRV-44）。
 
 ### 1.2 明确不做
 
@@ -45,9 +51,9 @@
 
 ```
 允许 import：
-  标准库：atexit / gzip（★ v1.4：响应压缩）/ json / logging / os / re / signal / sys / threading / time /
+  标准库：atexit / gzip（★ v1.4：响应压缩）/ hashlib（★ v1.5：ETag sha256）/ json / logging / os / re / signal / sys / threading / time /
           concurrent.futures.ThreadPoolExecutor,wait,FIRST_COMPLETED /
-          email.utils.formatdate / http.server / urllib.parse / urllib.request
+          datetime.timezone（★ v1.5：IMS naive → UTC）/ email.utils.formatdate（★ v1.5 亦用 parsedate_to_datetime）/ http.server / urllib.parse / urllib.request
   包内  ：config / cache（含 `warm_transport`，★ v1.4）/ utils / stock_api / market_api / cdp_engine / metrics
   延迟  ：from .stream import push_loop, run_stream_server   ← 仅 main() 内（打破 server ↔ stream 环，现状保留）
 禁止 import：新增第三方库；`china_finance_rss/` 之外的第二个代码根
@@ -74,7 +80,8 @@ cdp_engine: 仅依赖 config/metrics；server 调用其函数（config.cdp_engin
 | `config.MAX_INFLIGHT` | `BoundedThreadPoolServer._max_inflight` 的**默认值**（显式，取代 `max_workers * 2`）；流端口经 `max_inflight` 形参显式覆盖为 `MAX_STREAM_CONNS+10=110`（修 P1-4，见 §2.7/§10#11） |
 | `config.MAX_STREAM_CONNS` | **不 import**（属 `stream.py`）；server 只提供 `max_inflight` 形参，取值由 `stream.make_stream_server` 传入 |
 | `config.MAX_HEALTH_INFLIGHT` | `_health_sem = threading.BoundedSemaphore(...)` |
-| `cache.feed_cache_get(path) -> str \| None` / `cache.feed_cache_put(path, xml, ttl)` | `_get_or_fetch_feed`：miss → per-path 锁 → **二次 get（双检）** → fetch → put |
+| `cache.feed_cache_get(path) -> str \| None` / `cache.feed_cache_put(path, xml, ttl)` | `_get_or_fetch_feed`：miss → per-path 锁 → **二次 get（双检）** → fetch → put。**两者签名均不变**（v1.5 起 `feed_cache_get` 内部改为经 `feed_cache_get_entry` 实现，行为逐字不变） |
+| **`cache.feed_cache_get_entry(path) -> dict \| None`（★ v1.5 新增）** | `_get_or_fetch_feed` 的**唯一读取入口**：命中返回新鲜条目的**浅拷贝** `{'xml','time','last_access','expires_at'}`（同时 `move_to_end` + `last_access`），miss/过期返回 `None`。`entry['time']` = **Last-Modified 时间源**（BR-SRV-38；`cache.md` BR-CACHE-32）。**禁止**以 `feed_cache_get` + 另行查询拼时间（会拿到降级态的陈旧条目） |
 | `cache.build_batch_response(requested, results, errors=None, dropped=0) -> dict` | `_guard` 的 `batch` 降级体构造（全码 `null` + `_errors[code]='upstream_error'` + `dropped`） |
 | `cache.fetch_json(url, headers=None, ttl=None, encoding='utf-8') -> str` | `/ths/longhu` 两 URL（`encoding='gbk'`）；5 个 RSS handler（既有 18 调用点**签名零改动**，仅 `ttl` 来源改 `cache_policy('news_url')['ttl']`，见 §5.11） |
 | `cache.FetchError` | 不单点 catch（由 `_guard` 兜底）：RSS → `rss` shape；其它 → 各自 shape |
@@ -93,7 +100,7 @@ cdp_engine: 仅依赖 config/metrics；server 调用其函数（config.cdp_engin
 
 ```yaml
 openapi: 3.0.3
-info: {title: china-finance-rss main port (8053), version: '1.4'}
+info: {title: china-finance-rss main port (8053), version: '1.5'}
 paths:
   '/':                                {get: {responses: {'200': {content: {text/html: {}}}}}}          # _serve_index（静态，无 IO）
   '/opml.xml':                        {get: {responses: {'200': {content: {'text/x-opml': {}}}}}}      # generate_opml（静态，无 IO）
@@ -129,11 +136,18 @@ paths:
   '/stock/f10':           {get: {description: 'batch · handler=handle_cls_f10（CDP A′）', responses: {'200': {}, '400': {}}}}
   '/stock/basic_info':    {get: {description: 'batch · handler=handle_cls_basic_infos',   responses: {'200': {}, '400': {}}}}
   '/stock/announcement':  {get: {description: 'batch · handler=handle_cls_announcement',  responses: {'200': {}, '400': {}}}}
-  '/cls/telegraph':       {get: {description: 'rss', responses: {'200': {content: {application/rss+xml: {}}}}}}
-  '/eastmoney/kuaixun':   {get: {description: 'rss', responses: {'200': {content: {application/rss+xml: {}}}}}}
-  '/ths/kuaixun':         {get: {description: 'rss', responses: {'200': {content: {application/rss+xml: {}}}}}}
-  '/jin10/flash':         {get: {description: 'rss', responses: {'200': {content: {application/rss+xml: {}}}}}}
-  '/wallstreetcn/live':   {get: {description: 'rss', responses: {'200': {content: {application/rss+xml: {}}}}}}
+  # ★ v1.5：5 个 RSS feed 支持 GET/HEAD 条件请求（响应头清单见 §5.8；规则 BR-SRV-36..44）
+  #   200 ⇒ 含 ETag（W/"<sha256>"）+ 有缓存条目时的 Last-Modified
+  #   条件命中 ⇒ 304（无 body / 无 Content-Encoding / 无 Content-Length）
+  #   条件头：If-None-Match（优先，支持 * / 多值 / W/）/ If-Modified-Since；均缺省 ⇒ 200 全量
+  #   非法/不可解析日期头 ⇒ 忽略（200），绝不 400/500
+  '/cls/telegraph':       {get: {description: 'rss+conditional', responses: {'200': {content: {application/rss+xml: {}}}, '304': {}}}, head: {responses: {'200': {}, '304': {}}}}
+  '/eastmoney/kuaixun':   {get: {description: 'rss+conditional', responses: {'200': {content: {application/rss+xml: {}}}, '304': {}}}, head: {responses: {'200': {}, '304': {}}}}
+  '/ths/kuaixun':         {get: {description: 'rss+conditional', responses: {'200': {content: {application/rss+xml: {}}}, '304': {}}}, head: {responses: {'200': {}, '304': {}}}}
+  '/jin10/flash':         {get: {description: 'rss+conditional', responses: {'200': {content: {application/rss+xml: {}}}, '304': {}}}, head: {responses: {'200': {}, '304': {}}}}
+  '/wallstreetcn/live':   {get: {description: 'rss+conditional', responses: {'200': {content: {application/rss+xml: {}}}, '304': {}}}, head: {responses: {'200': {}, '304': {}}}}
+  # 条件头：If-None-Match（优先）/ If-Modified-Since；两者均缺省 ⇒ 200 全量（BR-SRV-36）
+  # 304 上限：同一 client 的同一 ETag 重放。非法/不可解析日期头 ⇒ 忽略（200），绝不 400/500（BR-SRV-40）
 # 未注册路径 → 404 文本（send_error(404, 'Not Found. Visit / for available feeds.')）
 ```
 
@@ -150,6 +164,7 @@ paths:
 | **业务端点降级**（4 面板 `{'error':…}` / `/cls/hotplate` 全分区失败 / `/market/margin` `_error` / guard 捕获异常后的 `{'error':…}` / `/cls/plate` 分区降级 / batch 逐码 `null`） | **`200` + 结构化降级体** ★ v1.3（**N1 回退**：状态码**不由 payload 内容决定**；`_send_json_shape` 恒 200，降级体**可缓存**——按域 TTL 拿 `Cache-Control: public, max-age=<domain ttl>`） |
 | `/healthz` body 缺 `status` / 含 `error` / `status=='degraded'` | `503` ★ v1.2（计 `http_503_total`）。**该 503 属 healthz 端点自身语义，不构成业务端点先例**（v1.3） |
 | 上游**部分**失败（批量） | `200`；批量 → 逐码 `null` ∧ `_errors[code]`；单体 → error 客体；RSS → 降级 feed |
+| **RSS 条件请求命中**（`If-None-Match` 弱比较匹配 / `If-Modified-Since ≥ Last-Modified`）★ v1.5 | **`304`**（由 `_send_not_modified` 生成）：**无 body**、**无 `Content-Encoding`**、无 `Content-Length`；**带 `ETag` + `Cache-Control` + `Vary`**；**不写 feed 缓存**；`HEAD` 同（BR-SRV-41） |
 | CDP 不可用（面板 4） | `200` + `{"error":"…"}`（★ v1.3：降级体亦 200）；`/stock/f10` → `200` 逐码 `null` ∧ `_errors[code]='cdp_unavailable'`（**非** error 客体） |
 | handler 抛异常（guard 捕获） | `200`；`object`/`text` → `{'error': str(exc)}`（`/healthz` 例外 → 503） |
 
@@ -214,7 +229,7 @@ def _guard(fn, *, shape, requested=None, dropped=0, rss_info=None, feed_url=None
 | `batch` | `fn()` 的 dict（handler 组装体） | `cache.build_batch_response(requested, {}, {c: 'upstream_error' for c in requested}, dropped=dropped)` → 全码 `null` + `_errors` + 截断键；**不抛、不断连** |
 | `object` | dict（或 handler 自带 `{'error':…}`） | `{'error': str(exc)}` |
 | `text` | dict（`/ths/longhu` 的 `{data,total}`） | `{'error': str(exc)}`（调用方仍以 `application/json` 序列化） |
-| `rss` | XML 字符串 | `generate_error_rss(info['title'], info['link'], info['description'], exc, feed_url=feed_url)`（现状行为固化） |
+| `rss` | **`(xml: str, last_modified: float \| None)`（★ v1.5：由 `_get_or_fetch_feed` 返回；`last_modified` = feed 缓存条目 `time`）** | `(generate_error_rss(info['title'], info['link'], info['description'], exc, feed_url=feed_url), None)`（★ v1.5：降级 feed **无 `Last-Modified`** ⇒ `If-Modified-Since` 不可评估；★ v1.6 / C1：`pubDate` 已从 canonical 投影**剔除** ⇒ **不再**依赖"`pubDate` 每次变化"来避免 304——降级体 ETag 由**错误体内容**派生，与成功体内容不同 ⇒ 二者**不混淆**；同一错误表示重放可得 304（**同一表示**的条件命中，语义正确，BR-SRV-37）） |
 
 - `shape` 非法 → `raise ValueError(f'unknown guard shape: {shape!r}')`。
 - 捕获类型 = `Exception`（**不捕** `BaseException`：`KeyboardInterrupt`/`SystemExit` 直通）。
@@ -241,35 +256,41 @@ def _handle_stock_batch(self, parsed, handler, write_body=True, path=None) -> No
 - **重复拼写不占第二个槽**（折叠后去重）⇒ `600519.SH,SH600519,sh600519` 只计 1 个 `_MAX_BATCH_SIZE` 额度。
 - `deadline` **不传**（沿用 handler 默认预算：REST 域 15s / f10 CDP 60s）——与 `_PROGRESS.md` §B 锁定契约一致；f10 多码 >15s 的既有风险见 `stock_api.md` §10#10（本模块不兜）。
 
-### 2.5 `_get_or_fetch_feed(self, path, fetch_func) -> str`（防击穿 + **双检**）
+### 2.5 `_get_or_fetch_feed(self, path, fetch_func) -> tuple[str, float | None]`（防击穿 + **双检**；★ v1.5 返回二元组）
 
 ```python
-def _get_or_fetch_feed(self, path, fetch_func) -> str
+def _get_or_fetch_feed(self, path, fetch_func) -> tuple[str, float | None]
+    """返回 (xml, last_modified)。last_modified = 该 feed 缓存条目 entry['time']（epoch 秒）；无条目 ⇒ None。"""
 ```
 
 | 参数 | 类型 | 语义 |
 |------|------|------|
 | `path` | `str` | feed 路径（缓存键），来自 `ROUTES` |
 | `fetch_func` | `Callable[[], str]` | 回源（`lambda: handler(feed_url=feed_url)`）；**失败抛异常**（由 `rss` shape 兜底） |
+| **返回** | `tuple[str, float \| None]` | ★ v1.5：`(xml, last_modified)`。**`last_modified` 只来自真实缓存条目**——降级/回源失败路径由 `_guard` 产出 `(error_xml, None)` ⇒ **绝不把陈旧条目的时间冒充降级体的 Last-Modified** |
 
 **必须按序执行（缺 ② 则防击穿退化，`cache.md` §2.4 硬约束）**
 
 ```
-① xml = cache.feed_cache_get(path)          # miss → None（命中已内部 move_to_end + last_access）
-   命中 → return xml
+① entry = cache.feed_cache_get_entry(path)  # miss → None（命中已内部 move_to_end + last_access）
+   命中 → return (entry['xml'], entry['time'])
 ② with _feed_fetch_locks_lock: lock = _feed_fetch_locks.setdefault(path, threading.Lock())
 ③ with lock:
-     xml = cache.feed_cache_get(path)       # ★ 二次 get（双检）：并发窗口内他人已回源
-     命中 → return xml
-     xml = fetch_func()                     # 仅 miss 才回源
-     cache.feed_cache_put(path, xml, cache_policy('feed')['ttl'])
-④ return xml
+     entry = cache.feed_cache_get_entry(path)   # ★ 二次 get（双检）：并发窗口内他人已回源
+     命中 → return (entry['xml'], entry['time'])
+     ttl = cache_policy('feed')['ttl']          # ★ P2-1：二次 miss 后才求值
+     xml = fetch_func()                         # 仅 miss 才回源；失败 ⇒ 异常穿透（不写缓存）
+     cache.feed_cache_put(path, xml, ttl)
+     entry = cache.feed_cache_get_entry(path)   # ★ v1.5：取 put 写入的权威 time（淘汰竞态 ⇒ None）
+④ return (xml, entry['time'] if entry else None)
 ```
 
-- **锁序（硬约束）**：取 `_feed_fetch_locks_lock` 后**立即释放**再进 per-path 锁；**持有 per-path 锁时绝不持有** `_feed_cache_lock`/`_feed_fetch_locks_lock`（`feed_cache_get/put` 内部自行加/放，二者不嵌套）。
-- **TTL 同源**：`ttl = cache_policy('feed')['ttl']`（盘中 30 / 非盘中 180），与 `_cache_age()` 的 RSS 分支读**同一个 policy** ⇒ "承诺 = 行为"（SAD D4）。
-- **`ttl` 求值点（修 P2-1）**：`ttl` **必须**在 ③ 的二次 `feed_cache_get` **仍 miss 之后**求值（即紧邻 `fetch_func()`/`feed_cache_put`）；**禁止**在 ① 首个 `feed_cache_get` 之前求值——否则命中路径白算 policy，且与 §7.4 的实现要求自相矛盾。§5.4 伪代码按此顺序。
+- **锁序（硬约束）**：取 `_feed_fetch_locks_lock` 后**立即释放**再进 per-path 锁；**持有 per-path 锁时绝不持有** `_feed_cache_lock`/`_feed_fetch_locks_lock`（`feed_cache_get_entry/put` 内部自行加/放，二者不嵌套）。
+- **`feed_cache_get` 兼容**：本方法**改用** `feed_cache_get_entry`（一次查询同时拿到 `xml` + `time`）；`cache.feed_cache_get` 签名与语义**不变**，仅是内部改为 `feed_cache_get_entry` 的薄包装（`cache.md` BR-CACHE-32）。**禁止**用"`feed_cache_get` + 另行 `feed_cache_get_entry`"两次查询拼装——第二次查询会拾取降级态的陈旧条目（BR-SRV-38）。
+- **TTL 同源**：`ttl = cache_policy('feed')['ttl']`（盘中 30 / 非盘中 180），与 `_cache_age()` 的 RSS 分支读**同一个 policy** ⇒ "承诺 = 行为"（SAD D4）。`<ttl>` 亦由同一 policy 派生（BR-SRV-43）。
+- **`ttl` 求值点（修 P2-1，保持）**：`ttl` **必须**在 ③ 的二次 `feed_cache_get_entry` **仍 miss 之后**求值（即紧邻 `fetch_func()`/`feed_cache_put`）；**禁止**在 ① 首次查询之前求值——否则命中路径白算 policy。§5.4 伪代码按此顺序。
 - 回源失败**不写缓存**（异常穿透到 `_serve_feed` 的 `rss` 降级）；**不缓存错误 RSS**（下次请求重试，现状语义保持）。
+- **§2.5a 新访问器契约（`cache.feed_cache_get_entry`，★ v1.5）**：`path → 新鲜条目浅拷贝 | None`；命中时与 `feed_cache_get` 完全同源（`now < expires_at`、`move_to_end`、`last_access = now`）；返回**浅拷贝** `{'xml','time','last_access','expires_at'}`（调用方只读，不得原地改）；`feed_cache_get` 由它实现，**签名/返回不变**。详见 `cache.md` §2.4 / BR-CACHE-32。
 
 ### 2.6 `build_health_payload(base_url, check_sources=False) -> dict`
 
@@ -456,6 +477,32 @@ def _valid_host_header(host) -> bool:
 def _normalize_proto(value) -> str:
     """★ v1.2：X-Forwarded-Proto → 'http'/'https'（其余 ⇒ 'http'）。"""
 
+# ── ★ v1.5：RSS 条件请求（ETag / Last-Modified / 304）────────────────────
+def _feed_ttl_minutes() -> int:
+    """RSS 2.0 <ttl> 单位为分钟；由 feed 缓存 policy 派生（BR-SRV-43）。
+    ttl=30 ⇒ 1；ttl=180 ⇒ 3。★ v1.6：恒 ≥1（边界 0/负/59/60/61/180/181 ⇒ 1/1/1/1/2/3/4）。"""
+
+def _feed_etag(xml) -> str:
+    """BR-SRV-37：弱 ETag `W/"<sha256-hex>"`。
+    规范化 = 移除 <lastBuildDate>…</lastBuildDate>（count=1）、<ttl>…</ttl>（count=1）
+    与 <pubDate>…</pubDate>（★ v1.6 / C1：count=0 全量，item 有多条）的**内容**（保留占位元素），
+    再对整串 utf-8 做 sha256。纯函数（不读时钟、不读缓存）。
+    ★ pubDate 必须全量剔除：eastmoney/ths/jin10 的三处"解析失败回落到当前时间"落在哈希区。"""
+
+def _if_none_match_matches(header, etag) -> bool:
+    """BR-SRV-39：If-None-Match 弱比较（RFC 9110 §13.1.2）。
+    `*` ⇒ True；逗号列表逐项去空白、剥 `W/` 前缀后与服务端 opaque tag 比较。"""
+
+def _if_modified_since_not_modified(header, last_modified) -> bool:
+    """BR-SRV-40：If-Modified-Since 解析（email.utils.parsedate_to_datetime）→ 秒级比较
+    last_modified <= ims ⇒ True。非法/不可解析/last_modified is None ⇒ False（忽略头）。
+    ★ v1.6 / C4：解析、补时区、dt.timestamp() 全在 try 内，except 含 OSError（P2-01）。"""
+
+def _not_modified(headers, etag, last_modified) -> bool:
+    """BR-SRV-39/40：条件判定唯一入口。
+    If-None-Match **存在** ⇒ 只看它（匹配⇒304，不匹配⇒200，**忽略 IMS**）；
+    否则看 If-Modified-Since；两者皆缺 ⇒ False（200 全量）。"""
+
 def _get_fanout_executor() -> ThreadPoolExecutor:
     """懒创建（双检，_fanout_lock）：ThreadPoolExecutor(max_workers=_FANOUT_MAX_WORKERS=3, thread_name_prefix='fanout')。"""
 
@@ -487,6 +534,12 @@ _FANOUT_MAX_WORKERS = 3                  # ★ 外部上游扇出并发上限（
 _FANOUT_WAIT_BUDGET = REQUEST_TIMEOUT    # ★ v1.2（P1-2）：一轮扇出的排空上界（否则共享池被占时单请求可拖到 ~190s）
 _BASE_URL_VARY = 'Host, X-Forwarded-Host, X-Forwarded-Proto'   # ★ v1.2（S2-3）
 _HOST_RE / _HOST_IPV6_RE = ...           # ★ v1.2：Host 格式校验正则
+# ★ v1.5：ETag 规范化（剔除"非内容"元素的内容）
+# ★ v1.6 / C1：+ item 级 <pubDate>（全量替换，count=0；item 多条）
+_LASTBUILDDATE_RE = re.compile(r'<lastBuildDate>[^<]*</lastBuildDate>')   # count=1（channel 首个）
+_RSS_TTL_RE       = re.compile(r'<ttl>[^<]*</ttl>')                       # count=1（channel 首个）
+_PUBDATE_RE       = re.compile(r'<pubDate>[^<]*</pubDate>')               # ★ v1.6：count=0（全量）
+_ETAG_PREFIX      = 'W/'                  # 弱校验器（ETag 由规范化体派生 ⇒ 语义上即为弱校验器）
 ```
 
 > **线程账**：本模块新增线程来源 = healthz 专用执行器（≤5，懒创建）+ 扇出执行器（≤3，懒创建）+ **启动预热线程 `warm_transport`（1，daemon，v1.4；随 `main()` 起一次，不常驻轮询）**；`fanout` 线程仅在首次并发扇出时创建（AC-S9 线程总账 **+9** 上界，见 §10#15/#31）。
@@ -526,11 +579,13 @@ _HOST_RE / _HOST_IPV6_RE = ...           # ★ v1.2：Host 格式校验正则
 |------|------|
 | `ROUTES`（5 项 dict，含 `handler`/`name`/`title`/`link`/`description`） | **不变**（OPML/healthz/首页均依赖其结构） |
 | `RSSHandler.timeout = 30` | 不变（主端口兜底） |
-| `_serve_index` / `_serve_feed` | 不变（`_serve_feed` 内部改传 `varies_on_host=not PUBLIC_BASE_URL`） |
-| `_base_url()` / `_send_text` / `_send_json` | **签名扩展（v1.2）**：`_base_url` 加 Host 校验；`_send_text(..., varies_on_host=False, write_body=True)`；`_send_json(data, write_body=True, cache=True)`（★ v1.3：**无 `status` 形参**——恒调 `_send_text(200, …)`）；新增 `_send_json_shape`（★ v1.3：恒 200，无 503 分支）；★ **v1.4**：新增 `_accepts_gzip(header) -> bool`，`_send_text` 内部按 `GZIP_MIN_BYTES`/`GZIP_COMPRESSLEVEL` 决定 gzip 并补发 `Content-Encoding`/`Vary`（**签名不变**） |
+| `_serve_index` / `_serve_feed` | **签名不变**（`_serve_feed(self, path, base_url, write_body=True)`）；★ v1.5 内部新增条件判定 + 200 校验器头 + 304 分支（`varies_on_host=not PUBLIC_BASE_URL` 保持） |
+| `_base_url()` / `_send_text` / `_send_json` | **签名扩展（v1.2）**：`_base_url` 加 Host 校验；`_send_text(..., varies_on_host=False, write_body=True)`；`_send_json(data, write_body=True, cache=True)`（★ v1.3：**无 `status` 形参**——恒调 `_send_text(200, …)`）；新增 `_send_json_shape`（★ v1.3：恒 200，无 503 分支）；★ **v1.4**：新增 `_accepts_gzip(header) -> bool`，`_send_text` 内部按 `GZIP_MIN_BYTES`/`GZIP_COMPRESSLEVEL` 决定 gzip 并补发 `Content-Encoding`/`Vary`（**签名不变**）；★ **v1.5**：`_send_text(..., etag=None, last_modified=None)` **纯新增两个可选形参**（200 RSS 路径发 `ETag`/`Last-Modified`；其余调用点零改动）；**新增方法** `_send_not_modified(etag, last_modified, varies_on_host=False)`（304 专用，无 body/无 `Content-Encoding`/无 `Content-Length`） |
+| **`cache.feed_cache_get_entry(path) -> dict \| None`（★ v1.5 新增公开访问器）** | 命中返回新鲜条目**浅拷贝**（含 `time`）；`cache.feed_cache_get` **签名与语义不变**（内部薄包装） |
+| **`utils.generate_rss(title, link, description, items, feed_url=None, ttl=None)`（★ v1.5）** | `ttl` 为 **RSS 2.0 `<ttl>` 的分钟整数**；`None`（默认）⇒ **不输出** `<ttl>`（既有 9 个调用点/测试零改动）；5 个 RSS handler（**6 处 `generate_rss` 调用点**：`handle_eastmoney_kuaixun` 含「无匹配 ⇒ 空 feed」提前返回；★ v1.8 / D-2）传 `ttl=_feed_ttl_minutes()` |
 | `BoundedThreadPoolServer.__init__(*args, max_workers=MAX_WORKERS, max_inflight=None, **kwargs)` | **增 `max_inflight` 形参（v1.1）**；★ v1.2 增类属性 `request_queue_size = LISTEN_BACKLOG` |
 | `init_cdp()` / `_cdp_memory_watchdog()` / `main()` | 签名不变（watchdog 内部决策改调 cdp_engine） |
-| `handle_cls_telegraph` / `handle_eastmoney_kuaixun` / `handle_ths_kuaixun` / `handle_jin10_flash` / `handle_wallstreetcn_live(feed_url=None)` | 签名不变；内部 `ttl` 改 `cache_policy('news_url')['ttl']` |
+| `handle_cls_telegraph` / `handle_eastmoney_kuaixun` / `handle_ths_kuaixun` / `handle_jin10_flash` / `handle_wallstreetcn_live(feed_url=None)` | 签名不变；内部 `ttl` 改 `cache_policy('news_url')['ttl']`；★ v1.5：`generate_rss(..., ttl=_feed_ttl_minutes())`（**6 处调用点 / 5 个 handler**：eastmoney 两个 `generate_rss` 出口均传；★ v1.8 / D-2；`_feed_ttl_minutes()` 只读 `cache_policy('feed')`） |
 | `build_health_payload(base_url, check_sources=False)` | **签名不变**（测试直接调用） |
 
 **删除的 import / 常量消费者迁移（与 `config.md` §2.4 **同一 change-set**）**
@@ -548,6 +603,7 @@ _HOST_RE / _HOST_IPV6_RE = ...           # ★ v1.2：Host 格式校验正则
 # ── 标准库 ────────────────────────────────────────────────────────────
 import atexit
 import gzip                     # ★ v1.4：_send_text 响应压缩
+import hashlib                  # ★ v1.5：_feed_etag 的 sha256
 import json
 import os
 import re
@@ -557,7 +613,8 @@ import threading
 import time
 import logging
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED   # ★ 新增 wait/FIRST_COMPLETED
-from email.utils import formatdate
+from datetime import timezone   # ★ v1.5：IMS naive datetime → UTC
+from email.utils import formatdate, parsedate_to_datetime   # ★ v1.5：parsedate_to_datetime
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse
 from urllib.parse import parse_qs, urlencode
@@ -578,7 +635,7 @@ from .config import (
     _PLATE_INFO_URL, _PLATE_STOCKS_URL, _PLATE_INDUSTRY_URL, _PLATE_HEADERS,
     CDP_RESTART_INTERVAL, stock_nav_page_names, cdp_engine,
 )   # ★ 删除：CACHE_TTL、_trading_tiers；★ v1.2：MAX_HEALTH_INFLIGHT 不再直接 import（改用 config. 前缀）
-from .cache import (fetch_json, feed_cache_get, feed_cache_put,
+from .cache import (fetch_json, feed_cache_get_entry, feed_cache_put,
                     _feed_fetch_locks, _feed_fetch_locks_lock,
                     build_batch_response, _fill_missing, FetchError,
                     warm_transport)                                        # ★ v1.4：warm_transport（main() 预热线程）
@@ -759,6 +816,20 @@ _max_inflight: MAX_INFLIGHT if max_inflight is None else max_inflight
 | **BR-SRV-34** | **响应 gzip 协商（v1.4 / AC-E1）**：`_accepts_gzip(header)` 按 RFC 9110 §12.5.3 解析 `Accept-Encoding`（逗号分隔 token + `;q=` 权重、coding 大小写不敏感、显式 `gzip` 覆盖 `*`、**`q=0` 表示拒绝**）；`_send_text` 仅当 `len(body_bytes) >= config.GZIP_MIN_BYTES` **且** 被接受时 `gzip.compress(..., config.GZIP_COMPRESSLEVEL)` 并加 `Content-Encoding: gzip`；**`Vary: Accept-Encoding` 在 `gzipped or cache` 时必发**（表示随编码变，不可缓存响应亦须标） | AC-E1 / S1（旧子串匹配对 `gzip;q=0` 误压缩、漏 `GZIP`） |
 | **BR-SRV-35** | **启动传输预热（v1.4 / 冷启动）**：`main()` 起 `threading.Thread(target=warm_transport, daemon=True)`——`cache.warm_transport` 走池**仅握手不发业务请求**（主机由 `config.warm_hosts()` 从 URL 常量派生），**总函数绝不抛**；不阻塞启动、不参与 `/healthz`；失败静默 | BUG-冷启动-01（冷扇出 ≈4.2s > 0.8×tick） |
 
+### 4.7 RSS 条件请求（★ v1.5；`GET`/`HEAD`，仅 5 个 `ROUTES` feed）
+
+| 编号 | 规则 | 依据 |
+|------|------|------|
+| **BR-SRV-36** | **适用范围**：**仅** `ROUTES` 的 5 个 RSS 路径的 **GET / HEAD**。`/opml.xml`、`/`、`/healthz`、全部 JSON 端点**不支持**条件请求（不改路由、不改方法、不改 status 语义）。无任何条件头 ⇒ 行为与 v1.4 **逐字一致**（200 全量） | 端锁定 🟠 STABLE / BR-SRV-44 |
+| **BR-SRV-37** | **ETag 派生（弱校验器）**：`etag = 'W/"' + sha256(normalize(xml)) + '"'`，其中 `normalize` = 用**空占位**替换三类"非内容元数据"的**内容**，再对整串 utf-8 哈希：① `<lastBuildDate>…</lastBuildDate>`（`count=1`）；② `<ttl>…</ttl>`（`count=1`）；③ **`<pubDate>…</pubDate>`（★ v1.6 / C1：`count=0` 全量替换，item 有多条）**。**严禁裸 body 哈希**（`lastBuildDate` 每调用即变 ⇒ TTL 到期重生成后 ETag 必变 ⇒ 永远 200 ⇒ 功能静默失效）。**item 级 pubDate 必须同剔（★ v1.6 / C1）**：eastmoney `showtime`、ths `ctime`、jin10 `time` 解析失败时**回落到当前时间**（`formatdate(timeval=None)` / `int(time.time())`，证据 `server.py:107/133`、`utils.py:241`），该回落落在哈希区 ⇒ 3/5 feed 每次 TTL 到期重生成都换 ETag ⇒ 永远 200。item 的**身份**由 `<guid>` 承载，`pubDate` 属上游元数据且存在**已知非确定性回落** ⇒ 剔除后仍保持"内容变 ⇒ ETag 变"（`guid`/`title`/`link`/`description`/channel 字段/`<atom:link feed_url>` 任一变化照旧改 ETag）。**不变式（双向，★ v1.6 / C1 改写）**：**「内容（除 `pubDate`/`lastBuildDate`/`ttl` 三项外）未变 ⇒ ETag 不变（不误 200，本专项 R1 正向）且除 `pubDate`/`lastBuildDate`/`ttl` 三项外的任一字节变化 ⇒ ETag 必不同（不误 304，反向）」**（★ P3a-r2 / P2-b：第二子句补「除三项外」限定语，消除"内容变 ⇒ ETag 必变"的 overclaim——仅 `pubDate` 字节变化时 ETag **不变**，属已登记的可接受权衡）——v1.5 只保证反向（不误 304），把 R1 的"内容未变 ⇒ ETag 不变"命题漏掉，故**不可妥协项 #2 只闭合了一半**；本版补齐正向。**`<pubDate>` 取舍（可接受权衡）**：上游**真实**更正某条 item 的 `pubDate` 时 ETag **不变** ⇒ 下游持旧副本直到其它字节变化或 TTL 语义外的强制刷新；**权衡理由**：① `pubDate` 在 3/5 feed 上是"解析失败的当前时间回落"，纳入哈希会使条件请求**必然失效**（本专项第一目标的直接对立面）；② 在可解析的 feed 上 `pubDate` 是上游元数据、非下游消费身份（`guid` 才是）；③ 其变化通常伴随 `title`/`description`/新增 item 等**真内容**变化 ⇒ 实际漏报面极小。**成本**：一次 regex + 40KB sha256 ≈ 0.1–0.2ms，远小于同响应的 gzip(level=1)。**碰撞**：sha256 256-bit 抗碰撞；ETag 仅作等值比较，不作安全边界。**弱**：因规范化去除了字节差异，按 RFC 9110 §8.8.3 语义必须标记 `W/`。**编码无关**：ETag 在 gzip 之前由未压缩 XML 派生 ⇒ gzip/identity 两个表示共享同一弱标签（弱校验器允许），304 时各客户端复用自身缓存副本；**故 304 不得携带 `Content-Encoding`** | RFC 9110 §8.8.3 / 本专项 R1（**P1-01 定向修**） |
+| **BR-SRV-38** | **Last-Modified 时间源**：`last_modified = feed_cache_get_entry(path)['time']`（`feed_cache_put` 写入时刻，epoch 秒）；发送格式 `formatdate(timeval=last_modified, localtime=False, usegmt=True)`。**仅在真实缓存条目存在时**才有值——降级/回源失败路径（`_guard` rss 分支）为 `None` ⇒ **不发 `Last-Modified`、`If-Modified-Since` 不可评估**（绝不拿陈旧条目的时间冒充降级体）。**不得修改 `feed_cache_get` 签名**（5 调用方 + `tests/test_cache.py`）；新访问器 `feed_cache_get_entry` 见 BR-CACHE-32 | 裁决 #3 / `cache.md` §2.4 |
+| **BR-SRV-39** | **条件头优先级与 If-None-Match**：`If-None-Match` **优先于** `If-Modified-Since`（RFC 9110 §13.1.3）——只要 INM **存在**，就**只**评估 INM（匹配 ⇒ 304；不匹配 ⇒ 200），**完全忽略** IMS。INM 支持：`*`（任何当前表示 ⇒ 命中）、逗号分隔**多值列表**（任一项命中 ⇒ 304）、`W/` 弱前缀（**弱比较**：`W/"x"` 与 `"x"`/`W/"x"` 视为同一 opaque tag，RFC 9110 §8.8.3.2）。**弱指示符大小写敏感（★ v1.6 / C5 措辞修正）**：**只接受字面 `W/`**；小写 `w/"…"` **不**匹配（按 opaque tag 字面比较）⇒ **200**（RFC 9110 §8.8.3 的弱指示符大小写敏感；v1.5 的"不区分大小写前缀"表述与实现冲突，已更正）；空白容忍 | RFC 9110 §13.1.2/§13.1.3 |
+| **BR-SRV-40** | **If-Modified-Since**：仅在 INM 缺失时评估。用 `email.utils.parsedate_to_datetime` 解析（naive ⇒ 视为 UTC），转 epoch 后 **秒级**比较：`int(last_modified) <= int(ims_epoch)` ⇒ 304，否则 200。**非法/不可解析的日期头必须忽略并退回 200**（`except (ValueError, TypeError, OverflowError, OSError)`），**绝不 400/500**；`last_modified is None` ⇒ 忽略。★ **v1.6 / C4（P2-01）**：**解析、补时区、`dt.timestamp()` 全部在同一个 `try` 内**——`dt.timestamp()` 对超大年份/平台 `time_t` 越界可抛 `OverflowError`/`OSError`，若写在 `try` 之外则穿透 `do_GET`/`do_HEAD` 的 `except OSError` 之外 ⇒ 连接中断（非 200）；故 `except` 增 `OSError` 并把 `timestamp()` 纳入受保护区。发送侧 `formatdate` 亦为秒级（截断），保证客户端回显我们发出的 `Last-Modified` 时 `<=` 成立 | RFC 9110 §13.1.3 / §15.4.5 / **P2-01** |
+| **BR-SRV-41** | **304 响应组成（RFC 9110 §15.4.5）**：由专用 `_send_not_modified(etag, last_modified, varies_on_host)` 生成——**无 body**、**不得有 `Content-Encoding`**（**不得**对 304 gzip）、**不发 `Content-Length`**、不发 `Content-Type`；**必带** `ETag`（当前弱标签）+ `Cache-Control`（**与 200 同值**：`private`/`public` 由 `varies_on_host` 判定 + `max-age=self._cache_age()`）+ `Vary`（`varies_on_host` 时为 `Host, X-Forwarded-Host, X-Forwarded-Proto, Accept-Encoding`，否则 `Accept-Encoding`）。**304 不调用 `feed_cache_put`、不写任何缓存**（LRU 触碰由读取路径完成）。**`HEAD` 与 `GET` 走同一条件判定** ⇒ HEAD 亦得 304 | RFC 9110 §15.4.5 / §8.6 |
+| **BR-SRV-42** | **200 RSS 响应头（仅增）**：`_send_text` 新增可选 `etag`/`last_modified` ⇒ 200 必发 `ETag`，有缓存条目时发 `Last-Modified`；其余头（`Content-Type`/`Content-Length`/`Cache-Control`/`Vary`/`Content-Encoding`）与 v1.4 **逐字不变**。`Cache-Control` 与 304 **同一值来源**（`_cache_age()` = `news_url` 域 ⇒ 盘 30 / 非盘 180） | 本专项 / BR-SRV-7 |
+| **BR-SRV-43** | **RSS `<ttl>`**：`generate_rss` 新增可选形参 `ttl=None`（**分钟**整数）；`None` ⇒ 不输出元素（向后兼容）。5 个 RSS handler（**6 处 `generate_rss` 调用点**——`handle_eastmoney_kuaixun` 的**常规返回**与「**无匹配 ⇒ 空 feed**」**提前返回**两处**均**传 `ttl=_feed_ttl_minutes()`，使该罕见路径的 feed 表示与常规路径一致；★ v1.8 / D-2）传 `ttl=_feed_ttl_minutes()`；`_feed_ttl_minutes() = max(1, (cache_policy('feed')['ttl'] + 59) // 60)`（盘 30s→`1`、非盘 180s→`3`）。★ **v1.6 / C7#12（P2-07）值域护栏**：生成侧仅当 **`ttl is not None and int(ttl) > 0`** 时输出 `<ttl>`——RSS 2.0 要求**正**整数；`generate_rss(ttl=0)` / `ttl<0` ⇒ **不输出**（不得出现 `<ttl>0</ttl>`）。**位置**：紧随 `</lastBuildDate>`、在 `<atom:link>` **之前**。**对 ETag 的影响**：`<ttl>` 与 `<lastBuildDate>` 一样在规范化时**被剔除**（二者皆为派生新鲜度元数据，盘中/非盘切换会使其变化）；剔除后 ETag 仅由**内容**决定 ⇒ 日内交易时段边界不产生假 200。<br>★ **【C3 / P1-03 · 契约语句，必须进 `API.md`】「`<ttl>` 是聚合器缓存提示，非时效保证；需要比 1 分钟更快的时效请用 SSE（4s）」。** 语义细则：**① 最小粒度 = 1 分钟**——RSS 2.0 的 `<ttl>` 只能表达整分钟，盘中缓存 TTL 30s 由 `max(1, …)` **向上取整为 `1`**（不得向下取整为 `0`，也**不得**恒输出 `3`——后者会与 `Cache-Control: max-age=30` 直接冲突并丢掉盘中低延迟意图）；**② 推荐轮询策略 = 「`ETag` 条件请求优先，轮询间隔 ≥ 30s」**——下游应按 `If-None-Match` 拿 304（零 body、省带宽），**不得**照抄 `<ttl>1</ttl>` 把轮询放慢到 60s（服务端 `max-age=30` 比它更激进）；**③ `Cache-Control: max-age` 是更强的承诺**（盘 30 / 非盘 180），`<ttl>` 仅为 advisory。**本条是"下游照抄 `<ttl>1</ttl>` 把时效降到 1 分钟"这一误导风险的唯一缓冲**（见契约影响 #4） | RSS 2.0 `<ttl>` / 本专项 R1 / **C3（P1-03）** |
+| **BR-SRV-44** | **出范围项（本轮不做，仅登记）**：① `RSSHandler.protocol_version` 升 **HTTP/1.1** 以启用 keep-alive（改变连接复用语义，**波及全部端点与线程池占用**，须独立评估）；② `/opml.xml` 与 `/` 的条件请求（静态内存拼接，无缓存条目时间源）；③ JSON 端点条件请求（不适用；其 `Cache-Control` 已由域 TTL 承担）。**上述三项不得在本轮顺带实现** | 端锁定 / 范围纪律 |
+
 ---
 
 ## 5. 伪代码
@@ -782,12 +853,16 @@ def _guard(fn, *, shape, requested=None, dropped=0, rss_info=None, feed_url=None
             return build_batch_response(codes, {}, errors, dropped=dropped)
         if shape == 'rss':
             info = rss_info or {}
-            return generate_error_rss(info.get('title', 'feed'),
-                                      info.get('link', ''),
-                                      info.get('description', ''),
-                                      exc, feed_url=feed_url)
+            # ★ v1.5：rss shape 返回契约扩展为 (xml, last_modified)；
+            #   降级体无真实缓存条目 ⇒ last_modified=None（禁用 IMS 304，BR-SRV-38/40）
+            return (generate_error_rss(info.get('title', 'feed'),
+                                       info.get('link', ''),
+                                       info.get('description', ''),
+                                       exc, feed_url=feed_url), None)
         return {'error': str(exc)}                              # object / text
 ```
+
+> ★ v1.5：`shape='rss'` 的**成功返回**亦为 `(xml, last_modified)`（由 `_get_or_fetch_feed` 返回）⇒ **成功与异常两条路径返回形状一致**（均为 2-tuple），`_serve_feed` 无需 `isinstance` 判别。其余三 shape 契约不变。
 
 ### 5.2 `_handle_request`（分发，含 shape 派生）
 
@@ -926,35 +1001,160 @@ def _rekey_batch_response(data, codes, requested):
     return out
 ```
 
-### 5.4 `_get_or_fetch_feed`（双检）+ `_serve_feed`（rss shape）
+### 5.4 `_get_or_fetch_feed`（双检）+ `_serve_feed`（rss shape）+ 条件请求（★ v1.5）
 
 ```python
 def _get_or_fetch_feed(self, path, fetch_func):
-    """BR-SRV-6/7：防击穿（per-path 锁）+ 双检；LRU/TTL/清扫归 cache 层。"""
-    xml = feed_cache_get(path)                                     # ①（命中路径不读 policy —— P2-1）
-    if xml is not None:
-        return xml
+    """BR-SRV-6/7/38：防击穿（per-path 锁）+ 双检；LRU/TTL/清扫归 cache 层。
+    ★ v1.5：返回 (xml, last_modified)；last_modified 只来自真实缓存条目 entry['time']。"""
+    entry = feed_cache_get_entry(path)                             # ①（命中路径不读 policy —— P2-1）
+    if entry is not None:
+        return entry['xml'], entry['time']
     with _feed_fetch_locks_lock:                                   # ②（立即释放）
         lock = _feed_fetch_locks.setdefault(path, threading.Lock())
     with lock:                                                     # ③
-        xml = feed_cache_get(path)                                 # ★ 双检
-        if xml is not None:
-            return xml
-        ttl = cache_policy('feed')['ttl']                           # ★ P2-1：二次 get 仍 miss 后才求值
-        xml = fetch_func()                                         # 仅 miss 才回源
+        entry = feed_cache_get_entry(path)                         # ★ 双检
+        if entry is not None:
+            return entry['xml'], entry['time']
+        ttl = cache_policy('feed')['ttl']                           # ★ P2-1：二次 miss 后才求值
+        xml = fetch_func()                                         # 仅 miss 才回源；失败 ⇒ 异常穿透
         feed_cache_put(path, xml, ttl)
-    return xml
+        entry = feed_cache_get_entry(path)                         # ★ v1.5：put 写入的权威 time
+    return xml, (entry['time'] if entry is not None else None)
+
+
+# ── ★ v1.5：ETag 规范化与条件判定（纯函数，不读时钟/不读缓存）─────────────
+# ★ v1.6 / C1：canonical 投影扩展——三个"非内容"元素的『内容』一律空白化
+_LASTBUILDDATE_RE = re.compile(r'<lastBuildDate>[^<]*</lastBuildDate>')   # count=1
+_RSS_TTL_RE = re.compile(r'<ttl>[^<]*</ttl>')                            # count=1
+_PUBDATE_RE = re.compile(r'<pubDate>[^<]*</pubDate>')                    # ★ v1.6：count=0（全量）
+
+
+def _feed_etag(xml):
+    """BR-SRV-37：弱 ETag W/"<sha256>"；剔除 lastBuildDate / ttl / **pubDate** 的『内容』后再哈希。
+
+    裸 body 哈希是本专项第一风险：lastBuildDate 每次生成都取当前时间
+    ⇒ TTL 到期重生成后内容未变 ETag 亦变 ⇒ 永远 200 ⇒ 功能静默失效。
+
+    ★ v1.6 / C1：item 级 pubDate 必须**全量**（count=0）剔除——eastmoney `showtime`、
+    ths `ctime`、jin10 `time` 解析失败时回落到当前时间（`formatdate(timeval=None)` /
+    `int(time.time())`），落在哈希区 ⇒ 3/5 feed 每次 TTL 到期重生成都换 ETag ⇒ 永远 200。
+    item 身份由 <guid> 承载，pubDate 为上游元数据（可接受的权衡，见 BR-SRV-37）。
+    """
+    normalized = _LASTBUILDDATE_RE.sub('<lastBuildDate/>', xml, count=1)
+    normalized = _RSS_TTL_RE.sub('<ttl/>', normalized, count=1)
+    normalized = _PUBDATE_RE.sub('<pubDate/>', normalized)              # ★ v1.6：count=0 全量
+    digest = hashlib.sha256(normalized.encode('utf-8')).hexdigest()
+    return 'W/"' + digest + '"'
+
+
+def _if_none_match_matches(header, etag):
+    """BR-SRV-39：If-None-Match（弱比较）。header 已确认非 None。"""
+    current = etag[2:] if etag.startswith('W/') else etag        # 服务端 opaque tag（含引号）
+    for raw in header.split(','):
+        candidate = raw.strip()
+        if not candidate:
+            continue
+        if candidate == '*':                                     # 任意当前表示
+            return True
+        if candidate.startswith('W/'):
+            candidate = candidate[2:]                            # 弱比较：剥 W/ 后比 opaque tag
+        if candidate == current:
+            return True
+    return False
+
+
+def _if_modified_since_not_modified(header, last_modified):
+    """BR-SRV-40：IMS 秒级比较；非法/None ⇒ False（忽略头，退回 200，绝不 400/500）。
+
+    ★ v1.6 / C4（P2-01）：解析、补时区、`dt.timestamp()` **全部在同一 try 内**。
+    `dt.timestamp()` 对超大年份/平台 time_t 越界可抛 OverflowError/OSError；若写在
+    try 之外会穿透 do_GET/do_HEAD 的 except OSError ⇒ 连接中断（非 200）。
+    """
+    if last_modified is None:
+        return False
+    try:
+        dt = parsedate_to_datetime(header)
+        if dt is None:
+            return False
+        if dt.tzinfo is None:                                    # HTTP-date 无时区 ⇒ 视作 GMT
+            dt = dt.replace(tzinfo=timezone.utc)
+        return int(last_modified) <= int(dt.timestamp())         # ★ v1.6：timestamp 在 try 内
+    except (TypeError, ValueError, OverflowError, OSError):      # ★ v1.6：+ OSError
+        return False
+
+
+def _not_modified(headers, etag, last_modified):
+    """BR-SRV-39/40：条件判定唯一入口（RFC 9110 §13.1.3 优先级）。"""
+    inm = headers.get('If-None-Match')
+    if inm is not None:                                          # INM 存在 ⇒ IMS 被完全忽略
+        return _if_none_match_matches(inm, etag)
+    ims = headers.get('If-Modified-Since')
+    if ims is not None:
+        return _if_modified_since_not_modified(ims, last_modified)
+    return False                                                 # 无条件头 ⇒ 200 全量
 
 
 def _serve_feed(self, path, base_url, write_body=True):
+    """BR-SRV-36..43：rss shape + 条件请求。GET/HEAD 同一路径（write_body 只控 200 体）。"""
     info = ROUTES[path]
     feed_url = base_url + path
-    xml = _guard(lambda: self._get_or_fetch_feed(path, lambda: info['handler'](feed_url=feed_url)),
-                 shape='rss', rss_info=info, feed_url=feed_url)     # 异常 → generate_error_rss
-    # ★ v1.2（S2-3）：feed 体嵌入 feed_url（请求派生 Host 时）⇒ private + Vary
+    xml, last_modified = _guard(                                 # ★ v1.5：rss shape 返回 2-tuple
+        lambda: self._get_or_fetch_feed(path, lambda: info['handler'](feed_url=feed_url)),
+        shape='rss', rss_info=info, feed_url=feed_url)            # 异常 → (generate_error_rss, None)
+    etag = _feed_etag(xml)
+    varies_on_host = not PUBLIC_BASE_URL                         # ★ v1.2（S2-3）不变
+    if _not_modified(self.headers, etag, last_modified):         # ★ v1.5：命中 ⇒ 304（零 body）
+        self._send_not_modified(etag, last_modified,
+                                varies_on_host=varies_on_host)
+        return
     self._send_text(200, 'application/rss+xml; charset=utf-8', xml,
-                    varies_on_host=not PUBLIC_BASE_URL, write_body=write_body)
+                    varies_on_host=varies_on_host, write_body=write_body,
+                    etag=etag, last_modified=last_modified)       # ★ v1.5：200 带校验器
 ```
+
+> **304 节省的是响应体，不保证省上游回源**：feed 条目在 `cache_policy('feed')['ttl']` 内命中 ⇒ 用缓存 xml 算 ETag，零上游；TTL 到期 ⇒ 仍回源重生成（R1 关键路径：内容未变 ⇒ 规范化体不变 ⇒ ETag 不变 ⇒ **304**），此时省的是 ~37KB body 而非上游请求。这是"缓存 TTL 管上游新鲜度、ETag 管客户端带宽"的职责划分（BR-SRV-37）。
+>
+> **降级路径与 304（★ v1.6 / C1 修正措辞）**：`fetch_func` 抛异常 ⇒ `_guard` 返回 `(error_xml, None)`；`last_modified=None` 使 **IMS 不可评估**（永不因 IMS 得 304）。error feed 的 ETag 由 `error_xml` 规范化后派生——`pubDate` 现已被 canonical 投影剔除，故**同一错误表示**的重复请求会得到**相同 ETag**（客户端带该 ETag 时 ⇒ **304**，属"同一表示的条件命中"，语义正确；v1.5 曾以 `pubDate=formatdate(None)` 每次变化解释"不会 304"，该解释在 C1 后**不再成立**）。**关键约束**：降级 feed 的 ETag **不得与成功 feed 的 ETag 混淆**（两者内容不同 ⇒ 哈希不同；客户端持成功体旧 ETag 时降级请求 ⇒ **200** 带回诊断 feed）；**不得**给降级体挂旧条目的 `time`（否则会把陈旧时间冒充当前表示的 `Last-Modified`）。**`error_xml` 的生成仍逐字保留 `formatdate(None)`**（诊断用途，不影响 ETag）。
+
+**`<ttl>` 生成（★ v1.5；`utils.py` 无独立详设，落点在此）**
+
+```python
+# server.py（handler 侧，6 处调用点 / 5 个 handler）：ttl 由 feed 缓存口径派生，单位为分钟
+def _feed_ttl_minutes():
+    ttl = cache_policy('feed')['ttl']            # 盘中 30 / 非盘中 180
+    return max(1, (ttl + 59) // 60)              # 30→1，180→3（RSS 2.0 要求整数分钟）
+
+
+def handle_cls_telegraph(feed_url=None):
+    ...
+    return generate_rss('财联社电报', 'https://www.cls.cn/telegraph',
+                        '财联社实时快讯', parse_cls_items(data),
+                        feed_url=feed_url, ttl=_feed_ttl_minutes())   # ★ v1.5
+
+# utils.py（唯一生成点；ttl=None ⇒ 不输出该元素，既有调用点零改动）
+def generate_rss(title, link, description, items, feed_url=None, ttl=None):
+    xml = (f'<?xml version="1.0" encoding="UTF-8"?>\n'
+           f'<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">\n'
+           f'<channel>\n'
+           f'<title>{escape_xml(title)}</title>\n'
+           f'<link>{escape_xml(link)}</link>\n'
+           f'<description>{escape_xml(description)}</description>\n'
+           f'<lastBuildDate>{formatdate(timeval=None, localtime=False, usegmt=True)}</lastBuildDate>\n')
+    # ★ v1.6 / C7#12（P2-07）：RSS 2.0 要求正整数；ttl<=0（如直调 ttl=0）⇒ 不输出
+    if ttl is not None and int(ttl) > 0:                   # 位置 = lastBuildDate 之后、atom:link 之前
+        xml += f'<ttl>{int(ttl)}</ttl>\n'
+    if feed_url:
+        xml += (f'<atom:link href="{escape_xml(feed_url)}" rel="self" '
+                'type="application/rss+xml"/>\n')
+    for item in items:
+        ...                                                # 逐字保留
+    return xml
+```
+
+> `generate_error_rss` **不传** `ttl` ⇒ 降级 feed 无 `<ttl>`（短生命周期、不承诺缓存间隔）。`<ttl>` 从生成到 ETag 规范化的关系见 `_feed_etag`（被剔除）。
+>
+> **eastmoney 的两个 `<ttl>` 出口（★ v1.8 / D-2）**：`handle_eastmoney_kuaixun` 有**两个** `generate_rss(...)` 站点——① 正则无匹配时的「空 feed」提前返回（`server.py:101-103`）；② 常规返回（`server.py:120-122`）。两处**均**传 `ttl=_feed_ttl_minutes()`，使该罕见路径与常规路径的 feed 表示一致（评审 SIDE-EFFECT #4 已确认该选择**正确**；`<ttl>` 本就被 canonical 投影剔除 ⇒ 不影响 ETag）。故本模块 `<ttl>` 调用点为 **6 处 / 5 个 handler**（v1.5 起的「5 处」口径已更正）。
 
 ### 5.5 外部上游扇出（`_fetch_concurrent`）+ plate stagger + longhu GBK
 
@@ -1405,7 +1605,8 @@ def _accepts_gzip(header):                                               # ★ v
 
 
 def _send_text(self, status_code, content_type, body, cache=True,
-               varies_on_host=False, write_body=True):                   # ★ v1.2 增 varies_on_host
+               varies_on_host=False, write_body=True,
+               etag=None, last_modified=None):                 # ★ v1.2 增 varies_on_host；★ v1.5 增 etag/last_modified
     body_bytes = body.encode('utf-8')
     gzipped = False
     # ★ v1.4：大响应且客户端接受 ⇒ gzip（level=1，CPU 优先；334KB JSON ≈10× 缩减）
@@ -1416,6 +1617,11 @@ def _send_text(self, status_code, content_type, body, cache=True,
     self.send_response(status_code)
     self.send_header('Content-Type', content_type)
     self.send_header('Content-Length', str(len(body_bytes)))
+    if etag is not None:                                        # ★ v1.5：校验器（仅 RSS 200 传）
+        self.send_header('ETag', etag)
+    if last_modified is not None:                               # ★ v1.5：有缓存条目才发
+        self.send_header('Last-Modified',
+                         formatdate(last_modified, localtime=False, usegmt=True))
     vary_parts = []
     if gzipped:
         self.send_header('Content-Encoding', 'gzip')
@@ -1432,6 +1638,30 @@ def _send_text(self, status_code, content_type, body, cache=True,
     self.end_headers()
     if write_body:
         self.wfile.write(body_bytes)
+
+
+def _send_not_modified(self, etag, last_modified, varies_on_host=False):   # ★ v1.5（BR-SRV-41）
+    """304：**无 body / 无 Content-Encoding / 无 Content-Length / 无 Content-Type**。
+
+    RFC 9110 §15.4.5：304 由头部结束即终止，不得含内容。**不得复用 `_send_text`**
+    ——后者总会计算 gzip 并写 Content-Length/Content-Type，一个分支失误就会给
+    304 带上体或 `Content-Encoding`。Cache-Control/Vary 必须与 200 同值，否则
+    共享缓存会按 200 的语义缓存 304 的元数据。
+    """
+    self.send_response(304)
+    self.send_header('ETag', etag)                              # 必发（与 200 同一弱标签）
+    if last_modified is not None:                               # 与 200 一致：有则发
+        self.send_header('Last-Modified',
+                         formatdate(last_modified, localtime=False, usegmt=True))
+    scope = 'private' if varies_on_host else 'public'            # 与 200 同值来源
+    self.send_header('Cache-Control', f'{scope}, max-age={self._cache_age()}')
+    vary_parts = []
+    if varies_on_host:
+        vary_parts.append(_BASE_URL_VARY)
+    vary_parts.append('Accept-Encoding')                         # 200（cache=True）恒含 ⇒ 304 同
+    self.send_header('Vary', ', '.join(vary_parts))
+    self.end_headers()
+    # 不写 wfile、不发 Content-*、不 gzip、不写 feed 缓存（BR-SRV-41）
 
 def _send_json(self, data, write_body=True, cache=True):                 # ★ v1.3：无 status（恒 200）
     self._send_text(200, 'application/json; charset=utf-8',
@@ -1455,6 +1685,27 @@ def _send_error(self, msg, write_body=True):                             # ★ �
                     cache=False, write_body=write_body)
 ```
 
+> ★ **v1.8 / P2-3（如实记录实现现状 · 评审 CR-RSS-20260918-001 P2-3）**：`Cache-Control`（`{private|public}, max-age={_cache_age()}`）与 `Vary` 的构造在 **`_send_text`（200 路径，见上）** 与 **`_send_not_modified`（304 路径，见上）** **各写一份**（约 4 行同源）——此即**实现现状**，**非设计变更**（**不抽公共函数、不改设计**）。BR-SRV-41 硬要求「304 与同请求 200 同值」，两份实现存在「未来单侧改动」的漂移面；§8 **`SRV-T62`** 是该漂移面的**兜底断言**：对**同一请求**先取 200、再带其 `ETag` 取 304，**逐头 diff** 两侧 `ETag`/`Last-Modified`/`Cache-Control`/`Vary` 必须**完全相同**（**不得**两侧各自硬编码期望值 ⇒ 防「两份头构造逻辑同时漂移」）。可选重构（抽 `_cache_headers(varies_on_host) -> (cc, vary)` 唯一来源供两处共用）由编排层决定，本版**不落**。
+
+**RSS 条件请求响应头清单（★ v1.5，实测基线为锚）**
+
+| 响应 | 头部 | 值 / 规则 |
+|------|------|----------|
+| **200**（5 RSS `GET`/`HEAD`） | `Content-Type` | `application/rss+xml; charset=utf-8`（不变） |
+| | `Content-Length` | 实际发送字节数（HEAD 亦发，体不写——不变） |
+| | `ETag` | **恒发**（★ v1.5）：`W/"<sha256-hex>"`，见 BR-SRV-37 |
+| | `Last-Modified` | **有缓存条目时发**（★ v1.5）：`formatdate(entry['time'], usegmt=True)`；降级体不发 |
+| | `Cache-Control` | `{private\|public}, max-age={_cache_age()}`（`news_url` 域：盘 30 / 非盘 180）；`private` ⟺ `PUBLIC_BASE_URL` 未设（不变）★ 实测当前为 `private, max-age=30` |
+| | `Vary` | `PUBLIC_BASE_URL` 未设 ⇒ `Host, X-Forwarded-Host, X-Forwarded-Proto, Accept-Encoding`；设了 ⇒ `Accept-Encoding`（不变）★ 实测当前为四元组 |
+| | `Content-Encoding` | `gzip` 当且仅当 `len(body) >= GZIP_MIN_BYTES(1024)` 且 `_accepts_gzip`（不变） |
+| **304**（条件命中） | `ETag` | **必发**（与 200 同一弱标签） |
+| | `Last-Modified` | 有值即发（与 200 一致） |
+| | `Cache-Control` | **与 200 同值**（含 `private`/`public` 判定） |
+| | `Vary` | **与 200 同值**（Host 三件套 + `Accept-Encoding`） |
+| | `Content-Type` / `Content-Length` / `Content-Encoding` | **一律不发**；**无 body**（不 gzip、不写体、不写缓存） |
+
+> **可断言（SRV-T49/T55）**：`PUBLIC_BASE_URL` 未设时，304 仍为 `Cache-Control: private, max-age=30` + `Vary: Host, X-Forwarded-Host, X-Forwarded-Proto, Accept-Encoding`——**不得因"无 body"而省略反投毒头**（否则共享缓存会把按 Host 变的 feed 串号）。
+
 **`_cache_age` 行为变更登记**（值来源由 `_trading_tiers()[tier]` 改 `cache_policy(domain)['ttl']`）
 
 | path | 现状 max-age | 目标 max-age（盘 / 非盘） | 说明 |
@@ -1465,7 +1716,7 @@ def _send_error(self, msg, write_body=True):                             # ★ �
 | `/cls/hotplate` `/cls/plate` | L2（12 / 120） | 12 / 120（不变） | plate 基值（stagger 不进 `max-age`，现状亦然） |
 | `/market/margin` | L4（300） | **600 / 600**（变更） | 与 margin 域 TTL 对齐 |
 | `/ths/longhu` | L4（300） | 300（不变） | longhu 域 |
-| 5 RSS | L3（30 / 180） | 30 / 180（不变） | news_url 域 |
+| 5 RSS | L3（30 / 180） | 30 / 180（不变） | news_url 域；★ v1.5：同一 max-age 亦用于 304（与 200 同值），并新增 `ETag`/`Last-Modified` 校验器 |
 | **面板 4**（`/finance/market` `/finance/timeline` `/quotation/market` `/market/timeline`） | L4（300） | **8 / 120**（★ v1.2 变更） | 注册到 `quote` 域（实时行情面，**不再**落 300s 兜底） |
 | `/healthz` / `/` / `/opml.xml` | L4（300） | 300（不变） | `_DEFAULT_AGE_DOMAIN='f10'`（L4 恒 300）；未登记路径现仅此三项 |
 | 请求派生 Host（`PUBLIC_BASE_URL` 未设）的 feed/opml | `public` | **`private` + `Vary`**（★ v1.2） | S2-3 防共享缓存串号 |
@@ -1535,6 +1786,7 @@ def _send_error(self, msg, write_body=True):                             # ★ �
 5. **feed 双检不可省**：并发 N 请求在 miss 窗口只产生 1 次回源（可用回源计数白盒断言）。
 6. **单请求上界（AC-E2 ≤15s）**：REST 批量 ≤15s（stock_api 预算）；`/cls/hotplate`、`/cls/plate` 的 3 段经 `_fetch_concurrent` **≤3 并发** ⇒ 耗时 ≤ `max(单次取数)` ≤ `REQUEST_TIMEOUT=10s`；`/ths/longhu` 的 2 URL **并发** ⇒ ≤10s（修 P1-2，`§10#10` 的 AC 归属已更正为 **E2**）；★ v1.2：整轮扇出受 **`_FANOUT_WAIT_BUDGET=REQUEST_TIMEOUT`** 界定（共享池被占时单请求也不会拖到 ~190s，超期项 `cancel()` + `FetchError('upstream_timeout')`）；面板 CDP ≤8s/次（cdp_engine）。
 7. **压缩与缓存协商一致（v1.4）**：`Content-Encoding: gzip` 当且仅当 `len(body_bytes) >= config.GZIP_MIN_BYTES` 且 `_accepts_gzip(Accept-Encoding)` 为真；**`Vary: Accept-Encoding` 在 `gzipped or cache` 时必发**——可断言：`cache=True` 的任意响应、以及 `cache=False` 的 gzip 响应都含该头，`cache=False` 且未 gzip 的响应不含。`gzip;q=0` 的请求**不压缩**（`_accepts_gzip` 返回 False）。
+8. **条件请求语义一致（★ v1.5；★ v1.6 / C1 双向化 + C4 措辞收敛，可断言）**：① 304 当且仅当 **存在** `If-None-Match`/`If-Modified-Since` **且**条件命中；② 304 **无 body、无 `Content-Encoding`、无 `Content-Length`、无 `Content-Type`**，**必含 `ETag` + `Cache-Control` + `Vary`**（与同请求 200 同值）；③ **ETag 由规范化后的内容决定（★ v1.6 / C1）**——`<lastBuildDate>`/`<ttl>`/`<pubDate>` 的**内容**被剔除（前二者 `count=1`、`pubDate` 全量）；同一 feed 内容（除这三项外）在 TTL 到期重生成后 ETag **逐字节相同**（R1 正向：**不误 200**），**除这三项外的任一字节变化则 ETag 必不同**（反向：**不误 304**；★ P3a-r2 / P2-b 限定语显式化）；④ `If-None-Match` **存在时 IMS 被完全忽略**（优先级）；⑤ 非法/不可解析日期头（含 `dt.timestamp()` 越界；异常面 = `TypeError`/`ValueError`/`OverflowError`/`OSError`）⇒ **200**（绝不 400/500）——**已覆盖 stdlib 已知异常面**（★ v1.6 / C4）；⑥ 304 **不触发 `feed_cache_put`**（回源计数不变，可用白盒断言）；⑦ 降级 feed（`fetch_func` 抛异常）⇒ `last_modified=None`（IMS **不可评估**）、其 ETag 与成功体**不混淆**（内容不同 ⇒ 哈希不同）；同一错误表示重放可得 304（属**同一表示**的条件命中，语义正确，★ v1.6 / C1 修正 v1.5 的 `pubDate` 解释）。
 
 ### 6.3 异常兜底范围声明
 
@@ -1568,7 +1820,7 @@ def _send_error(self, msg, write_body=True):                             # ★ �
 ### 7.2 锁序纪律（硬约束）
 
 1. **`_feed_fetch_locks_lock` → per-path lock**：建锁表后**立即释放**才进 per-path 锁；**禁止**持有 per-path 锁时再取 `_feed_fetch_locks_lock`。
-2. **per-path 锁内不持有任何 cache 内部锁**：`feed_cache_get`/`feed_cache_put` 各自在 `_feed_cache_lock` 内完成并**在返回前释放**（`cache.md` §7.2#4）。
+2. **per-path 锁内不持有任何 cache 内部锁**：`feed_cache_get_entry`/`feed_cache_put` 各自在 `_feed_cache_lock` 内完成并**在返回前释放**（`cache.md` §7.2#4）。★ v1.5：条件请求**不引入新锁**——ETag/条件判定为纯函数（`re`+`hashlib`+`email.utils`），`_not_modified` 只读 `self.headers`；`feed_cache_get_entry` 复用既有 `_feed_cache_lock`。
 3. **`_coordinator → 无`**：`_health_executor_lock` / `_health_last_lock` / `_health_inflight_lock` / `_fanout_lock` / `_HealthBatch._lock` 各锁**互不嵌套**，且**不在**持有时调用任何其它模块（`metrics` 例外：`metrics._lock` 是全局最内层，允许被持有 → 见 §7.3）。
    - `_HealthBatch.task_done` 的 `_release_health_slot()` 在**释放 `_HealthBatch._lock` 之后**调用（`with` 块外），⇒ 不出现 `_HealthBatch._lock → _health_inflight_lock` 嵌套。
 4. **healthz 专用执行器与主池物理隔离**：healthz 的 5 个 worker **绝不**执行任何业务 handler（只执行 `_check_one_feed`），且其 RSS handler 走 `fetch_json`（自带 `_cache_lock`/`_neg_lock`，网络 IO 不持锁）。
@@ -1653,6 +1905,28 @@ def _send_error(self, msg, write_body=True):                             # ★ �
 | **SRV-T43** `_cache_age` 面板域（v1.2） | 4 面板路径的 `max-age == cache_policy('quote')['ttl']`（8/120），**非** 300；`_cache_age` 用 `urlparse`：absolute-form 请求行解析出正确 path | S2-3 / A3 |
 | **SRV-T44** gzip 协商（v1.4） | ① `Accept-Encoding: gzip` + 大响应（≥1024B）⇒ `Content-Encoding: gzip` 且体可 `gzip.decompress` 还原；② `gzip;q=0` ⇒ **不压缩**（无 `Content-Encoding`）；③ `GZIP` / `*` ⇒ 压缩；④ 小响应（<1024B）⇒ 不压缩；⑤ `cache=True` 响应恒含 `Vary: Accept-Encoding`；⑥ `cache=False` + gzip 响应**亦**含该头，`cache=False` + 未压缩则不含 | E1 / S1 |
 | **SRV-T45** `main()` 预热线程（v1.4） | patch `warm_transport` 计数 ⇒ `main()` 启动即调用一次（daemon 线程内）；`warm_transport` 抛异常 / 上游不可达 ⇒ **不影响**启动与 `/healthz`（静默、总函数） | 冷启动 / S9 |
+| **SRV-T46** 首次 200 带 ETag/Last-Modified（v1.5） | 冷路径请求 `/cls/telegraph`（patch handler 返回固定 XML）⇒ `200`；响应含 `ETag`（形如 `W/"<64 hex>"`）与 `Last-Modified`（`formatdate` 可被 `parsedate_to_datetime` 解析）；`feed_cache_put` 被调 1 次 | 本专项 R1 / A8 |
+| **SRV-T47** 同 ETag 重放 ⇒ 304 零 body/无 Content-Encoding **+ 幂等重放**（v1.5；★ v1.6 / C7#6 扩） | 第二次请求带 `If-None-Match: <上一步 ETag>` ⇒ **304**；断言 **无 body**（`self.wfile` 未写 / socket 读到 0 字节）、**无 `Content-Encoding`**、**无 `Content-Length`**、**无 `Content-Type`**；含 `ETag` + `Cache-Control` + `Vary`；`feed_cache_put` **未被再次调用**。★ **幂等重放**：带**同一 ETag 连发两次** ⇒ **两次均 304**，且 `feed_cache_put` 计数**仍为 1**（首次回源那次）、`Last-Modified` 两次**相同**（304 不写缓存 ⇒ 时间源不被刷新） | 本专项 R1 / 304 语义 |
+| **SRV-T48** `If-None-Match: *`（v1.5；★ v1.6 / C7#5 扩负向） | 请求带 `If-None-Match: *` ⇒ **304**（`*` 命中任何当前表示）；`If-None-Match: "nope"` ⇒ **200** 且**体为完整 RSS**（非空、`ET.fromstring` 可解析、item 数 == 上游条数、`ETag` 为新值） | RFC 9110 §13.1.2 |
+| **SRV-T49** 多值列表 + 大小写/空白（v1.5；★ v1.6 / C7#5 扩负向） | `If-None-Match: "a", W/"b", <当前 ETag 去 W/>` ⇒ 304（任一项命中）；`If-None-Match: "a","b"` ⇒ **200 且体为完整 RSS**（非空、item 数正确、`ETag` 为新值） | RFC 9110 §13.1.2 |
+| **SRV-T50** `W/` 弱标签（v1.5；★ v1.6 / C7#13 扩小写） | 客户端发**强** `"<当前 opaque>"` 与 **弱** `W/"<当前 opaque>"` ⇒ **均 304**（INM 用弱比较）；服务端标签为弱 `W/"…"`；★ **小写 `w/"<当前 opaque>"` ⇒ 200**（弱指示符**大小写敏感**，只认字面 `W/`，与 BR-SRV-39 修正后措辞一致） | RFC 9110 §8.8.3.2 |
+| **SRV-T51** `If-Modified-Since` 未来/过去 **+ 等值边界**（v1.5；★ v1.6 / C7#4 扩边界） | 仅带 `If-Modified-Since`（无 INM）：① 未来日期（`now+3600`，`formatdate`）⇒ **304**；② 早于 `entry['time']` 的日期（`now-3600`）⇒ **200**（含完整体）；③ **★ 等值边界**：`If-Modified-Since` == 上一步响应发出的 `Last-Modified`（**同一秒**，客户端回显的常见路径）⇒ **304**（`<=` 成立） | RFC 9110 §13.1.3 |
+| **SRV-T52** **channel 级内容未变跨 TTL 重生成 ⇒ ETag 不变 ⇒ 304（R1 关键）**（v1.5；★ v1.6 / C1 标注覆盖边界） | 用同一组 items 调 `generate_rss` **两次**（中间跨过 `_feed_cache_lock`，`lastBuildDate` 因 `timeval=None` 不同）⇒ `_feed_etag(x1) == _feed_etag(x2)`；端到端：patch `cache_policy('feed')['ttl']=0` 强制过期 → 第二次带旧 ETag ⇒ 仍 **304**；`<ttl>` 从 1 切到 3 时 ETag **亦不变**（ttl 被剔除）。⚠️ **覆盖边界（C1）**：本用例复用同一 items 直调 `generate_rss`，**结构上检测不到 item 级 `<pubDate>` 的"当前时间回落"** ⇒ 必须由 **`SRV-T52b`** 补齐（handler 层缺失/非法时间字段） | **本专项 R1**（防"裸 body 哈希"回归；channel 级） |
+| **SRV-T52b** ★ **item 级 `pubDate` 哨兵回归（handler 层，跨 TTL ⇒ ETag 相同 ⇒ 304）**（★ v1.6 / C1 / C7#2；★ **P3a-r2 / P2-a 用例定义细化（防假绿）**） | **防假绿前置（P2-a 核心）**：`formatdate(timeval=None)` 与 `int(time.time())` **均为秒级** ⇒ 同一秒内两次回落值**相同** ⇒ **不 patch 时钟时，即便不做 C1 修复本用例也会绿**（重演 v1.5 `SRV-T52` 的假绿）。**① 必须 patch 时钟**：受控源（`mock.patch` 目标 = `srv.formatdate` / `srv.time.time` / `utils.formatdate`，或等价）令两次回落**确定**取 **`t`** 与 **`t+1`**（**跨秒**）。**② 红/绿方向声明**：若 `pubDate` 仍在哈希区 ⇒ 两次 `generate_rss` 的 ETag **必不同** ⇒ 断言 `_feed_etag(x1) == _feed_etag(x2)` **必须失败（用例必须红）**；C1 修复后（`pubDate` 被 canonical 投影剔除）⇒ **必绿**——即该用例对 C1 具**真实捕获力**。**③ 纯函数断言（不依赖时钟，直接锁死投影规则）**：手工构造两个**仅 `<pubDate>` 值不同**、其余（channel `title`/`link`/`description`/`lastBuildDate`/`ttl`/`<atom:link>` + item `guid`/`title`/`link`/`description`）**逐字节相同**的 XML `x1`/`x2` ⇒ `_feed_etag(x1) == _feed_etag(x2)`（`count=0` **全量**剔除的直接回归网）。**④ handler 层（三门 feed 覆盖保持不变）**：在 feed handler 层对 3 个 feed 分别 patch 上游响应**缺失/非法时间字段**：eastmoney **`showtime`**、ths **`ctime`**、jin10 **`time`**（参数化一条或各一条），配合 ① 的时钟 ⇒ `generate_rss` 内部回落确定取 `t`/`t+1` ⇒ 断言 `_feed_etag(x1) == _feed_etag(x2)`（**剔除 pubDate 后相同**）⇒ 端到端带旧 ETag ⇒ **304**。**负向**：`pubDate` 变化**伴随**真内容（`guid`/`title`）变化时仍应 200（复用 T53）。**⑤ 验收证据资格**：**未控制时钟时不得作为 C1 的验收证据** | **本专项 R1**（P1-01 回归网；v1.5 的 T52 结构上假绿；P2-a 防"秒级回落同值"假绿） |
+| **SRV-T53** 内容变化 ⇒ ETag 变化 ⇒ 200（v1.5） | 新增/修改一条 item（guid 不变、仅 title 变）或 `<atom:link>`（不同 Host）⇒ `_feed_etag` **不同**；端到端带旧 ETag ⇒ **200**（体含新内容）。**证明 ETag 覆盖 channel 字段与 feed_url，不是仅 guid 序列** | 本专项 R1 |
+| **SRV-T54** `HEAD` 的 304（v1.5；★ v1.6 / C7#9 扩 IMS） | `do_HEAD` + `If-None-Match: <当前>` ⇒ **304**，头与 GET 304 相同（`ETag`/`Cache-Control`/`Vary`），无 body；无头 `HEAD` ⇒ 200（含 `Content-Length`，不写体）；★ **`HEAD` + 仅 `If-Modified-Since`（未来日期）⇒ 304**（两分支交叉：`write_body` 不参与条件判定，`_send_not_modified` 从不写体） | RFC 9110 §9.3.2 / BR-SRV-41 |
+| **SRV-T55** `PUBLIC_BASE_URL` 未设时 304 仍 `private` + `Vary: Host…`（v1.5） | patch `PUBLIC_BASE_URL=''` + 合法 `Host` ⇒ 304 含 `Cache-Control: private, max-age=30` 与 `Vary: Host, X-Forwarded-Host, X-Forwarded-Proto, Accept-Encoding`；设了 `PUBLIC_BASE_URL` ⇒ `public` 且 `Vary: Accept-Encoding` | S2-3（反投毒不因 304 失效） |
+| **SRV-T56** 非法日期头 ⇒ 200（v1.5） | `If-Modified-Since: not-a-date` / `If-Modified-Since: 99` / 空值 ⇒ **200**（绝不 400/500），且无异常日志冒泡；`If-None-Match` 存在 + 非法 IMS ⇒ 只看 INM（优先级），INM 命中 ⇒ 304、不命中 ⇒ 200 | S1 / RFC 9110 |
+| **SRV-T56b** ★ **INM 不匹配 ∧ IMS 本会命中 ⇒ 必须 200**（★ v1.6 / C7#1 负向断言） | 构造 `If-None-Match: "nope"`（**不匹配**）**同时** `If-Modified-Since: <未来日期>`（**单独本会命中 ⇒ 304**）⇒ 断言 **200**（体为完整 RSS，非 304、非空）。**证明 INM 的优先性是对 IMS 的完全忽略**（RFC 9110 §13.1.3 最强断言）；T56 只用**非法** IMS 验证优先级，未证明"忽略一个本来有效的 IMS" | RFC 9110 §13.1.3 / **本专项 R1 第 4 项不可妥协语义** |
+| **SRV-T57** gzip 请求下 304 无 `Content-Encoding` **+ ETag 编码无关**（v1.5；★ v1.6 / C7#8 扩核心推断） | `Accept-Encoding: gzip` + `If-None-Match: <当前>` ⇒ **304** 且 **无 `Content-Encoding`**、无 body；断言 `_accepts_gzip` 结果为 True（即"客户端能解 gzip"不改变 304 组成）；同请求去掉条件头 ⇒ 200 且（≥1024B 时）`Content-Encoding: gzip` 可解压还原。★ **编码无关**：对同一 feed 分别以 `Accept-Encoding: gzip` 与 `identity` 请求 ⇒ **两次 200 的 `ETag` 逐字相同**（弱标签在 gzip 之前由未压缩 XML 派生）；持 **gzip 时代**拿到的 ETag 重放 ⇒ **304**（各客户端复用自身编码副本） | E1 / BR-SRV-41 / **BR-SRV-37 编码无关核心推断** |
+| **SRV-T58** `<ttl>` 输出与位置 **+ 边界 + 值域护栏**（v1.5；★ v1.6 / C7#11·#12 扩） | `generate_rss(..., ttl=1)` ⇒ XML 含 `<ttl>1</ttl>` 且位于 `</lastBuildDate>` 之后、`<atom:link` 之前；`ttl=None` ⇒ **无** `<ttl>` 元素。★ **`_feed_ttl_minutes()` 边界**：patch `cache_policy('feed')['ttl']` = `0/负/59/60/61/180/181` ⇒ `1/1/1/1/2/3/4`。★ **`generate_rss(ttl=0)` / `ttl<0` ⇒ 不得输出 `<ttl>0</ttl>`**（RSS 2.0 要求正整数；`ttl is not None and int(ttl) > 0` 护栏） | RSS 2.0 / BR-SRV-43 / **P2-07** |
+| **SRV-T59** 降级不误 304 **+ 仅 IMS + 降级**（v1.5；★ v1.6 / C1 修正 + C7#7 扩） | ① patch `fetch_func` 抛异常、客户端带**刚拿到的成功 ETag** ⇒ **200** error feed（`_errors`/诊断 item），其 ETag 与成功体**不混淆**；② `Last-Modified` **不出现**（`last_modified=None`）；③ **★ 仅带 `If-Modified-Since`（未来日期）+ 降级 ⇒ 200 且响应无 `Last-Modified`**（`last_modified=None` 使 IMS 不可评估，BR-SRV-40）；④ **同一错误表示重放**（成功体旧 ETag 已换成 error feed 当前 ETag 再发）⇒ **304**（同一表示的条件命中，语义正确）。⚠️ **v1.5 的"连续两次失败 ⇒ ETag 因 `pubDate` 变化而不同"在 C1 后不再成立**（pubDate 已被 canonical 投影剔除），已按此改写 | S1 / BR-SRV-38 / **BR-SRV-37** |
+| **SRV-T60** `feed_cache_get_entry` 契约（v1.5） | 冷 cache ⇒ `None`；`feed_cache_put('/p','<x/>',30)` 后 ⇒ 返回 dict 且 `entry['xml']=='<x/>'`、`entry['time']` 为 float；TTL 过期 ⇒ `None`；**返回浅拷贝**（改返回值不影响后续 `feed_cache_get_entry`）；`feed_cache_get('/p')` 仍返回 `'<x/>'`（向后兼容，`test_cache.py` 全绿） | `cache.md` BR-CACHE-32 / 兼容 |
+| **SRV-T61** ★ **范围纪律负向断言：`/opml.xml`、`/`、JSON 端点带条件头 ⇒ 恒 200 全量**（★ v1.6 / C7#3） | 分别对 `/opml.xml`、`/`、任一 JSON 端点（如 `/market/margin?market=99`、`/healthz`）带 `If-None-Match: <任意>` / `If-Modified-Since: <未来日期>` ⇒ **恒 200 全量**（**绝不 304**），且这些响应**不含 `ETag`**（BR-SRV-36/44）；`/` 与 `/opml.xml` 亦不得因条件头改变体 | BR-SRV-36 / **BR-SRV-44** / 范围纪律（**v1.5 零覆盖**） |
+| **SRV-T62** ★ **200 与 304 的头逐字一致（diff 而非两侧硬编码）**（★ v1.6 / C7#10） | 对**同一请求**先取 200、再带该 `ETag` 取 304 ⇒ 逐头 **diff** 两侧响应：`ETag`/`Last-Modified`/`Cache-Control`/`Vary` **完全相同**；304 独有差异 = **无** `Content-Type`/`Content-Length`/`Content-Encoding` **且** 无 body。**不得**两侧各自硬编码期望值（防两份头构造逻辑同时漂移）；覆盖 `PUBLIC_BASE_URL` 设/未设两种 | BR-SRV-41 / BR-SRV-42（`_send_text` 与 `_send_not_modified` 交叉校验） |
+
+> ★ **v1.8 编号/实现映射核对（P7b 顺带）**：本表**用例编号计数 = 64 条不变**。实现把 **`SRV-T52b`** 拆为 **5 个 unittest 方法**（`test_t52b_pure_function_only_pubdate_differs_same_etag` / `test_t52b_handler_eastmoney_missing_showtime_clocked` / `test_t52b_handler_ths_invalid_ctime_clocked` / `test_t52b_handler_jin10_missing_time_clocked` / `test_t52b_end_to_end_cross_ttl_304`），属**方法粒度**拆分，**不改变编号计数**；`SRV-T61` = `test_t61_scope_negative_static_and_json_never_304`，`SRV-T62` = `test_t62_200_and_304_headers_diff_verbatim`。
+
 
 ## 9. AC 追溯矩阵
 
@@ -1688,6 +1962,9 @@ def _send_error(self, msg, write_body=True):                             # ★ �
 | `request_queue_size = LISTEN_BACKLOG`（§2.7） | E1（突发连接） |
 | 响应 gzip 协商 + `Vary: Accept-Encoding`（BR-SRV-34 / §1.1#11 / §5.8） | **E1**（网络时间） / S1 |
 | `main()` 预热 `warm_transport`（BR-SRV-35 / §1.1#12 / §5.9） | 冷启动（与 E1/E2 相关；观测项） |
+| **RSS 条件请求 ETag/Last-Modified/304（v1.5 / BR-SRV-36..44 / §5.4 / §5.8）** | **本专项 R1**（下游轮询带宽：内容未变 ⇒ 304 零 body）/ **A8**（feed 缓存同源）/ **E1**（响应路径）/ S1（非法头不冒泡） |
+| **`_feed_etag` 规范化体弱校验器（BR-SRV-37；★ v1.6 / C1 含 item 级 `<pubDate>` 全量剔除）** | **本专项 R1**（防"裸 body 哈希 ⇒ 永远 200"静默失效；**双向不变式**：不误 200 ∧ 不误 304） |
+| **`feed_cache_get_entry` 访问器（BR-CACHE-32 / §2.5a）** | A8（Last-Modified 时间源）/ 兼容（`feed_cache_get` 签名不变） |
 
 > **AC 覆盖核对**：本模块承载 **S1/A5/A8/A9/E2/E8/E9/S4/S5/S7/S8/S10** 共 12 条（v1.1 新增 **E2**：server 自有的 hotplate/plate/longhu 单请求上界）；`E1/E3/E4` 由基础层/数据层承载（本模块仅提供 `_cache_age` 与序列化路径）；`E6` 由 config/stock_api 承载（本模块提供 plate 侧派生）；`A3` 由 stock_api 承载（本模块提供 feed 侧同源）。
 
@@ -1728,6 +2005,12 @@ def _send_error(self, msg, write_body=True):                             # ★ �
 | 29 | **N1 回退：业务端点降级恢复 `200 + error 体`**（v1.3） | AC-A5 只定义"上游失败 → 200 + error 客体"；v1.2 的 error-only ⇒ 503 属**超集变更** | `_send_json_shape` 恒 `_send_json(payload)`（**200**）；**`_json_payload_has_data` 删除**；**`_send_json` 去掉 `status` 形参**；**`http_503_total` 计数点 4→3**（`_reject_503` / `stream._serve_sse` / `/healthz`）；降级体 `cache=cache` ⇒ **按域 TTL 可缓存** | 编排层裁决 N1：v1.2 改判 503 动摇了既有对外状态码契约，既有消费方按 200 解析；`/healthz` 已能承担可用性观测，业务端点无需第二个 503 语义（且 `/healthz` 的 503 属端点自身语义，**不构成业务端点先例**） |
 | 30 | **`_accepts_gzip` + 响应 gzip（v1.4）** | SAD §2.6/§4.3 未定义响应压缩 | `_accepts_gzip(header)` 按 RFC 9110 解析；`_send_text` 对 `≥ GZIP_MIN_BYTES(1024)` 且被接受的响应 `gzip.compress(level=GZIP_COMPRESSLEVEL=1)` + `Content-Encoding: gzip`；**`Vary: Accept-Encoding` 在 `gzipped or cache` 时必发** | 旧实现用子串匹配 ⇒ 对 `gzip;q=0`（明确拒绝）仍压缩、且漏掉大写 `GZIP`；共享缓存会把 gzip 体复用给不支持它的客户端。`GZIP_*` 为 `config` env（`config.md` §2.7） |
 | 31 | **`main()` 预热 `warm_transport`（v1.4）** | SAD §4.3 未定义进程启动传输预热 | 新增 daemon 线程 `warm_transport`（`HTTP_WARM_CONNECTIONS=1` / `HTTP_WARM_TIMEOUT=2.0`；主机由 `config.warm_hosts()` 从 URL 常量派生） | 冷进程首个 refresh 空连接池/空 DNS ⇒ 50 码 quote 扇出 ≈4.2s（> 0.8×tick 预算）；仅握手不发业务请求，不 gate 启动/`/healthz`（`config.md` §2.7 已登记 env） |
+| 32 | **`_feed_etag` 用"规范化体哈希 + 弱标记"（v1.5；★ v1.6 / C1 扩展 canonical 投影）** | SAD/PRD 未定义 ETag 派生；任务书明确**严禁裸 body 哈希** | `sha256` 于 **剔除 `<lastBuildDate>`（count=1）、`<ttl>`（count=1）与 `<pubDate>`（count=0 全量）内容后**的整串 XML，标记 `W/`（弱校验器） | `<lastBuildDate>=formatdate(timeval=None)` 每次重生成即变 ⇒ 裸哈希会使"TTL 到期但内容未变"也返回 200（**功能静默失效**，本专项第一风险）。★ **v1.6 / C1**：v1.5 漏掉 **item 级 `<pubDate>` 的"当前时间回落"**（`server.py:107` eastmoney `showtime` / `server.py:133` ths `ctime` / `utils.py:241` jin10 `time`）⇒ 3/5 feed 每次 TTL 到期重生成都换 ETag ⇒ **永远 200**（R1 只闭合一半）；item 有多条 ⇒ 必须**全量替换**（`count=0`，非 `count=1`）。item 身份由 `<guid>` 承载、`pubDate` 属上游元数据且有已知非确定性回落 ⇒ 剔除；其余任一字节（`guid`/`title`/`link`/`description`/channel 字段/feed_url）都进哈希 ⇒ **双向不变式成立**（不误 200 ∧ 不误 304）。因剔除了字节差异，按 RFC 9110 §8.8.3 该 ETag 语义上为**弱**，故必须带 `W/`。备选"仅由 guid 序列派生"被否：会漏掉 `<atom:link>`（请求派生 Host 写入）与 channel 字段，跨 Host 会误 304。**`<pubDate>` 权衡理由**见 BR-SRV-37 |
+| 33 | **ETag 覆盖 `<ttl>` 的取舍：剔除（v1.5；★ v1.6 / C3 补契约语义）** | RSS 2.0 `<ttl>` 未在既有设计中 | `<ttl>` 纳入生成（BR-SRV-43），但**从 ETag 规范化中剔除** | `<ttl>` 由 `cache_policy('feed')['ttl']` 派生，盘中/非盘切换（30↔180）会使其变化；若纳入 ETag，则内容未变也会在每日交易时段边界产生假 200（违反 R1）。★ **C3 契约语义（必须进 `API.md`）**：`<ttl>` 是**聚合器缓存提示、非时效保证**；**最小粒度 1 分钟**（`max(1, …)` 向上取整）；**推荐轮询 = `ETag` 条件请求优先、间隔 ≥30s**；**需 <60s 新鲜度请用 SSE（4s）**——`Cache-Control: max-age`（盘 30 / 非盘 180）是更强承诺。剔除 `<ttl>` 不会造成客户端误判（其语义已由 `Cache-Control` 与 `ETag` 承担） |
+| 34 | **`_get_or_fetch_feed` 返回 `(xml, last_modified)`（v1.5，内部签名变更）** | 任务书要求"如何同时拿到 xml + etag + 时间" | 内部方法返回 2-tuple；`_guard(shape='rss')` 成功/异常两路**同形状**（异常 → `(error_rss, None)`） | 单一查询（`feed_cache_get_entry`）同时得到 xml 与 `time`；避免"先 `feed_cache_get` 再另查条目"拾取降级态陈旧时间。**非对外契约**（对外仅 RSS body/头）；`tests/test_server_http.py` 的打桩目标须同步（§10.1） |
+| 35 | **`_send_text(..., etag=, last_modified=)` + 独立 `_send_not_modified`（v1.5）** | SAD/PRD 未定义响应头扩展 | 200 路径用 `_send_text` 的**纯新增可选形参**；304 路径用**独立方法** | 不把 304 塞进 `_send_text`：后者无条件计算 gzip/写 `Content-Length`/`Content-Type`，一个分支失误就会给 304 带体或 `Content-Encoding`。独立方法使"无 body / 无编码"成为结构性保证；200 的既有调用点因形参默认 `None` **零改动** |
+| 36 | **304 不发 `Content-Length`（v1.5；★ v1.6 / C6 补依据）** | RFC 9110 §15.4.5（304 不得含内容）+ **§8.6**（304 若携带 `Content-Length`，其值**必须等于**该资源 200 体的字节数） | **不发** `Content-Length`（也不发 `Content-Type`）；由 HTTP/1.0 短连接在响应头结束后**由 EOF 终止消息** | **裁决理由（三条实证）**：① **RFC 9110 §8.6 规定 304 若带 `Content-Length` 必须等于 200 体长** ⇒ 显式写 **`Content-Length: 0` 反而违规**（本服务 200 体是 ~37KB XML）；② 本服务 `RSSHandler` **未设 `protocol_version`** ⇒ **HTTP/1.0**（全仓 `protocol_version` 仅 `stream.py:1359` 属流端口既有实现），且 CPython `http.server` **仅在 `protocol_version >= 'HTTP/1.1'` 时才把客户端 `Connection: keep-alive` 视为持久连接** ⇒ **每响应后关连接、EOF 即消息边界**；③ RFC 9110 §6.3 明定 304/HEAD 恒以"头后首个空行"终止，与是否带 `Content-Length` 无关。⇒ **保持现设计**（不发而非写 0）。**登记该取舍**；若编排层为兼容异常客户端要求，可加钝化防御 `if self.request_version == 'HTTP/1.0': self.close_connection = True`（不改契约） |
+| 37 | **出范围：HTTP/1.1 keep-alive、`/opml.xml`、`/` 条件请求（v1.5）** | — | **仅登记，不实现**（BR-SRV-44） | `protocol_version` 变更波及全部端点的连接语义与线程池占用（`BoundedThreadPoolServer`/`max_inflight` 假设 HTTP/1.0 短连接），须独立评估；`/opml.xml`、`/` 无缓存条目时间源。**本轮不得顺带实现** |
 
 ---
 
@@ -1737,15 +2020,18 @@ def _send_error(self, msg, write_body=True):                             # ★ �
 - [x] §3 为 `yaml` 代码块（healthz schema / health 状态 / 路由与 shape / 服务类状态）
 - [x] 路由表精确：14 JSON（逐一列名 + shape）+ 5 RSS + `/` + `/opml.xml` + `/healthz`；无增删路径
 - [x] `_guard` 四 shape 语义与降级体逐一钉死；异常兜底范围（含显式排除项）声明
-- [x] 业务规则编号 BR-SRV-1..33，伪代码直接引用编号（BR-SRV-30/31 为 v1.1 新增；**v1.2 新增 5b/5c/8b/32/33**）
-- [x] 关键流程伪代码齐备：分发 / `_guard` / 批量截断 / feed 双检 / **`_fetch_concurrent` 扇出** / plate stagger / longhu GBK / healthz 准入（`_HealthBatch`） / 过载 503 / watchdog
-- [x] 错误处理矩阵（400/404/503/200-error/200-值域 + hotplate 全/部分分区）+ 降级分层 + 6 条可断言不变式
-- [x] 并发安全：锁清单 + 锁序（`_feed_fetch_locks_lock → per-path`；metrics 永远最内层）+ 热点开销 + 并发正确性依据
-- [x] 测试要点 **45 条**映射 PRD AC（v1.1 新增 T34/T35；v1.2 新增 T36–T43；**v1.4 新增 T44–T45**）；回归用例逐条列名（含 **2 条**跨模块交叉引用必改：见 §10.1）
-- [x] AC 追溯：S1/A5/A8/A9/**E2**/E8/E9/S4/S5/S7/S8/S10 主承载，A3/E6/A6 协同项已注明；**v1.2 增 S2-5/S2-3/P1-6**
-- [x] 与基础层/数据层接口逐项对齐（`cache_policy`/`feed_cache_get|put`/`build_batch_response`/`page_data`/`restart_window_snapshot`/`watchdog_restart_skip_reason`/`metrics`）
-- [x] 偏差 **31 项**全部登记（**不改 SAD / 不改 PRD / 不改 config.md**）
+- [x] 业务规则编号 BR-SRV-1..44，伪代码直接引用编号（BR-SRV-30/31 为 v1.1 新增；v1.2 新增 5b/5c/8b/32/33；**v1.4 新增 34/35；★ v1.5 新增 36–44**）
+- [x] 关键流程伪代码齐备：分发 / `_guard` / 批量截断 / feed 双检 / **`_fetch_concurrent` 扇出** / plate stagger / longhu GBK / healthz 准入（`_HealthBatch`） / 过载 503 / watchdog / **★ v1.5 条件请求（`_feed_etag` / `_not_modified` / `_send_not_modified`）**
+- [x] 错误处理矩阵（400/404/503/200-error/200-值域/304 + hotplate 全/部分分区）+ 降级分层 + **8 条**可断言不变式（★ v1.5 新增 #8）
+- [x] 并发安全：锁清单 + 锁序（`_feed_fetch_locks_lock → per-path`；metrics 永远最内层）+ 热点开销 + 并发正确性依据；★ v1.5：条件请求**零新锁**
+- [x] 测试要点 **64 条**映射 PRD AC（v1.1 新增 T34/T35；v1.2 新增 T36–T43；v1.4 新增 T44–T45；★ v1.5 新增 T46–T60；**★ v1.6 / C7 补 `T52b`/`T56b`/`T61`/`T62` → 64 条**）；回归用例逐条列名（含 **2 条**跨模块交叉引用必改 + **★ v1.8 5 条 server_http 打桩迁移**：FeedDoubleCheck ×2 / BaseUrlHardening 2-tuple / BaseUrlHardening `h.headers = {}` / GuardTests `_guard(shape='rss')` 2-tuple 解包，见 §10.1）
+- [x] AC 追溯：S1/A5/A8/A9/**E2**/E8/E9/S4/S5/S7/S8/S10 主承载，A3/E6/A6 协同项已注明；**v1.2 增 S2-5/S2-3/P1-6；★ v1.5 增 本专项 R1**
+- [x] 与基础层/数据层接口逐项对齐（`cache_policy`/`feed_cache_get|put`/★ **`feed_cache_get_entry`**/`build_batch_response`/`page_data`/`restart_window_snapshot`/`watchdog_restart_skip_reason`/`metrics`）
+- [x] 偏差 **37 项**全部登记（**不改 SAD / 不改 PRD / 不改 config.md**；★ v1.5 新增 #32–#37）
 - [x] **v1.4**：gzip 协商 `_accepts_gzip` + `Vary: Accept-Encoding`（BR-SRV-34 / §1.1#11 / §5.8 / §6.2#7 / T44）；`main()` 预热 `warm_transport`（BR-SRV-35 / §1.1#12 / §5.9 / T45）；线程账 +9
+- [x] **v1.5（P3a · RSS 条件请求）**：ETag 弱校验器（规范化剔除 `lastBuildDate`/`ttl`，**严禁裸哈希**）· Last-Modified = 缓存条目 `time`（新访问器 `feed_cache_get_entry`）· 304 组成（无 body/无 `Content-Encoding`/无 `Content-Length`，带 `ETag`+`Cache-Control`+`Vary`，不写缓存）· 条件头优先级（INM > IMS，支持 `*`/多值/`W/`，非法日期头忽略）· RSS `<ttl>`（分钟，位置与 ETag 影响）· 出范围项（BR-SRV-36..44 / §5.4 / §5.8 头清单 / §6.2#8 / T46–T60 / §10#32–#37 / §11.5）
+- [x] **v1.5（只增不改核对）**：200 既有头与体、`Vary`/`private` 反投毒、业务降级恒 200、路由/方法、`feed_cache_get` 签名**全部未变**；新增仅 2 个可选形参 + 1 个方法 + 1 个访问器 + 1 个 `generate_rss` 可选形参
+- [x] **v1.6（P3a-r1 评审定向修 · 对照 `REV-DES-20260918-001`）**：**C1** ETag canonical 投影扩展 item 级 `<pubDate>`（全量）+ 双向不变式 + 取舍（BR-SRV-37 / §2.9 / §5.4 / §6.2#8③⑦ / §10#32）；**C2** §10.1 打桩迁移第 4 条 `h.headers = {}` + §11 计数 4；**C3** `<ttl>` 契约语句 + 推荐轮询 ≥30s + SSE（BR-SRV-43 / §5.8）；**C4** `dt.timestamp()` 入 try + `OSError`（BR-SRV-40 / §5.4 / §6.2#8⑤）；**C5** BR-SRV-39 弱前缀大小写敏感措辞；**C6** §10#36 补 RFC 9110 §8.6 + HTTP/1.0/EOF 依据；**C7** 14 条缺失用例（新增 T52b/T56b/T61/T62，测试 60→**64**）+ `generate_rss` `ttl>0` 护栏；**C8** 漂移 8 项入 `_PROGRESS.md` 契约影响。**未改代码 / SAD / PRD / API.md / README.md / `.opencode`**
 - [x] **v1.3（N1 回退）**：业务端点降级 = `200 + error 体`（§1.1#9 / §2.1 yaml + 状态表 / §2.2 `_send_json_shape` / §2.9 `_json_payload_has_data` 删除 / §2.10 / §4.1 BR-SRV-5b / §5.2 注 + §5.8 伪代码 / §6.1 / §9 / §10#18·#24·#29 / §11.3）；`_send_json` 无 `status`；`http_503_total` 计数点 3；降级体可缓存
 - [x] **v1.3（N1 回退）**：`/healthz` 的 503 明确为**端点自身语义**（BR-SRV-21 / §5.2 / §6.1 / §9 / §10#29），不构成业务端点先例
 
@@ -1806,6 +2092,19 @@ def _send_error(self, msg, write_body=True):                             # ★ �
 | 3 | **`Vary: Accept-Encoding` 在 `gzipped or cache` 时无条件发**（含 `cache=False` 的 gzip 响应） | §5.8 / §6.2#7 | v1.3：仅 `varies_on_host` 时发 `_BASE_URL_VARY` |
 | 4 | `main()` 新增 daemon 线程 `warm_transport`（预热上游传输；不阻塞启动/`/healthz`，失败静默） | §1.1#12 / §4.6 BR-SRV-35 / §5.9 / §2.9 线程账 / §8 T45 / §10#31 / §1.3·§2.10 import | v1.3：main() 3 处改动，无预热线程 |
 
+### 11.5 v1.5 增量设计对照（P3a · RSS 条件请求 · 只增不改）
+
+| # | 增量项 | 落点 | 与 v1.4 的差异 |
+|---|--------|------|---------------|
+| 1 | **弱 ETag** `W/"<sha256>"`，规范化剔除 `<lastBuildDate>` / `<ttl>` / **`<pubDate>`（★ v1.6 / C1 全量）** 内容（**严禁裸 body 哈希**） | §1.1#13 / §4.7 BR-SRV-37 / §5.4 `_feed_etag` / §2.9 常量 / §8 T46·T52·T52b·T53 / §10#32 | v1.4：RSS 无 `ETag`；★ v1.6：扩 item 级 `pubDate` |
+| 2 | **Last-Modified** = feed 缓存条目 `entry['time']`；新访问器 `cache.feed_cache_get_entry(path) -> dict\|None`（**`feed_cache_get` 签名不变**） | §1.5 / §2.5·§2.5a / §4.7 BR-SRV-38 / §2.10 / `cache.md` §2.4·BR-CACHE-32 / §8 T46·T60 | v1.4：`_get_or_fetch_feed` 返回 `str`，无时间源 |
+| 3 | **304**：专用 `_send_not_modified`（无 body / 无 `Content-Encoding` / 无 `Content-Length`；带 `ETag`+`Cache-Control`+`Vary`；不写缓存；`HEAD` 同） | §2.1 / §2.1 状态表 / §4.7 BR-SRV-41 / §5.8 头清单 / §6.2#8 / §8 T47·T54·T55·T57 / §10#35·#36 | v1.4：无 304 路径 |
+| 4 | **条件头**：`If-None-Match` 优先于 `If-Modified-Since`；`*`/多值/`W/` 弱比较；IMS `parsedate_to_datetime` 秒级、非法忽略 | §4.7 BR-SRV-39·40 / §5.4 判定函数 / §8 T48–T51·T56 | v1.4：忽略一切条件头 |
+| 5 | **200 加校验器**：`_send_text(..., etag=None, last_modified=None)`（纯新增可选形参；其余调用点零改动） | §2.10 / §4.7 BR-SRV-42 / §5.8 头清单 / §8 T46 | v1.4：无 `ETag`/`Last-Modified` |
+| 6 | **RSS `<ttl>`**（分钟）：`generate_rss(..., ttl=None)`；5 个 handler（**6 处调用点**——eastmoney 常规 + 空 feed 两个出口；★ v1.8 / D-2）传 `_feed_ttl_minutes()`（30→1 / 180→3），位置在 `</lastBuildDate>` 与 `<atom:link>` 间，**剔除出 ETag** | §1.1#13 / §2.10 / §4.7 BR-SRV-43 / §8 T58 / §10#33 | v1.4：无 `<ttl>` |
+| 7 | **出范围（仅登记）**：HTTP/1.1 keep-alive、`/opml.xml`、`/` 条件请求 | §4.7 BR-SRV-44 / §10#37 | v1.4：未涉及 |
+| 8 | import 面：+`hashlib` / `datetime.timezone` / `parsedate_to_datetime`；cache 侧 `feed_cache_get` → `feed_cache_get_entry` | §1.3 / §2.10 import 块 / §10#32·#34 | v1.4：无这些名字 |
+
 ### 10.1 既有测试的必改清单（供 code-developer / tester 依此同步）
 
 | 测试 | 现状 | 必改点 | 理由 |
@@ -1814,9 +2113,24 @@ def _send_error(self, msg, write_body=True):                             # ★ �
 | `test_server.py::test_healthz_payload_includes_hotplate_endpoint` / `test_healthz_includes_market_endpoints` | 断言 path 存在 | **无需改**（feeds 条目集合不变） | 只增字段 |
 | `test_server.py::test_fetch_json_leader_failure_does_not_stampede` | 断言 `err=1`/`ok=7` | **必改**（AR-10：`err=8`/`max_active=1`/负缓存窗口内 <1ms） | 属 `cache.md` T-CACHE-2（**已在 cache.md 登记**，非 server 范围，此处交叉引用） |
 | `test_server.py::test_sector_cache_bounded` | import `_SECTOR_CACHE_MAX` | **必改**（`stock_api.md` §10#4 删该常量，改 `cache_policy('sector')['cache_max']`） | 属 `stock_api.md` 登记范围（交叉引用） |
-| 新增 | — | `SRV-T*` **35 条** | 本详设 §8 |
+| **`test_server_http.py::FeedDoubleCheckTests`（2 条；:315 / :331）★ 迁移第 1、2 条** | patch `srv.feed_cache_get` 为返回 xml 的 lambda | ★ v1.5 **必改**：打桩目标改为 **`srv.feed_cache_get_entry`**，返回 `{'xml': ..., 'time': <float>, 'last_access': ..., 'expires_at': ...}` 或 `None`；断言"回源 1 次"不变。★ **v1.7 / P2-c（若不写会红）**：**返回值断言须改 2-tuple**——`_get_or_fetch_feed` 现返回 `(xml, last_modified)` ⇒ 直接调用处 `assertEqual(h._get_or_fetch_feed(...), '<rss/>')`（`tests/test_server_http.py:327-328`）与 `worker()` 内调用（`:346`）须改为元组 `('<rss/>', <stub 条目的 `time`>)` | `_get_or_fetch_feed` 改用 `feed_cache_get_entry` 且返回 2-tuple（§2.5/§2.5a/§10#34）；旧打桩不再被调用 ⇒ 否则"回源 1 次"退化为 2 次而失败；**返回值形状不变则为断言失败（照 v1.5 清单施工会红）** |
+| **`test_server_http.py::BaseUrlHardeningTests::test_serve_feed_marks_host_derived_url_non_public`（:440 / :450）★ 迁移第 3 条**（★ v1.7 / P2-d：2-tuple 变更同施于 `:450`，与第 4 条口径一致） | patch `srv.RSSHandler._get_or_fetch_feed` 返回 `'<rss/>'` | ★ v1.5 **必改**：返回值改 **`('<rss/>', None)`**（2-tuple）；`_send_text`/`_send_not_modified` 打桩仍可捕获 kwargs（新增 `etag`/`last_modified`） | `_guard(shape='rss')` 现返回 2-tuple（§5.1/§10#34） |
+| **`test_server_http.py::BaseUrlHardeningTests`（:440 / :450）★ 迁移第 4 条（★ v1.6 / C2 / P1-02 补登）** | 两方法用 `RSSHandler.__new__(RSSHandler)` 构建，**未设 `h.headers`** | ★ v1.6 **必改（第 4 条）**：**补 `h.headers = {}`**（或 `patch.object(srv.RSSHandler, '_not_modified', return_value=False)`）；否则即便按第 3 条把 `_get_or_fetch_feed` 改成 2-tuple，`_serve_feed` 仍会读 `self.headers` ⇒ **`AttributeError`（用例报错，非断言失败）** | `_serve_feed` 自 v1.5 起在 `_send_text` **之前**执行 `_not_modified(self.headers, …)`（§5.4 / BR-SRV-36..41）。**这是 v1.5 §10.1 唯一漏项**（v1.5 只写了 2-tuple + kwargs） |
+| **`test_server_http.py::GuardTests::test_rss_degrade_is_valid_feed`（:80）★ 迁移第 5 条（★ v1.8 / D-1 补登）** | 直接调用 `srv._guard(self._boom, shape='rss', …)` 并把**返回值当 XML**（旧形状 = 裸 `str`） | ★ **必改（第 5 条）**：按 2-tuple **解包 + 断言降级体无 `Last-Modified`**——`xml, last_modified = srv._guard(self._boom, shape='rss', rss_info=…, feed_url=…)`；`ET.fromstring(xml)`；`self.assertIsNone(last_modified)`。**照 v1.7 清单施工必红**：`ET.fromstring(tuple)` ⇒ `TypeError`；且不解包就拿不到 `last_modified`，无从断言「降级 ⇒ IMS 不可评估」 | `_guard(shape='rss')` 自 v1.5 起**成功/异常两路同 2-tuple**（§2.3 / §5.1 / §10#34）。本用例是**唯一绕过 `_serve_feed` 直接调 `_guard(shape='rss')`** 的存量用例，v1.5/v1.6/v1.7 的迁移清单**均漏列** ⇒ **实现阶段已按详设裁定机械迁移**（解包 + `last_modified is None`），本版补登使文档与实现一致 |
+| **`test_server.py` 中任何断言 `generate_rss` 输出的用例** | 无 `<ttl>` | ★ v1.5：**无需改**（`ttl=None` 默认不输出）；仅新增用例传 `ttl=` | 向后兼容（§2.10 / BR-SRV-43） |
+| 新增 | — | `SRV-T*` **19 条**（T46–T60 + ★ v1.6：`T52b`/`T56b`/`T61`/`T62`） | 本详设 §8 |
 
-> 本文档与 `config.md` **v1.3** / `cache.md` **v1.3** / `metrics.md` v1.1 / `stock_api.md` **v1.2** / `market_api.md` **v1.3** / `cdp_engine.md` v1.1 / `stream.md` **v1.2** 共同构成 P6c 优化专项的模块级详设；**server.py 的编码可与 stream.md 并行**（二者无共享文件的写冲突：server 仅延迟 import stream 的 `push_loop`/`run_stream_server`）。
+> **★ v1.6 / C2 迁移清单计数口径（P1-02 闭环；★ v1.8 / D-1 由 4 → 5）**：`test_server_http.py` 的**打桩迁移共 5 条**，逐条为——**①** `FeedDoubleCheckTests:315` 打桩目标 `feed_cache_get` → `feed_cache_get_entry`；**②** `FeedDoubleCheckTests:331` 同上；**③** `BaseUrlHardeningTests`（2 方法）`_get_or_fetch_feed` 桩返回 2-tuple `('<rss/>', None)`；**④** `BaseUrlHardeningTests`（2 方法）**补 `h.headers = {}`**（或 patch `_not_modified`）；**⑤** `GuardTests::test_rss_degrade_is_valid_feed`（:80）**直接调 `_guard(shape='rss')` 须按 2-tuple 解包 + 断言 `last_modified is None`**（★ v1.8 / D-1 补登——v1.5 §11 自检的"三条"与 v1.6 的"4 条"**均漏列**该唯一绕过 `_serve_feed` 直接调 `_guard` 的存量用例）。综合口径：**本版更正为 5 条**（见 §11）。
+
+> 本文档与 `config.md` **v1.4** / `cache.md` **v1.7** / `metrics.md` v1.2 / `stock_api.md` v1.3 / `market_api.md` v1.3 / `cdp_engine.md` v1.2 / `stream.md` v1.3 共同构成 P6c 优化专项的模块级详设；**server.py 的编码可与 stream.md 并行**（二者无共享文件的写冲突：server 仅延迟 import stream 的 `push_loop`/`run_stream_server`）。
+>
+> **v1.8 修订（P7b 漂移回填 D-1/D-2 · 对照 `doc/review/rss-conditional-get_代码评审_专家版.md` CR-RSS-20260918-001 D5）**：**D-1** §10.1 补**第 5 条**迁移（`GuardTests::test_rss_degrade_is_valid_feed`（:80）须按 `_guard(shape='rss')` 的 2-tuple 解包 + 断言 `last_modified is None`）+ **§11 迁移计数 4 → 5**（§10.1 计数口径注 / §11 自检）；**D-2** eastmoney `<ttl>` 口径由「5 处」更正为 **6 处调用点 / 5 个 handler**（`handle_eastmoney_kuaixun` 常规返回 + 「无匹配 ⇒ 空 feed」提前返回两处均传 `ttl=_feed_ttl_minutes()`；BR-SRV-43 / §2.10 / §5.8 / §11.5）；**顺带·P2-3（如实记录）** `_send_text` 与 `_send_not_modified` **各写一份** `Cache-Control`/`Vary`（实现现状，非设计变更）＋ `SRV-T62` 兜底断言关系（§5.8）；**顺带** §8 注明 `SRV-T52b` 实现拆 5 个 unittest 方法、**编号计数不变**。**未改任何设计裁定（BR 编号/算法/取值/优先级/出范围项）、未改代码；`cache.md` 同步 v1.6 → v1.7（D-3）。**
+>
+> **v1.7 修订（P3a-r2 复审 P2 机械收口 · 对照 `REV-DES-20260918-002`）**：**P2-a** `SRV-T52b` 用例定义细化（必须 patch 时钟 `t`/`t+1` + 红/绿方向声明 + 纯函数「仅 `pubDate` 不同 ⇒ 同 ETag」断言；三门 feed 覆盖不变；未控时钟不得作 C1 验收证据）；**P2-b** BR-SRV-37 第二子句补「除三项外」限定（§6.2#8③ 同步）；**P2-c** §10.1 `FeedDoubleCheckTests` 补返回值断言改 2-tuple；**P2-d** §10.1 第 3 条标题 `:440` → `:440 / :450`；**P2-f** §1.1 标题 11 → **13 条**。**测试计数口径不变**（总 64 / 新增 19 / 迁移 4；★ v1.8 / D-1 更正为 **迁移 5**）。**未改设计裁定/契约/代码；`cache.md` 无 P2 落点，保持 v1.6（★ v1.8 另同步至 v1.7）。**
+>
+> **v1.6 修订（P3a-r1 评审定向修 · 对照 `REV-DES-20260918-001`）**：**C1** ETag canonical 投影扩展 item 级 `<pubDate>`（全量）+ 双向不变式（BR-SRV-37 / §2.3 / §2.9 / §5.4 / §6.2#8 / §10#32）；**C2** §10.1 迁移第 4 条 `h.headers = {}` + §11 计数 4；**C3** `<ttl>` 契约语句（BR-SRV-43 / §10#33）；**C4** `dt.timestamp()` 入 try（BR-SRV-40 / §5.4）；**C5** BR-SRV-39 弱前缀措辞；**C6** §10#36 依据；**C7** 14 条缺失用例（新增 T52b/T56b/T61/T62）。§10 偏差仍 **37 项**（#32/#33/#36 就地更新，未增号）；测试要点 **60 → 64 条**。**未改代码、未改其他文档（仅本文件 + `cache.md` + `_PROGRESS.md`）**。
+>
+> **v1.5 增量（P3a · RSS 条件请求）**：见 §11.5 对照表（8 组增量项）；§10 偏差扩至 **37 项**（新增 #32–#37）；测试要点扩至 **60 条**（新增 T46–T60）。**新增仅 2 个可选形参（`_send_text`）+ 1 个方法（`_send_not_modified`）+ 1 个访问器（`feed_cache_get_entry`）+ 1 个 `generate_rss` 可选形参（`ttl`）**；**未改代码、未改其他文档（仅本文件 + `cache.md` + `_PROGRESS.md`）**。
 >
 > **v1.4 修订**：**P7b 契约同步（响应 gzip + 启动预热 · 以代码为准）**——见 §11.4 对照表（4 组同步项）；§10 偏差扩至 **31 项**（新增 #30/#31）；测试要点扩至 **45 条**（新增 T44/T45）。**未改代码、未改其他文档**。
 >

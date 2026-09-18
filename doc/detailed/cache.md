@@ -1,13 +1,16 @@
 # cache.py 详细设计
 
-> **版本** v1.4 · **状态** 已契约同步（P7b 传输层 + AC-S3 裁决回写：以 `china_finance_rss/cache.py` 实现为准）· **日期** 2026-09-17 · **作者/产出** task-decomposer
+> **版本** v1.7 · **状态** 增量设计（P3a · `feed_cache_get_entry`；P3a-r1 评审定向修：扩 **T-CACHE-32** 负例 + 头部溯源修正；**P7b 漂移回填：T-CACHE-32 标注已实现**）· **日期** 2026-09-18 · **作者/产出** task-decomposer
+> **v1.7 变更（P7b 漂移回填 D-3 · 仅文档标注，无实现/契约变更）**：**T-CACHE-32 的「浅拷贝隔离负例」已在 P6c 实现**——落点 `tests/test_cache.py::FeedEntryAccessorTests::test_t_cache_32_shallow_copy_isolates_the_container`（同类的契约用例为 `test_srv_t60_feed_cache_get_entry_contract`，二者同属 `FeedEntryAccessorTests`），断言"改写 `feed_cache_get_entry` 返回值不污染容器条目"，即 BR-CACHE-32 的「浅拷贝充分性 / 调用方只读」。本版在 **§8 用例**与 **§9 映射**标注**✅ 已实现**并核对方法名（评审 CR-RSS-20260918-001 D-3 闭环）。**`feed_cache_get_entry`/`feed_cache_get`/`feed_cache_put` 签名与语义、锁、容器字段、TTL/清扫/上限、BR-CACHE-32 正文全部不变。**
+> **v1.6 变更（P3a-r1 评审定向修 · 对照 `REV-DES-20260918-001`）**：**仅测试与溯源，无实现/契约变更**——① 【**C7#14**】`§8 T-CACHE-32` 扩**浅拷贝隔离负例**：改写 `feed_cache_get_entry` 返回值**不改变**容器条目的 `last_access`/`expires_at`（断言 `feed_cache` 内条目字段未被污染，与 BR-CACHE-32 的"调用方只读"约束一致）；② 【**C8③**】头部溯源修正为实际版本 **SAD v1.7 / PRD v0.6**（原误记 v1.2 / v0.3）。**`feed_cache_get_entry`/`feed_cache_get`/`feed_cache_put` 签名与语义、锁、容器字段、TTL/清扫/上限全部不变**（BR-CACHE-32 正文未改）。
+> **v1.5 变更（P3a · RSS 条件请求支撑）**：新增公开访问器 **`feed_cache_get_entry(path) -> dict | None`**（§2.4 / §5.3 / BR-CACHE-32）——返回**新鲜条目的浅拷贝** `{'xml','time','last_access','expires_at'}`，供 `server._serve_feed` 的 **Last-Modified** 取 `entry['time']`；内部与 `feed_cache_get` **完全同源**（同一 `_feed_cache_lock`、`now < expires_at` 判定、`move_to_end` + `last_access = now`），**`feed_cache_get(path) -> str | None` 签名与语义逐字不变**（改为 `feed_cache_get_entry` 的薄包装）。**无新增锁、无新容器字段、无 TTL/清扫行为变更**；`feed_cache_put` 签名与写入的 `time` 语义不变（`time` 即 Last-Modified 权威时间源）。其余 v1.4 口径（连接池 / DNS / `refresh_epoch` / `_PROBE_BUDGET_CAP`）全部保持。
 > **v1.4 变更（P7b 传输层契约同步 · 以代码为准）**：① 新增 **HTTP 连接复用池** `_ConnectionPool`（按 `(scheme,host,port)` 分桶、每 host 有界 `HTTP_POOL_MAX_PER_HOST`、空闲 `HTTP_POOL_IDLE_TTL` 懒淘汰、**失效连接丢弃并重试一次**、`_lock` 只护桶记账、连接/关闭/IO 全在锁外）与 **进程内 DNS TTL 缓存** `_DNSResolver`（TTL=`HTTP_DNS_CACHE_TTL`、失败不缓存、命中 IP 连不上时 `force` 重解析、异常回退 `socket.create_connection`）；② **`cache.urlopen(req, timeout=None)`** 为模块级可打桩缝，返回可 `read()` 的上下文管理器，4xx/5xx 抛 `HTTPError`、传输失败抛 `URLError`（跟随 ≤5 次重定向）——`urllib.request.urlopen` 已不再是取数出口；③ 新增公开函数 **`warm_transport(hosts=None, count=None, timeout=None)`**（走池、**仅握手不发业务请求**、总函数绝不抛）；④ `fetch_json` 新增**第 6 位关键字形参 `refresh_epoch`**（刷新轮起点；`_cache_fresh` 判定 `entry['time'] >= epoch`，`None` 时逐字不变；写入仍用完整域 TTL）；⑤ §1.3 import 面更正：**`json` 已删除**（v1.3 已登记），实际新增 `http.client` 与 `urllib.parse`。**其余 v1.3 口径（`_PROBE_BUDGET_CAP=5.0` / follower 余量 / metrics 锁外发布 / leader `try/finally`）保持不变。**
 > **v1.3 变更（AC-S3 裁决 · 收尾契约同步）**：⑦ **半开探测阶梯封顶 = `_PROBE_BUDGET_CAP = 5.0`（新增模块级机制常量）**，序列 `2→4→5`（**不再是** `2→4→8→REQUEST_TIMEOUT(10)`）；`REQUEST_TIMEOUT` 仅用于"无失败历史 / 已老化（≥`_HISTORY_AGE=600s`）"两支的**一次性全预算探测**（§1.1#1 / §4.2 BR-CACHE-22 / §5.1 / §8 T-CACHE-4·4c·4d·21 / §10#11·#18 / §2.5）。**推导**：持续黑洞稳态 ≈ `5s 探测 + 5s NEG_TTL = 10s` 周期、慢请求占比 ≈50% ⇒ **P95 ≈ 5s**；单请求上界 `≤15s` 恒成立。
 > 本版修订（P7b 契约同步，**只改文档、不改代码**）：① `fetch_json` 新增第 5 位形参 `deadline`，且**超期闸门位于正缓存命中之后**；② `_probe_budget` 按 `fail_count` **递增阶梯**（v1.3 更正：`2→4→5`，`_PROBE_BUDGET_CAP` 封顶）；③ follower 等待窗口 = `_fetch_budget + _FOLLOWER_WAIT_MARGIN(1.0s)`，`event.wait` 后复查 `_fetch_inflight`（leader 存活 ⇒ `upstream_timeout`）；④ metrics **一律在业务锁释放后**发布（`_publish_url_stats`），命中路径（段①/③双检/④）统一计 hit；⑤ leader 令牌获取纳入 `try/finally`；⑥ `import json` 已删（§10#6 收口）。
 > 沿用 v1.1：REV-DES-01（plate stagger 表口径）/02（`cache_hit_ratio`）/03（`logging`）/04（依赖图）/09（段 3 try 范围）+ 逆向建议 1（失败历史老化）+ 逆向建议 2（删常量前置）+ 编排层裁决 #2/#3/#5 + 偏差 D-1/D-2/D-3/D-7 登记
 > 模块路径 `china_finance_rss/cache.py` · 归属 **基础层（Layer 0，纯缓存/契约层）**
-> 上游 SAD `doc/arch/SAD.md` v1.2（§2.1 / §2.2 R-3 / §2.3 D-1 D-2 D-5 / §2.4 / ADR-002/003/008/009/014）
-> 上游 PRD v0.3（AC-S3/S6/A4/A9/A10/E6/E9/A10）
+> 上游 SAD `doc/arch/SAD.md` **v1.7**（★ v1.6 溯源修正：原误记 v1.2；权威以 SAD 头部为准）（§2.1 / §2.2 R-3 / §2.3 D-1 D-2 D-5 / §2.4 / ADR-002/003/008/009/014）
+> 上游 PRD `doc/prd/perf-stability-optimization.md` **v0.6**（★ v1.6 溯源修正：原误记 v0.3）（AC-S3/S6/A4/A9/A10/E6/E9/A10）
 > 端锁定 🟠 STABLE（对外仅**新增**保留键；`fetch_json` 签名**纯新增可选参数**）
 
 ## 1. 模块职责与边界
@@ -166,15 +169,18 @@ def build_batch_response(requested, results, errors=None, dropped=0) -> dict:
 ### 2.4 feed 缓存访问器（**feed LRU/清扫的唯一实现点**）
 
 ```python
-def feed_cache_get(path: str) -> str | None      # 命中并刷新 LRU；未命中/过期 → None
+def feed_cache_get(path: str) -> str | None      # 命中并刷新 LRU；未命中/过期 → None（★ v1.5：薄包装 feed_cache_get_entry）
+def feed_cache_get_entry(path: str) -> dict | None   # ★ v1.5：命中返回新鲜条目浅拷贝；未命中/过期 → None
 def feed_cache_put(path: str, xml: str, ttl: int) -> None
 ```
 
-- 命中：`move_to_end(path)` + `last_access = now` → 返回 `entry['xml']`。
+- **`feed_cache_get_entry` 返回契约（★ v1.5 / BR-CACHE-32）**：命中（`now < expires_at`）⇒ 返回**浅拷贝** `{'xml': str, 'time': float, 'last_access': float, 'expires_at': float}`，并在锁内完成 `move_to_end(path)` + `entry['last_access'] = now`（与 `feed_cache_get` 同一 LRU 副作用，**恰好一次**）；未命中/过期 ⇒ `None`。**浅拷贝**保证调用方（server）无法在锁外改写容器内条目的键值。`entry['time']` 是 `feed_cache_put` 的写入时刻 ⇒ `server` 的 **Last-Modified** 权威来源（`time` 语义**不变**）。
+- 命中：`move_to_end(path)` + `last_access = now` → 返回 `entry['xml']`（★ v1.5：`feed_cache_get` 现为 `feed_cache_get_entry` 的薄包装，`return entry['xml'] if entry else None`，**对外签名/语义逐字不变**）。
 - 写入：触发①定时全扫（`_last_feed_sweep`，60s）→ 触发②容量清扫（cap = `cache_policy('feed')['cache_max']`）→ 插入并 `move_to_end`。
 - **落点说明**：SAD 把 feed TTL/LRU 的**行为落点**记为 `server._get_or_fetch_feed`；本设计把**缓存机制**（LRU/清扫/淘汰）实现在 cache 层（符合 1.3 layerIsolation 与"缓存机制归缓存层"），`_get_or_fetch_feed` 保留其 `_feed_fetch_locks` 防击穿职责并改为调用这两个函数。**server 详设必须按此对齐**。编排层已裁决 ✅ 落 cache.py（待确认 #3，SAD §2.2 R-3/§3 server 行将回改）。
 - **双检语义（server 侧硬约束，裁决 #3 必要条件）**：`feed_cache_get(path)` miss 后，`server._get_or_fetch_feed` **必须**按序：① 取 per-path `_feed_fetch_locks[path]` → ② **再次 `feed_cache_get(path)`（双检）** → ③ 仍 miss 才 fetch → ④ `feed_cache_put(path, xml, ttl)`。**缺 ② 则并发请求在「miss→取锁」窗口内全部穿透，防击穿退化**。cache 层只保证 `get`/`put` 各自原子（同 `_feed_cache_lock` 内完成），双检在 server 侧；`feed_cache_get` 不得返回过期值（`now >= expires_at` → `None`）。
 - 容器仍为公开名 `feed_cache`；`_feed_cache_lock` 仍导出（server 现状 import 兼容）。
+- **★ v1.5（条件请求支撑）**：`server._get_or_fetch_feed` 的**读取入口**由 `feed_cache_get` 改为 `feed_cache_get_entry`（一次查询同时得到 `xml` + `time`）；`feed_cache_get` **保留**（向后兼容，`tests/test_cache.py` 全绿）。**禁止**在 server 侧"先 `feed_cache_get` 再单独查条目"——两次查询会拾取降级态下的陈旧条目，把旧时间冒充当前表示的 `Last-Modified`（`server.md` BR-SRV-38）。
 
 ### 2.5 保留并调整的内部接口（**兼容清单**）
 
@@ -184,6 +190,7 @@ def feed_cache_put(path: str, xml: str, ttl: int) -> None
 | `feed_cache` | `dict` | `collections.OrderedDict` | 同上 |
 | `_cache_lock` | `Lock` | 不变 | utils.py 用于 jin10 header 槽，保留 |
 | `_feed_cache_lock` | `Lock` | 不变 | server import 保留 |
+| `feed_cache_get_entry(path)` | — | **新增（★ v1.5）**：命中返回新鲜条目**浅拷贝**（含 `time`），否则 `None`；与 `feed_cache_get` 同一 LRU 副作用 | 公开名；`feed_cache_get` 实现于其上（BR-CACHE-32） |
 | `_fetch_inflight` | `dict` | 不变（测试 patch 依赖此名） | 测试 `test_server.py:306,342` 直接 patch |
 | `MAX_CACHE_SIZE` | `2000` | 不变（URL 缓存上限 + 负缓存上限） | — |
 | `CACHE_JITTER` | `0.2` | 不变 | server.py:47 import 保留 |
@@ -314,7 +321,7 @@ cache: # OrderedDict[url -> Entry]，上限 MAX_CACHE_SIZE=2000，真 LRU
 feed_cache: # OrderedDict[path -> Entry]，上限 = cache_policy('feed')['cache_max'](=100)
   "<path>":
     xml: <str>
-    time: <float>
+    time: <float>          # 写入时刻；★ v1.5：server 的 Last-Modified 权威来源（BR-SRV-38）
     last_access: <float>
     expires_at: <float>
 
@@ -458,6 +465,7 @@ _STALE_CONNECTION_ERRORS: (RemoteDisconnected, BadStatusLine, CannotSendRequest,
 | **BR-CACHE-12** | **触发②（写入时局部清扫）**：写入时若 `len(d) >= cap` → 先 `_sweep_expired(d)`，再 `while len(d) >= cap: d.popitem(last=False)`。`cap`：URL 缓存 `MAX_CACHE_SIZE=2000`；feed 缓存 `cache_policy('feed')['cache_max']`。 |
 | **BR-CACHE-13** | `_sweep_expired(d)` 契约不变：返回删除条数；**保留 `None` 条目**（读取路径自行处理）；判定键 `expires_at`。 |
 | **BR-CACHE-14** | 淘汰保证"被淘汰 URL 的下一次请求必然回源"（不得命中旧数据，AC-E6）。 |
+| **BR-CACHE-32** | **feed 条目访问器 `feed_cache_get_entry(path) -> dict \| None`（★ v1.5）**：与 `feed_cache_get` **同源**——同一 `_feed_cache_lock`；`now < expires_at` 才命中；命中时 `move_to_end` + `last_access = now`（LRU 副作用**恰好一次**）；返回**浅拷贝**（调用方只读，不得原地改）。`feed_cache_get` 保留原签名，实现改为 `entry['xml'] if entry else None`（**语义逐字不变**）。用途：`server._serve_feed` 一次查询同时取 `xml` 与 `time`（Last-Modified 时间源）；**禁止**用两次独立查询拼装（陈旧条目竞态）。**无新增锁、无新容器字段、无 TTL/清扫/上限变更**。 |
 
 ### 4.4 批量组装（§2.3 规则的编号化）
 
@@ -749,16 +757,22 @@ def _cache_put(d, key, value, ttl=None, metric_key='url'):
 ```python
 _last_feed_sweep = 0.0
 
-def feed_cache_get(path):
+def feed_cache_get_entry(path):                                  # ★ v1.5（BR-CACHE-32）
+    """命中返回新鲜条目浅拷贝（含 time），否则 None；与 feed_cache_get 同源。"""
     with _feed_cache_lock:
         entry = feed_cache.get(path)
         if not entry or time.time() >= entry.get('expires_at', 0):
             return None
         feed_cache.move_to_end(path)
         entry['last_access'] = time.time()
-        return entry['xml']
+        return {'xml': entry['xml'], 'time': entry['time'],
+                'last_access': entry['last_access'], 'expires_at': entry['expires_at']}
 
-def feed_cache_put(path, xml, ttl):
+def feed_cache_get(path):                                        # ★ v1.5：薄包装，签名/语义不变
+    entry = feed_cache_get_entry(path)
+    return entry['xml'] if entry is not None else None
+
+def feed_cache_put(path, xml, ttl):                              # 签名与写入语义不变（time 即 Last-Modified）
     with _feed_cache_lock:
         now = time.time()
         global _last_feed_sweep
@@ -1018,6 +1032,7 @@ def warm_transport(hosts=None, count=None, timeout=None):
 | **T-CACHE-29** DNS TTL 缓存（v1.4 / BR-CACHE-29） | 两次 `resolve` 同 host ⇒ `getaddrinfo` 仅调 1 次；`ttl=0` ⇒ 每次调；解析失败**不写缓存**；缓存地址 connect 失败 ⇒ `force` 重解析一次；`getaddrinfo` 抛 ⇒ `connect` 回退 `socket.create_connection` | E1 传输 |
 | **T-CACHE-30** `warm_transport` 总函数（v1.4 / BR-CACHE-30） | `warm_transport(hosts=[key], count=1)` ⇒ `_pool` 有该 key 且返回 1；同一 key 再调 ⇒ 返回 0（已热身 `break`）；`_open_connection` 抛 ⇒ 返回 0 **不抛**；`warm_hosts()` 抛 ⇒ 返回 0 | 启动预热 |
 | **T-CACHE-31** `refresh_epoch` 新鲜度下限（v1.4 / BR-CACHE-31） | 写入 `time=t0`、`ttl=60`，以 `refresh_epoch=t0+tick` 读 ⇒ **不命中**（`urlopen` 被调 1 次、`upstream_fetch_total` 增），以 `refresh_epoch=None` 读 ⇒ 命中（`urlopen` 0 次）；`refresh_epoch` 不改变写入 TTL（写后 `expires_at-time ≈ ttl`） | SSE 每拍真刷新 |
+| **T-CACHE-32** feed 条目访问器（★ v1.5 / BR-CACHE-32；★ v1.6 / C7#14 扩容器态负例；**★ v1.7 / D-3 ✅ 已实现**） | 冷 cache ⇒ `feed_cache_get_entry('/p') is None`；`feed_cache_put('/p','<x/>',30)` 后 ⇒ dict 且 `entry == {'xml':'<x/>','time':float,'last_access':float,'expires_at':float}`；过期（`ttl=0` 或注入时钟）⇒ `None`；**浅拷贝（返回值侧）**（改返回值不改变后续查询结果）；命中时 `feed_cache` 内条目被 `move_to_end` 且 `last_access` 刷新；`feed_cache_get('/p') == '<x/>'`（**既有 T-CACHE-10 全绿，签名/语义不变**）。★ **v1.6 扩容器态负例（浅拷贝隔离）**：取 `e = feed_cache_get_entry('/p')` 后改写 `e['xml']='z'` / `e['last_access']=0` / `e['expires_at']=0` / `e['time']=0` ⇒ 容器条目 `feed_cache['/p']` 的对应四字段**逐一不变**（`xml` 仍 `'<x/>'`、`last_access`/`expires_at`/`time` 未被污染），且随后 `feed_cache_get_entry('/p')` 仍返回**未被改写**的值（**因值不可变，浅拷贝足以隔离容器**；禁止 deepcopy）。**✅ 已实现（P6c）**：`tests/test_cache.py::FeedEntryAccessorTests::test_t_cache_32_shallow_copy_isolates_the_container`（容器态负例）+ `test_srv_t60_feed_cache_get_entry_contract`（契约）；方法名与本用例口径一致（★ v1.7 / D-3） | A8（Last-Modified 时间源）/ 兼容 / **BR-CACHE-32 浅拷贝充分性（P2-04 负例）** |
 
 ## 9. AC 追溯矩阵
 
@@ -1042,6 +1057,7 @@ def warm_transport(hosts=None, count=None, timeout=None):
 | **HTTP 连接复用池 + DNS TTL 缓存（v1.4 / BR-CACHE-26..29）** | **AC-E1**（单请求延迟：2C2G 实测 340ms→~48ms）/ **AC-E2**（50 码冷扇出 ~4.2s → 单 tick 内） |
 | **`warm_transport` 启动预热（v1.4 / BR-CACHE-30）** | **AC-E2**（冷进程首轮不付全量握手/解析）/ AC-E1 |
 | **`refresh_epoch` 新鲜度下限（v1.4 / BR-CACHE-31）** | SSE 每拍真刷新（消除 TTL==tick 相位耦合，名义 4s 不再退化为 8s） |
+| **`feed_cache_get_entry` 访问器（★ v1.5 / BR-CACHE-32）** | **AC-A8**（feed 缓存同源）/ 本专项 R1（RSS `Last-Modified` 时间源）/ 兼容（`feed_cache_get` 签名不变）★ v1.7 / D-3：T-CACHE-32（含浅拷贝隔离负例）**已实现**——`tests/test_cache.py::FeedEntryAccessorTests::test_t_cache_32_shallow_copy_isolates_the_container` |
 
 ## 10. 与 SAD / 现有代码的偏差与歧义标注（不擅自改 SAD）
 
@@ -1069,6 +1085,7 @@ def warm_transport(hosts=None, count=None, timeout=None):
 | 20 | **v1.4 · `warm_transport` 启动预热** | SAD 未定义 | 新增公开函数（§2.7/BR-CACHE-30）；`server.main` 启动守护线程调用，**仅握手不发业务请求**、总函数 | 冷进程首个 50 码 quote 扇出实测 ~4.2s（超 0.8×tick 预算）：空池 + 空 DNS 缓存的首轮一次性成本 |
 | 21 | **v1.4 · `refresh_epoch`（第 6 位关键字形参）** | SAD §2.3 D-1 无该形参；`stream` 的"每拍真刷新"由实现引入 | `_cache_fresh(entry, refresh_epoch)`：命中追加 `entry['time'] >= epoch`；段①/③/④ 一致；`None` 逐字不变；写 TTL 不变（BR-CACHE-31） | TTL 恰等于 tick 时，上一轮 δ 秒后写入的条目在本轮仍新鲜 ⇒ 名义 4s 刷新实际每 8s 才回源一次（相位耦合） |
 | 22 | **v1.4 · import 面（`json`→`http.client`/`urllib.parse`）** | SAD/tech-stack allowlist | 本模块实际 import：`http.client`、`urllib.parse` 为新增；`json` 已删（v1.3 #6） | §1.3 一度仍列 `json` 而未列 `http.client`/`urllib.parse`——**与实现不符**，本版据实更正 |
+| 23 | **v1.5 · `feed_cache_get_entry` 访问器** | SAD/PRD 未定义"取条目"接口；裁决 #3 只定"机制落 cache 层" | 新增公开访问器（BR-CACHE-32）；`feed_cache_get` 保留并改为其薄包装 | 条件请求需要 `entry['time']` 作 `Last-Modified`，而 `feed_cache_get` 只回 `xml`；**不得改 `feed_cache_get` 签名**（5 调用方 + `tests/test_cache.py`）。返回浅拷贝避免锁外改写容器条目 |
 
 > **§10#11 的 AC-S3 影响量化（★ v1.3 按 AC-S3 裁决 / 实现重写——遗留项已闭环）**
 >
@@ -1110,6 +1127,9 @@ def warm_transport(hosts=None, count=None, timeout=None):
 - [x] **v1.4（P7b 传输层）**：连接复用池 + DNS TTL 缓存 + `urlopen` 单一网络缝 + `warm_transport`（§2.7 / §3.6 / §4.5 BR-CACHE-26..30 / §5.5 / §6 / §7.1·7.2 / §8 T-CACHE-26..30 / §9）
 - [x] **v1.4（P7b 传输层）**：`fetch_json` 第 6 位关键字形参 `refresh_epoch` + `_cache_fresh` 下限（§2.1 / §4.5 BR-CACHE-31 / §5.1 / §8 T-CACHE-31 / §10#21）
 - [x] **v1.4（import 面更正）**：§1.3 删 `json`、补 `http.client`/`urllib.parse`（§10#22，据实现更正）
+- [x] **v1.5（P3a · 条件请求支撑）**：新增 `feed_cache_get_entry`（§2.4 / §2.5 兼容表 / §3.1 `time` 标注 / §4.3 BR-CACHE-32 / §5.3 / §8 T-CACHE-32 / §9 / §10#23）；`feed_cache_get` **签名/语义不变**（薄包装）；**无新增锁/字段/TTL/清扫/上限变更**
+- [x] **v1.6（P3a-r1 评审定向修）**：§8 `T-CACHE-32` 扩**浅拷贝隔离容器态负例**（C7#14）；头部溯源修正为 **SAD v1.7 / PRD v0.6**（C8③）；**无实现/契约变更**（BR-CACHE-32 正文未改）
+- [x] **v1.7（P7b 漂移回填 D-3）**：§8 `T-CACHE-32`（含 v1.6 浅拷贝隔离负例）标注 **✅ 已实现**——`tests/test_cache.py::FeedEntryAccessorTests::test_t_cache_32_shallow_copy_isolates_the_container`（容器态负例）+ `test_srv_t60_feed_cache_get_entry_contract`（契约）；§9 映射同步标注；**无实现/契约变更**（签名/锁/容器字段/TTL/清扫/上限/BR-CACHE-32 正文均不变）
 
 
 

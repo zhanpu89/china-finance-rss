@@ -27,6 +27,13 @@ Import all at once with OPML:
 http://localhost:8053/opml.xml
 ```
 
+RSS responses carry a weak `ETag` and support conditional requests: send
+`If-None-Match` and an unchanged feed returns **`304 Not Modified` with no body**
+(no `Content-Encoding` either). Poll with `If-None-Match` at ≥30s — each feed also
+carries `<ttl>` (minutes), which is an **advisory cache hint, not a freshness
+promise**; for fresher-than-a-minute news use the SSE stream on port 8054 (4s).
+304 saves the response body, not the upstream fetch. See `API.md` §1 and §6.3.
+
 ## JSON Stock APIs
 
 All require `?code=` with stock symbols (e.g. `?code=sh600519` or `?code=sh600519,sz000001`).

@@ -1,19 +1,20 @@
 # 短线交易财经数据服务 — 高效/准确/稳定优化专项架构建档（SAD）
 
-> **文档编号** SAD-2026-P6C-01 · **版本** v1.7 · **状态** 待复审
-> **日期** 2026-09-17 · **产出** system-architect
-> **上游输入** PRD `doc/prd/perf-stability-optimization.md`（v0.4，30 AC / R1-R20）
+> **文档编号** SAD-2026-P6C-01 · **版本** v1.8 · **状态** 待复审
+> **日期** 2026-09-18 · **产出** system-architect
+> **上游输入** PRD `doc/prd/perf-stability-optimization.md`（v0.6，33 AC / R1-R20；**v1.8 承接的 RSS 条件请求 AC-A13 由 prd-writer 并行新增**）
 > **修订依据**（v1.1）review-expert `doc/review/perf-stability-optimization_架构评审_专家版.md`（REV-ARCH-20260915-001，❌ 阻断：P0×1 + P1×7 + P2×8；Q1/Q2/Q3 裁决）；（v1.2）复审「❌ 仍阻断」但机制层（P0×1 + P1×7）已全部合格、Q1/Q2/Q3 逐字落地——仅收口 **P1-N1（coverage 单位）** ＋ **P1-N2（`_Frame.refs` 收口）** 与 7 项 P2。逐项落地见 §9；（v1.3）基础层三模块详设评审 review-expert `doc/review/基础层三模块_详细设计评审_专家版.md`（REV-DES-20260915-001，✅ 通过 P0×0/P1×1/P2×8）——落地 P3b 评审的 SAD 侧动作：3 项内部矛盾更正 + 6 项裁决 + D-1~D-7 偏差回填 + 2 项 SAD↔代码不一致更正，逐项见 §9.3；（v1.4）**P7b 契约同步**——以**代码为准**回写实现的最新行为（帧契约、订阅字段容量模型、单帧余量准入、探预算阶梯、deadline 贯通、`canonical_code` 归一化权威、CDP/观测口径），并登记 1 项与 PRD AC-A5 冲突的**待裁决**漂移，逐项见 **§9.4**；（v1.5）**裁决落地收尾同步**——编排层对 3 处契约冲突的裁决已同步 PRD（`perf-stability-optimization.md` v0.5），本轮以**代码为准**把 SAD 侧结论回写：① **N1 关闭**（业务端点降级维持 **200 + error 客体**，`server._json_payload_has_data` 已删除、`_send_json_shape` 恒 200，`http_503_total` 计数点 4→3）；② **AC-S3 模式 B 探测预算阶梯封顶 5s**（`2→4→5`，`cache._PROBE_BUDGET_CAP=5.0`；P95 口径重标为**高密度 ≤5s / 低密度 ≤10s**）；③ **`_LOCAL_BUDGET` 不入冷却账本**的 v1.4 反转**正式确认**（反转 REV-DES-15 裁决②）。逐项见 **§9.5**；（v1.6）**P2-4 内存口径统一**——按容器内实测把 CDP 页面内存从单一「150MB+/页」拆为**明示双重口径**（RSS vs PSS），登记**固定基线 250MB(PSS)** 与 `CDP_STOCK_PAGES` **env 驱动**（2C2G 档位 = 4，+2 常驻 = **6 内容页**），逐项见 **§9.6**；（v1.7）**P7b 契约同步（第二轮）**——以**代码为准**把多轮实现回写到 SAD：① **新增 L0 档（盘中 4s）**，`quote`/`depth` 升 L0、`tick_interval(fields)` 改为**订阅域最短 tier TTL**（无订阅回落 L1）；② **容量常量/数值重标定**（`_PER_FETCH_EST` 2.2→**0.3**、`BATCH_MAX_WORKERS` 8→**20**、`HTTP_POOL_MAX_PER_HOST` 16→**24**；`coverage` 盘中 4s→**213** / 8s→426 / 盘后 120s→6400，`coverage_codes` 4s quote-only→**106** / 3 域→**53**，50 码 3 域**回 C1**）；③ **`refresh_epoch`** 解耦 tick 与缓存 TTL（每拍必真回源；原"TTL==tick 即命中缓存"的相位缺陷致名义 4s 曾实际 8s）；④ **`_tick_sleep_seconds` 真实不变量订正**为「轮起点→轮起点 ≥ 1 tick」（"帧间隔 ≥ tick"已被证伪）；⑤ **上游传输层**（keep-alive 连接池 + 进程内 DNS TTL 缓存 + 启动预热 `warm_transport`；实测单请求 340ms→**139ms**、DNS 170ms→**15.8ms**、4s 重试尾消除）；⑥ **上游双 wire 格式**（沪/深 = 前缀形、北交所 = 点号大写 `430047.BJ`；新增 `config.upstream_secu_code()`；上游用 `HTTP 200 + 空壳`表示错误格式 ⇒ **关键字段非空校验**）；⑦ **新增 `depth` 五档域**并入 SSE `quote` 负载（只增字段；空 dict/全 0 ⇒ 无 `depth` 键，不伪造）；⑧ **帧发送层去重**（内容未变不发、新连接强制首发）。逐项见 **§9.7**
+> **修订依据（v1.8）** P7b **SAD 回填**——设计评审「漂移检测」判定 **D-1：SAD 全文无 `304`/`ETag`/`Last-Modified`/`<ttl>` 的契约落点**（评审 `doc/review/rss-conditional-get_详细设计评审_专家版.md` D-1；code-reviewer `CR-RSS-20260918-001` 待办①），本轮把**已实现并验证**的 RSS 条件请求正式承接进 SAD：① 新增 **§2.7「RSS 响应缓存校验器与 304 语义」**（弱 ETag 规范化派生口径 / `Last-Modified` 时间源 / 304 组成 / 条件头优先级 / `<ttl>` advisory / **仍为拉模型·HTTP/1.0 无 keep-alive**）；② 新增 **ADR-023「规范化体弱校验器」**（被否备选：裸 body 哈希、guid 序列哈希）；③ §3 模块矩阵（server/cache/utils + 例外 7）/ §4.1（304 延迟与带宽口径）/ §7.1（**N4**）/ §7.2（**AR-16/AR-17**）/ §7.3#12 / §8 追溯矩阵（**AC-A13**）/ §9.8 同步；④ `tech-stack.json` **allowlist 补 `gzip`**（v1.4 遗漏，会造成合规脚本假阳性）。逐项见 **§9.8**。
 > **硬约束** Python 3 标准库零依赖 · 无前端 · 无外部存储 · 不改技术栈
 > **定位** 优化专项架构（非新建系统）：只做**架构级改造与契约收口**，不新增业务功能、不改路由与 API 签名
-> **端锁定** 🟠 STABLE（仅**新增**下划线保留键与观测字段；`feeds[].status` 属**改既有字段取值**，须编排层批准，见 §7.1 Q2）。**v1.4 新增两项边界（须编排层登记）**：① SSE 帧**只增**元数据（`codes_total`/`fields`/`missing`/`missing_count`/`errors`/`stale`/`stale_count`）属 🟠 STABLE 的"只增"；② **JSON 单体/面板/工具端点业务降级维持 200**（v1.5 N1 裁决关闭）——这不是"状态码变更"，而是**保持旧版本契约**，与 PRD AC-A5 逐格一致；真实 503 仅**连接准入拒绝**（主/流端口）与 **`/healthz` degraded**（健康端点自身语义，**不构成"业务端点可 503"的先例**）（§2.4 / §7.1 N1）。**v1.7 新增两项「只增」边界（须编排层登记）**：③ SSE `quote` 字段负载内新增 `depth`（五档盘口）——`items[code].quote` 由"basic 客体"变为"basic 客体 **+ `depth` 键**"，属 🟠 STABLE「只增」（既有键类型与含义不变；空 dict/全 0/非普通股/指数 ⇒ **该键不出现**，不伪造）；④ `POST`/`PATCH /stream/subscriptions` 响应新增 `refresh_capacity_codes`/`refresh_lag_ticks`/`capacity_warning`（只增）
+> **端锁定** 🟠 STABLE（仅**新增**下划线保留键与观测字段；`feeds[].status` 属**改既有字段取值**，须编排层批准，见 §7.1 Q2）。**v1.4 新增两项边界（须编排层登记）**：① SSE 帧**只增**元数据（`codes_total`/`fields`/`missing`/`missing_count`/`errors`/`stale`/`stale_count`）属 🟠 STABLE 的"只增"；② **JSON 单体/面板/工具端点业务降级维持 200**（v1.5 N1 裁决关闭）——这不是"状态码变更"，而是**保持旧版本契约**，与 PRD AC-A5 逐格一致；真实 503 仅**连接准入拒绝**（主/流端口）与 **`/healthz` degraded**（健康端点自身语义，**不构成"业务端点可 503"的先例**）（§2.4 / §7.1 N1）。**v1.7 新增两项「只增」边界（须编排层登记）**：③ SSE `quote` 字段负载内新增 `depth`（五档盘口）——`items[code].quote` 由"basic 客体"变为"basic 客体 **+ `depth` 键**"，属 🟠 STABLE「只增」（既有键类型与含义不变；空 dict/全 0/非普通股/指数 ⇒ **该键不出现**，不伪造）；④ `POST`/`PATCH /stream/subscriptions` 响应新增 `refresh_capacity_codes`/`refresh_lag_ticks`/`capacity_warning`（只增）。**v1.8 新增「只增」边界（须编排层登记）**：⑤ **RSS 条件请求**——5 个 `ROUTES` feed 的 200 新增 `ETag`（弱校验器）/`Last-Modified` 头，条件命中返回 **`304`**（无 body / 无 `Content-Encoding` / 无 `Content-Length`），feed XML 新增 **`<ttl>`**（advisory，分钟）；**无任何条件头时 200 body/状态码逐字不变**，`Vary`/`private` 反缓存投毒语义与业务降级恒 200 全部保持（§2.7 / §3.1 例外 7 / §7.1 N4）
 
 ## 0. 阅读指引
 
 | 节 | 内容 | 读者 |
 |----|------|------|
 | §1 | 现状链路 + R1-R20 根因归类（架构级 vs 实现级） | 全体 / task-decomposer |
-| §2 | 目标架构（6 个设计轴） | task-decomposer |
+| §2 | 目标架构（7 个设计轴） | task-decomposer |
 | §3 | 模块变更矩阵（含"明确不改"） | code-developer |
 | §4 | 非功能预算（延迟/吞吐/资源上界） | tester / 容量评估 |
 | §5 | ADR-001~ADR-017 | 评审 |
@@ -667,6 +668,54 @@ _broadcast(snapshot):
 - **异常退避（v1.4）**：`_push_once` 抛异常时，连续失败数 `consecutive` 决定退避跨度 `min(2^(consecutive−1), 8)` 个 tick，并与网格取 max。**旧行为是固定 `sleep(1)`**——一个反复失败的路由会把循环降级成 ~1s 自旋（每个间隔重跑至多 `tick` 次），在最糟的时刻放大上游压力。
 - **degraded 与 slip 只统计"真的跑过的轮"**：耗时 > `0.8×tick` ⇒ `stream_tick_degraded_total += 1`；耗时 ≥ `tick` ⇒ `stream_tick_slip_total += 1`。空池轮耗时 ≈0ms，两个计数都不增长（它们是刷新超预算的属性，不是空转的属性）。**v1.7：进程首个"刷新轮"（`cold_first`）豁免一次**——它付的是一次性冷路径成本（空连接池/DNS 缓存/sector 缓存），属启动开销而非退化；仅该轮豁免，其后所有超时照常计数（真实退化绝不被隐藏）。
 
+### 2.7 RSS 响应缓存校验器与 304 语义（HTTP 条件请求；v1.8 新增）
+
+> **背景与漂移归属**：本能力已于 P3a 实现并验证（详设 `doc/detailed/server.md` v1.7 / BR-SRV-36..44；测试 `doc/tester/RSS条件请求_测试执行报告.md`；集成 `doc/tester/integration-report.md`），但 SAD v1.7 全文无落点 ⇒ 设计评审「漂移检测」判定为 **P1 级契约缺口**（`doc/review/rss-conditional-get_详细设计评审_专家版.md` **D-1**），本轮（v1.8）回填。**命名澄清（评审 D-4）**：下文「本专项 R1」指 `_MEMORY_CACHE.md` 工作文件的"内容未变 ⇒ ETag 不变 ⇒ 304"，与 SAD/PRD 的**根因编号 R1–R20 同名不同义**；SAD 侧统一以 **`AC-A13` / `US-RSS-1`** 指代本能力，避免误读。
+
+**设计决策：条件请求的校验器必须是「规范化体弱校验器」，不能是裸 body 哈希。**（ADR-023）
+
+**职责划分（勿混淆）**：
+- **缓存 TTL 管上游新鲜度**——`cache_policy('feed')['ttl']`（盘中 30s / 非盘 180s）到期后**仍回源重生成**；
+- **ETag 管客户端带宽**——内容未变 ⇒ `304` 零 body，省的是客户端**每次轮询的 ~37–45KB body**（部署实测 `Content-Length: 45003`（`/cls/telegraph`）/ `12901`（`/jin10/flash`）），**不是**上游请求（上游请求由 TTL 决定，与条件请求无关）。
+
+**适用范围**：仅 `ROUTES` 的 **5 个 RSS feed** 的 `GET` / `HEAD`。`/opml.xml`、`/`、`/healthz`、全部 JSON 端点**不支持**条件请求（无任何条件头时行为与旧版逐字一致）。**仍为拉模型**：`RSSHandler` **未设置 `protocol_version`** ⇒ 仍为 **HTTP/1.0**、**未启用 keep-alive**（全仓仅 `stream.py` 的流端口为 HTTP/1.1）；304 无 `Content-Length` 由 HTTP/1.0 的 **EOF** 收尾（RFC 9110 §6.3 / §8.6——304 若带 `Content-Length` 必须**等于 200 体长**，写 `0` 反而违规）。
+
+**弱 ETag 派生口径（`_feed_etag`，纯函数：不读时钟、不读缓存）**：
+
+```
+etag = 'W/"' + sha256( normalize(xml) ) + '"'
+normalize = 用空占位替换三类「派生元数据」的【内容】后再对整串 utf-8 哈希：
+  ① <lastBuildDate>…</lastBuildDate>   （count=1，channel 级）
+  ② <ttl>…</ttl>                       （count=1，channel 级）
+  ③ <pubDate>…</pubDate>               （count=0，全量，item 级多条）
+其余任一字节（item 的 guid/title/link/description、channel 字段、<atom:link feed_url>）都进哈希。
+```
+
+- **为什么必须剔除 `<lastBuildDate>`/`<ttl>`**：`generate_rss` 的 `<lastBuildDate>` 每次生成取**当前时间**，`<ttl>` 随盘/非盘在 `1↔3` 间变化 ⇒ 裸 body 哈希在**每次 TTL 重生成后都改变** ⇒ 客户端重放旧校验器**永远得 200** ⇒ 能力**静默失效**（表面 200、实则 304 永不命中）。
+- **为什么 `<pubDate>` 也必须剔除（评审 P1-01）**：eastmoney/ths/jin10 三个 feed 的 item 级 `pubDate` 存在**"当前时间回落"出口**（上游时间字段缺失/非法时回落到 `now`）——该回落值**位于哈希区内**，同样使每次 TTL 重生成换 ETag ⇒ 3/5 feed 永远 200。剔除后 item 身份仍由 `<guid>` 承载。
+- **语义上为弱校验器**：因规范化**去除了字节差异**，按 RFC 9110 §8.8.3 必须标记 `W/`。ETag 在 gzip **之前**由**未压缩 XML** 派生 ⇒ gzip/identity 两个表示共享同一弱标签，304 各客户端复用自身副本（故 304 **不得**携带 `Content-Encoding`）。
+- **双向不变式**：**除 `pubDate`/`lastBuildDate`/`ttl` 三项外的**内容未变 ⇒ ETag 不变（不误 200，本专项 R1）；**除三项外**任一字节变化 ⇒ ETag 必不同（不误 304）。**已登记取舍**：仅 `pubDate` 字节变化（上游真实更正发布时间）时 ETag 不变——理由与代价见 §7.2 **AR-16**。
+
+**`Last-Modified` 时间源与可接受取舍**：`Last-Modified = cache.feed_cache_get_entry(path)['time']`（`feed_cache_put` **写入时刻**，秒级）。**仅在真实缓存条目存在时**发送——降级/回源失败路径（`_guard` rss 分支返回 `(error_xml, None)`）**不发** `Last-Modified`、`If-Modified-Since` 不可评估（绝不拿陈旧条目时间冒充降级体）。**取舍**：`Last-Modified` 是缓存写入时刻而非上游发布时间 ⇒ **仅带 IMS** 的客户端跨 TTL 边界（写入时刻前进）仍得 200 全量；带 **`If-None-Match`** 的客户端**不受影响**（以规范化 ETag 判定）。**推荐下游用 `If-None-Match`**（AR-16 / N4）。
+
+**条件头优先级与响应组成（RFC 9110 §13.1.3 / §15.4.5）**：
+
+| 项 | 语义 |
+|----|------|
+| `If-None-Match` | **优先**——只要它**存在**，就**只**评估它（匹配 ⇒ 304；不匹配 ⇒ 200），**完全忽略** `If-Modified-Since`。支持 `*` / 逗号多值 / `W/` 弱比较（**只认字面大写 `W/`**；小写 `w/"…"` 按 opaque tag 字面比较 ⇒ 200） |
+| `If-Modified-Since` | 仅 INM 缺失时评估；秒级 `int(last_modified) <= int(ims_epoch)` ⇒ 304。**非法/不可解析日期头一律忽略 ⇒ 200，绝不 400/500**（解析、补时区、`timestamp()` 全在同一 `try` 内，含 `OverflowError`/`OSError`） |
+| **304 组成** | 由专用 `_send_not_modified` 生成：**无 body / 无 `Content-Encoding` / 无 `Content-Length` / 无 `Content-Type`**；**必带** `ETag`（当前弱标签）+ `Last-Modified`（有值时）+ `Cache-Control`（**与 200 同值**，同一 `_cache_age()` 来源）+ `Vary`（`varies_on_host` 时为 Host 三件套 + `Accept-Encoding`，否则 `Accept-Encoding`）。**304 不写 feed 缓存**（LRU 触碰由读取路径完成）。`HEAD` 与 `GET` 走同一条件判定 |
+| **200 增量** | `_send_text` **纯新增**可选 `etag=`/`last_modified=`：200 **必发** `ETag`，有缓存条目时发 `Last-Modified`；其余头逐字不变 |
+
+**既有契约零破坏**：`Vary`/`private` 反缓存投毒语义（`PUBLIC_BASE_URL` 未设 ⇒ base URL 由 Host 派生、ETag 随之不同 ⇒ `Vary` 防共享缓存串号）、200 响应语义、`Cache-Control` 与 304 同值、业务降级恒 200（降级 feed ⇒ 无 `Last-Modified`，IMS 不生效；同一错误表示重放可 304，但**不与成功体混淆**）全部保持。
+
+**`<ttl>`（RSS 2.0 channel 级，分钟）**：`generate_rss(..., ttl=)` 纯新增可选形参；5 个 feed handler 传 `_feed_ttl_minutes() = max(1, (cache_policy('feed')['ttl'] + 59) // 60)` ⇒ **盘中 30s → 1 / 非盘 180s → 3**，位置在 `</lastBuildDate>` 与 `<atom:link>` 之间；`ttl is None or int(ttl) <= 0` ⇒ **不输出**（RSS 2.0 要求正整数，不得出现 `<ttl>0</ttl>`）。
+> ★ **契约语句（须进 `API.md`，见 §7.1 N4）**：**`<ttl>` 是聚合器缓存提示（advisory）、非时效保证；最小粒度 1 分钟**（RSS 2.0 只能表达整分钟）。**推荐下游轮询策略 = 「`ETag` 条件请求优先、间隔 ≥30s」**——不得照抄 `<ttl>1</ttl>` 把轮询放慢到 60s（服务端 `Cache-Control: max-age=30` 比它更激进）；**需要 <60s 的时效请用 SSE（4s）**。`<ttl>` 与 `<lastBuildDate>` 一样**已被剔除出 ETag**，故盘中/非盘切换不产生假 200。
+
+**不选其他**：① **裸 body 哈希**——每次重生成必变 ⇒ 永远 200 ⇒ 能力静默失效（已由评审 P1-01 证伪）；② **guid 序列哈希**——丢失 channel 字段与 item 内容变化（title/link/description 变了却 ETag 不变 ⇒ **误 304** 返回旧 body），且需维护独立序列化格式；③ **确定性化回落**（item 缺时间时不回落 now / 删 `<pubDate>`）——改动 feed 体、且丢失上游发布时间的展示价值，收益不如规范化投影；④ **`Cache-Control: max-age` 替代条件请求**——max-age 只表达"客户端可复用多久"，**不解决"到期后内容未变仍需重传 body"**，二者互补而非替代。
+
+**影响**：`server.py` 新增 `_feed_etag`/`_if_none_match_matches`/`_if_modified_since_not_modified`/`_not_modified`/`_feed_ttl_minutes`/`_send_not_modified`，`_serve_feed` 增条件分支、`_send_text` 增两可选形参；`cache.py` 新增 `feed_cache_get_entry`（既有 `_feed_cache_lock` 下的浅拷贝访问器，**不改** `feed_cache_get` 签名）；`utils.py` 的 `generate_rss` 增 `ttl=None` 可选形参。**无新锁**（校验器为纯函数 / 只读 `self.headers`）。**成本**：每次 RSS 请求一次 ≈40KB sha256 + 3 次 regex ≈ **0.1–0.2ms**（远小于同响应 gzip 与网络收益）。**AC**：**AC-A13**（PRD v0.7 由 prd-writer 并行落号）。
+
 ---
 
 ## 3. 模块变更矩阵
@@ -676,11 +725,12 @@ _broadcast(snapshot):
 | 模块 | 改什么 | 为什么（根因） | AC | 风险 |
 |------|--------|---------------|----|------|
 | **config.py** | 新增 `cache_policy()` + `DOMAIN_MATRIX`（含 `longhu` 域、`cache_max`、plate stagger 派生；`plate`/`margin` 的 `cache_max` = `'n/a'`）+ **内部名 `_DOMAIN_ENCODING`（D-5）**；删除/改由 policy 承接的 TTL 与 `*_REFRESH` 常量；**`CACHE_TTL` 逐消费者迁移后删除**（cache.py 默认、`server._get_or_fetch_feed`；**`utils.py:12` 为未使用 import**，Q3）；**新增代码归一化唯一权威 `canonical_code(code) -> str\|None`（v1.4）** + `VALID_STOCK_CODE`/`_DOTTED_STOCK_CODE`（规范形 = 小写交易所前缀 `sh600519`；接受 `SH600519`/`600519.SH`；非法 ⇒ `None`）+ **帧尺寸单一来源 `stream_frame_bytes(codes, fields)`**（`STREAM_FIELDS_PER_FRAME=3`/`STREAM_FRAME_BYTES_PER_FIELD=23KB`）；新增 env：`MAX_INFLIGHT`/`MAX_GROUPS`/`MGMT_BODY_TIMEOUT`/`STREAM_QUEUE_BYTES_BUDGET`(默认 128MB)/`NEG_TTL`/`PROBE_TIMEOUT`/`MAX_HEALTH_INFLIGHT`/**`STREAM_PING_INTERVAL`(默认 20，原硬编码，D-4)**/**`LISTEN_BACKLOG`(默认 128，TCP accept backlog，默认 5 会在突发连接下内核丢 SYN ⇒ ~1s RTO 尾巴)**/**`CDP_RESTART_THROTTLE`(默认 15)**/**`STREAM_GROUP_IDLE_TTL`(默认 300)**/**`TRADING_HOLIDAYS`(空，逗号分隔 `YYYY-MM-DD`)**；`_trading_tiers()` 保留为唯一时间源，`_is_trading_hours(now=None)` 增补 `now` 注入点 + 节假日判定（配置的假日按非交易时段处理）；**（v1.7）** `_trading_tiers()` 增 **L0=4s**（盘中），`quote` 由 L1 升 L0、**新增 `depth` 域（L0 / dedup / `cache_max=500`）**；新增**上游线路拼写**权威 `upstream_secu_code(code)`（沪/深=前缀形、北交所=点号大写 `430047.BJ`）与 `warm_hosts()`（从 SSE 热路径 URL 派生预热 host）；env 新增 `BATCH_MAX_WORKERS`(20) / `STREAM_PER_FETCH_EST`(0.3) / `HTTP_POOL_MAX_PER_HOST`(24) / `HTTP_POOL_IDLE_TTL`(60) / `HTTP_DNS_CACHE_TTL`(300) / `HTTP_WARM_CONNECTIONS`(1) / `HTTP_WARM_TIMEOUT`(2.0) | RC-1（R16/R12/D1-D5）、R6/R17、P1-6 | A3/A4/E6/E9/S3/S7 | **H** |
-| **cache.py** | `fetch_json` **五段式**（正缓存 → **端到端 deadline 闸门（v1.4，第 5 位形参 `deadline`；闸门在正缓存之后）** → 负缓存门禁 → leader 单次尝试 → follower 读状态）+ **半开探测 `_probe_budget` 阶梯（2→4→5，`_PROBE_BUDGET_CAP=5.0` 封顶，v1.5）** + 负缓存（URL 级，4 键含 `first_at`）+ `FetchError(kind)` + 删除 fall-through 三段路径 + **gap 分支 fail-closed 兜底（D-1）**；新增 `encoding='utf-8'` 形参（修 P1-4）；URL 缓存改 `last_access` 淘汰 + 双触发清扫；**feed 缓存机制落点 = `feed_cache_get`/`feed_cache_put`**（LRU/双触发清扫/淘汰均在此层，裁决 #3）；新增 `build_batch_response()`（纯函数，内置 `_` 前缀跳过 / data+error 冲突 / 未知 kind 归一，D-2；**返回组装好的 dict**）；允许 import 新增 `socket`（D-3）；**metrics 一律在业务锁释放后发布**（`_publish_url_stats`/`_record_failure`/`_clear_negative`），命中路径（段①/③双检/④）**统一计 hit**（只计段①会把 `cache_hit_ratio` 系统性低估）；`import json` 已删。**帧计费（`_Frame`/refs/`stream_queue_bytes`）不得落在此模块**——它属 stream 层，cache.py 只做纯缓存/契约，守 `layerIsolation`（修 P2-N6）；**（v1.7）** 新增 **HTTP 传输层**：`_ConnectionPool`（按 `(scheme,host,port)` keep-alive 复用、每 host 有界、空闲淘汰、失效连接丢弃并重试一次、锁外 IO）+ `_DNSResolver`（进程内 DNS TTL 缓存，仍按 hostname 拨号以保 SNI/证书校验）+ `warm_transport()`（**仅握手、不发业务请求**的启动预热）+ 池化 `urlopen` drop-in（保持 `urlopen` 可观测契约）；`fetch_json` 增**第 6 关键字形参 `refresh_epoch`**（`_cache_fresh` 拒绝 `write_time < refresh_epoch` 的条目） | RC-2（R9）、R11/R3、RC-3（R4/R14）、P1-2/P1-4/P1-5 | S3/S6/A9/A10/E6/E9 | **H** |
-| **server.py** | 新增 `_guard(shape)` 统一异常边界，覆盖**全部 14 个** JSON 路由分支（**shape 由 `_JSON_SHAPES` 路由表派生**，含 `assert len == 14` 与"分派集合 == 表"的 import 期断言；逐一列名，§2.4）；`_handle_stock_batch` 做**入参归一化（`_parse_stock_codes` → `config.canonical_code`）+ 截断 + `dropped` 注入 + 键回写（`_rekey_batch_response`）**；`build_health_payload` 专用执行器 + **信号量有界准入（替换死代码 stale）+ `_HealthBatch` 准入位生命周期** + 零上游快路径；503 计数接入 metrics（**3 个计数点，v1.5**）；`MAX_INFLIGHT`/`MGMT` 常量接入；`_cache_age()` 改读 policy（未登记路径回落 `_DEFAULT_AGE_DOMAIN='f10'` ⇒ 恒 300，与现状逐字等价）；`/ths/longhu` 改走 `fetch_json`（L4，`encoding='gbk'`，**2 URL 并发 ≤3**）；**feed TTL 派生 + 防击穿调用 `cache.feed_cache_get/put`**（miss → per-path lock → **二次 `feed_cache_get` 双检** → fetch → `feed_cache_put`；`ttl` 在**二次仍 miss 之后**才求值；**机制归 cache 层**，Q3③/裁决 #3）+ `CACHE_TTL` 消费者迁移；`/cls/hotplate` 保持分区 error 客体（**全分区失败时顶层补 `error`**）；**`BoundedThreadPoolServer.__init__(..., max_inflight=None)`（v1.4：流端口显式传 110，否则主端口默认 40 会掩盖 100 连接上限）**；**（v1.5 N1 关闭）`_json_payload_has_data` 已删——`_send_json_shape` 恒 200 + error 客体，业务降级不产生 503（§2.4）**；`request_queue_size = LISTEN_BACKLOG`；**（v1.7）** `main()` 以 daemon 线程调 **`cache.warm_transport`** 预热传输（best-effort，**不 gate 启动/`healthz`**，不发业务请求） | RC-3（R1/R4）、RC-4（R2）、D4/D5、R15、P1-3/P1-4/P1-6/P2-3② | S1/S8/S10/A5/A9/A8/E9/E6 | **H** |
+| **cache.py** | `fetch_json` **五段式**（正缓存 → **端到端 deadline 闸门（v1.4，第 5 位形参 `deadline`；闸门在正缓存之后）** → 负缓存门禁 → leader 单次尝试 → follower 读状态）+ **半开探测 `_probe_budget` 阶梯（2→4→5，`_PROBE_BUDGET_CAP=5.0` 封顶，v1.5）** + 负缓存（URL 级，4 键含 `first_at`）+ `FetchError(kind)` + 删除 fall-through 三段路径 + **gap 分支 fail-closed 兜底（D-1）**；新增 `encoding='utf-8'` 形参（修 P1-4）；URL 缓存改 `last_access` 淘汰 + 双触发清扫；**feed 缓存机制落点 = `feed_cache_get`/`feed_cache_put`**（LRU/双触发清扫/淘汰均在此层，裁决 #3）；新增 `build_batch_response()`（纯函数，内置 `_` 前缀跳过 / data+error 冲突 / 未知 kind 归一，D-2；**返回组装好的 dict**）；允许 import 新增 `socket`（D-3）；**metrics 一律在业务锁释放后发布**（`_publish_url_stats`/`_record_failure`/`_clear_negative`），命中路径（段①/③双检/④）**统一计 hit**（只计段①会把 `cache_hit_ratio` 系统性低估）；`import json` 已删。**帧计费（`_Frame`/refs/`stream_queue_bytes`）不得落在此模块**——它属 stream 层，cache.py 只做纯缓存/契约，守 `layerIsolation`（修 P2-N6）；**（v1.7）** 新增 **HTTP 传输层**：`_ConnectionPool`（按 `(scheme,host,port)` keep-alive 复用、每 host 有界、空闲淘汰、失效连接丢弃并重试一次、锁外 IO）+ `_DNSResolver`（进程内 DNS TTL 缓存，仍按 hostname 拨号以保 SNI/证书校验）+ `warm_transport()`（**仅握手、不发业务请求**的启动预热）+ 池化 `urlopen` drop-in（保持 `urlopen` 可观测契约）；`fetch_json` 增**第 6 关键字形参 `refresh_epoch`**（`_cache_fresh` 拒绝 `write_time < refresh_epoch` 的条目）；**（v1.8）** 新增 **`feed_cache_get_entry(path)`**——feed 缓存的**浅拷贝访问器**（复用既有 `_feed_cache_lock`，含 `move_to_end`/`last_access`），`entry['time']` 为 **RSS `Last-Modified` 的权威时间源**；**`feed_cache_get` 签名与语义不变**（既有 5 调用方零改动） | RC-2（R9）、R11/R3、RC-3（R4/R14）、P1-2/P1-4/P1-5 | S3/S6/A9/A10/E6/E9 | **H** |
+| **server.py** | 新增 `_guard(shape)` 统一异常边界，覆盖**全部 14 个** JSON 路由分支（**shape 由 `_JSON_SHAPES` 路由表派生**，含 `assert len == 14` 与"分派集合 == 表"的 import 期断言；逐一列名，§2.4）；`_handle_stock_batch` 做**入参归一化（`_parse_stock_codes` → `config.canonical_code`）+ 截断 + `dropped` 注入 + 键回写（`_rekey_batch_response`）**；`build_health_payload` 专用执行器 + **信号量有界准入（替换死代码 stale）+ `_HealthBatch` 准入位生命周期** + 零上游快路径；503 计数接入 metrics（**3 个计数点，v1.5**）；`MAX_INFLIGHT`/`MGMT` 常量接入；`_cache_age()` 改读 policy（未登记路径回落 `_DEFAULT_AGE_DOMAIN='f10'` ⇒ 恒 300，与现状逐字等价）；`/ths/longhu` 改走 `fetch_json`（L4，`encoding='gbk'`，**2 URL 并发 ≤3**）；**feed TTL 派生 + 防击穿调用 `cache.feed_cache_get/put`**（miss → per-path lock → **二次 `feed_cache_get` 双检** → fetch → `feed_cache_put`；`ttl` 在**二次仍 miss 之后**才求值；**机制归 cache 层**，Q3③/裁决 #3）+ `CACHE_TTL` 消费者迁移；`/cls/hotplate` 保持分区 error 客体（**全分区失败时顶层补 `error`**）；**`BoundedThreadPoolServer.__init__(..., max_inflight=None)`（v1.4：流端口显式传 110，否则主端口默认 40 会掩盖 100 连接上限）**；**（v1.5 N1 关闭）`_json_payload_has_data` 已删——`_send_json_shape` 恒 200 + error 客体，业务降级不产生 503（§2.4）**；`request_queue_size = LISTEN_BACKLOG`；**（v1.7）** `main()` 以 daemon 线程调 **`cache.warm_transport`** 预热传输（best-effort，**不 gate 启动/`healthz`**，不发业务请求）；**（v1.8）** **RSS 条件请求**：新增 `_feed_etag`（规范化体弱校验器）/`_not_modified`/`_if_none_match_matches`/`_if_modified_since_not_modified`/`_feed_ttl_minutes`/`_send_not_modified`；`_serve_feed` 增条件分支（200 带 `ETag`+`Last-Modified`；命中 ⇒ 304 无 body/无 `Content-Encoding`/无 `Content-Length`；**仍 HTTP/1.0、未启用 keep-alive**）；`_send_text` **纯新增** `etag=`/`last_modified=` 两可选形参（其余调用点零改动）；`_get_or_fetch_feed` 返回 **2-tuple `(xml, last_modified)`**（降级路径 `(error_xml, None)`） | RC-3（R1/R4）、RC-4（R2）、D4/D5、R15、P1-3/P1-4/P1-6/P2-3② | S1/S8/S10/A5/A9/A8/E9/E6 | **H** |
 | **stream.py** | `codes→frozenset`、`fields→tuple`；`_build_frame(snapshot, codes, fields)` **签名变更 + 帧契约扩元数据**（`codes_total`/`fields`/`missing`/`missing_count`/`errors`/`stale`/`stale_count`，**items 覆盖全部订阅码**，仅空 `codes` 返回 `None`，C-5）；`_broadcast` 锁序与无锁帧构建 + **先滤 `closed` 再腾位** + put/closed 竞态收口；**distinct 帧引用计数 + 队列字节预算 + 丢弃计数**（P0-1）+ **`_frame_bytes_lock` 保护 `refs` 读改写、`_drain_conn_queue` 在摘除/销毁路径逐帧归还字节、`None` 哨兵不计费**（P1-N2）；**`_refresh_pool(codes, now=None, fields=None, tick=None, deadline=None)`** 改「**按订阅字段并集刷新的分片轮转**」（R-6/AR-1；`coverage_codes` 盘中 quote / 2 域 / 全 3 域 = **106 / 71 / 53**，v1.7；coverage=213；`tick`/`deadline` 单次计算下传 + `tick_budget_exceeded`）；**新增 `_subscribed_fields`/`_active_targets`（codes+fields 同锁读）**、**`_carry_forward`/`_last_known`（last-known 结转 + `stale`）**、**`_valid_fields` fail-closed（显式非法字段 → 400，不再静默放宽为全字段）**、**`config.canonical_code` 归一化（`create_group`/`patch_group`，含非法码 400）**、**`_capacity_meta`（201/200 响应补容量元数据）**、**`_require_code_list`（非 list → 400）**；`_read_json_body` 5s 读预算；**`_tick_sleep_seconds` 整 tick 网格滑移 + `push_loop` 异常退避（1/2/4…≤8 tick）**；`_refresh_pool` 跳过 `_` 前缀键（但**保留** `_errors` 到 `snapshot['_errors']`）；`create_group` 校验 `MAX_GROUPS`（超限 400）+ **单帧余量准入**（v1.4）；`_serve_sse` 发 `Connection: close` + `close_connection=True`；`make_stream_server` 传 `max_inflight=MAX_STREAM_CONNS+10=110`；**（v1.7）** `tick_interval(fields)` = **订阅域最短 tier TTL**（盘中 quote/depth→L0=4s；无订阅回落 L1=8s）；新增 `_domain_refresh_epoch`（最快域以轮起点为 `refresh_epoch`）+ `_call_refresh_handler`（关键字下传，仅调用帧 `TypeError` 回退）；`_FIELD_FETCH_CALLS['quote']` **1→2**（basic_info + depth 同拍）；`_broadcast` 增**发送层去重**（`_frame_signature` 剔除 `ts` 的 blake2b 摘要 / `last_sig` / 新连接 `sent_any` 强制首发：内容未变不发、新连接必收一帧）；`_wake_push_loop` 冷启动打断**空闲**等待（no-burst：只打断空池轮，活跃轮保持硬网格睡眠） | R5、R6、R7、R8、R14 陷阱点、P0-1/P1-1/P1-N1/P1-N2/P1-4/P1-6 | S2/S7/S10/E5/E7/A1/A2/A3/A7 | **H** |
 | **stock_api.py** | 全部取数器签名加 `deadline`/`ttl` 并传递到 `fetch_json`；删除 `_MAX_CACHE_AGE`，按 `cache_policy` 注入 `ttl`/`pool_refresh`/`pool_max`/`cache_max`；**池淘汰不再 `cache.pop`，端点缓存独立 LRU**（P1-1）；`fetch_cls_f10` 失败 `raise FetchError('cdp_unavailable')`；`_run_batch` 返回 `(results, errors)`；**新增共享失败状态层 `_fail_ledger`**（码级 120s 冷却，**4 元条目** `[fail_count, cooldown_until, kind, last_fail_ts]`，批量与 prefetch 共用，P1-5），删除 4 个 prefetch 的局部 `fail_blacklist`；**新增 `_LOCAL_BUDGET` 本地预算标记（对外翻译为 `upstream_timeout`、**绝不入冷却账**，v1.4）** + `_call_fetcher` 的"仅调用帧 `TypeError` 才降级"；`_process_chunk` 全链 **`canonical_code` 归一化 + 结果回写原拼写**；`cached_batch(domain, codes)` 只读终点缓存（供 stream 分片）；`code_cooldown_list` 导出 + 发布节流；`fetch_cls_announcement` 裸 `ttl=15` 删除（Q5）；**依赖新增 `cdp_engine.page_data`（同层，无环）**；**（v1.7）** 新增 `fetch_cls_stock_depth`（`depth` 域五档盘口，`GET /quote/stock/volume?field=five`，REST/无 sign/无 WS；**空 `data` dict 或 20 字段全 0（指数）⇒ 返回 `None`，不伪造**；非致命，失败绝不影响同拍的 quote）；`fetch_cls_basic_info` 阶段 3 附加 `depth` 并让 `refresh_epoch` 送达**阶段 1 与阶段 3**（阶段 2 sector 保持 TTL）；新增**空壳防御** `_basic_info_is_valid`（`code:200` 但 `secu_name`/`last_px` 全空 ⇒ `upstream_error`，**不缓存、不进帧**）；所有上游 URL 拼写改经 `config.upstream_secu_code`（沪/深前缀形、北交所点号 `430047.BJ`）；取数器签名扩为 `(code, deadline=None, ttl=None, refresh_epoch=None)` | RC-1（R12）、RC-2（R13/R14）、RC-4、P1-1/P1-5/P1-6 | A3/A6/A7/A10/E2/E9/S6/S7 | **H** |
 | **market_api.py** | TTL 改 policy（`margin` 域）；失败降级体保持既有 `_error` 语义（单体客体，**取值收敛为枚举 kind**），补 `FetchError` 分类参与 metrics + **防重复计数约定**（`fetch_json` 已计的失败不再二次计） | R16、RC-3 | S1/S10 | **M** |
+| **utils.py** | `generate_rss(..., ttl=None)` **纯新增可选形参**（RSS 2.0 `<ttl>`，分钟整数；`ttl is None or int(ttl) <= 0` ⇒ **不输出**；位置在 `</lastBuildDate>` 与 `<atom:link>` 之间）；其余 RSS/OPML 生成与解析不变 | RSS 条件请求「`<ttl>` 为 advisory、最小 1 分钟」（v1.8，§2.7 / ADR-023） | AC-A13 | **L** |
 | **cdp_engine.py** | 新增 `page_data(page)` 防御取数（总函数；None/非 dict/空 dict → `None`，**无键级回退**）；`cdp_restart_window` 状态机（`_mark_*` 唯一写者 + 读只经 `restart_window_snapshot()` + **`full_chrome_restart` 的 `finally` 兜底必达终态**）+ 模块加载即发布初始 `idle`；`watchdog_restart_skip_reason()`（盘中避让 + 节流集中判断）；`cdp_ready()`；**`_last_data` 老化口径（时钟缺失 = 陈旧）** + 四表同步淘汰；**`navigate_stock` 有界导航锁（`_acquire_navigate_lock`）+ `canonical_code` 归一化比对**；页面求值超时预算对齐 §2.3 | RC-3（R18）、R19、R20、P1-3 | S1/S4/S9/S10 | **M** |
 | **server.py（CDP 守护）** | **`_cdp_memory_watchdog`（含 `_is_trading_hours` 避让判断）在 `server.py:881`，非 cdp_engine.py**（修 P2-2）；守护重启交易时段避让（`_is_trading_hours()` 为真则跳过本轮，顺延到下一周期） | R19/R20 | S4/S9 | **M** |
 | **metrics.py（新增）** | 计数/仪表 + `snapshot()`；被 server/stream/cache/stock_api/market_api/cdp_engine 引用。**v1.4 实测口径**：`_KNOWN` 注册表（19 名）+ `_DEFAULTS` 零值表（import 期 `assert` 互锁）、`_LABELED_GAUGES` 形状守卫、`snapshot()` 零值恒定 + 锁内浅拷贝/锁外深拷贝、`reset()`（测试）。**规模已从设计期的 ~60 行增至 185 行**（形状守卫/深克隆/告警去重），仍为零依赖叶子模块 | RC-4（观测）、AC-S10 | S10 | **L** |
@@ -712,6 +762,7 @@ server                               ← Layer 2（main() 内延迟 import strea
 | **（v1.4 例外 3）SSE 帧新增元数据键**：`codes_total`/`fields`/`missing`/`missing_count`/`errors`/`stale`/`stale_count`，且 `items` 由"缺数据即缺席"改为"**覆盖全部订阅码、缺数据为 `null`**"（C-5） | 🟠 STABLE「只增」范围内：既有键 `ts`/`items` 的**类型与含义不变**，新增键与"全码在位"是**语义补全**（原缺席语义无法表达"未轮到"）。**但 `items` 由稀疏变稠密会使帧字节增大**，客户端若按"键存在即数据"的旧假设遍历需适配 ⇒ 列入契约同步项 |
 | **（v1.7 例外 5）SSE `quote` 字段负载内新增 `depth`（五档盘口）** | 🟠 STABLE「只增」：`items[code].quote` 是客体，新增 `depth` 键不改既有键/类型；**空 dict、20 字段全 0（指数）、非普通股（北交所/指数/未知码）⇒ 不出现 `depth` 键**（与"不伪造"语义一致）。帧字节随之增大（实测 quote×50 帧 ≈58.9KB，其中 depth ≈322B/码、占 ≈27%；3 域×50 ≈2.0MB）⇒ 列入契约同步项 |
 | **（v1.7 例外 6）`POST`/`PATCH /stream/subscriptions` 响应新增容量元数据** | `refresh_capacity_codes`（恒有）、`refresh_lag_ticks`/`capacity_warning`（仅 C2 时）；既有 `sid`/`codes`/`fields` 不变 ⇒ 🟠 STABLE「只增」 |
+| **（v1.8 例外 7）RSS 条件请求：200 新增 `ETag`/`Last-Modified`、条件命中新增 `304`、feed XML 新增 `<ttl>`** | 🟠 STABLE「只增」：**无任何条件头时 200 body/状态码逐字不变**（`ETag`/`Last-Modified` 为**新增响应头**；`304` 仅在客户端带匹配校验器时出现，属**显式 opt-in**）；既有 `Vary`/`private` 反投毒、`Cache-Control` 与 304 同值、业务降级恒 200 全部保持。**须记变更日志 + 同步 `API.md`**（含「`<ttl>` 非时效保证、最小 1 分钟、需 <60s 用 SSE」语句，见 §7.1 N4） |
 | **（v1.4 例外 4 → v1.5 关闭）JSON 单体/面板/工具端点的降级状态码** | **N1 裁决关闭（§7.1 N1 / §9.5）**：业务降级**维持 200 + error 客体**，与旧版本契约及 PRD AC-A5 一致 ⇒ **不构成"改既有状态码"，不再是本节的例外**。真实 503 仅准入拒绝与 `/healthz`（§2.4） |
 | 既有字段类型与含义：尤其 `null = 无数据` | 只增不改（**例外**：`feeds[].status` 取值变更，须编排层批准，见 §7.1 Q2；**已在代码落地**，`API.md` 待同步） |
 | 断线重连并续帧语义（AC-S11）：同一 sid 在 1 tick 内重连 → 下一 tick 收完整快照帧；组空闲 300s 回收 | **不改动**；依赖既有 `_register_conn` + `push_loop` 全量快照 + `STREAM_GROUP_IDLE_TTL`（断言依据见 §8） |
@@ -729,6 +780,7 @@ server                               ← Layer 2（main() 内延迟 import strea
 | 路径 | 端到端目标 | 预算分解（服务端 handler） | 备注 |
 |------|-----------|--------------------------|------|
 | 本地缓存命中 | P95 ≤5ms / P99 ≤15ms | policy 查表 <0.01ms + 逐码 dict 命中 + `json.dumps` 50 码 ≈ 1.5ms + socket 写 | 主要成本是序列化，非查表 |
+| **RSS 条件请求命中（304）** | — | `_feed_etag` ≈40KB sha256 + 3 次 regex ≈ **0.1–0.2ms** + 少量头写出；**零 body、零 gzip、零上游回源**（回源仍由 feed TTL 决定） | **v1.8**：省的是客户端**每次轮询 ~37–45KB body**（实测 `/cls/telegraph` `Content-Length: 45003`、`/jin10/flash` 12901），**不是**上游请求（§2.7） |
 | 上游命中（REST 回源） | P95 ≤1.2s / P99 ≤3s | **v1.7：keep-alive 连接池 + 进程内 DNS 缓存后，单请求实测 p50 139ms / max 167ms**（原 340ms，其中 DNS ≈176ms + 握手 ≈78ms；预热 `warm_transport` 消除冷进程首次扇出的一次性成本）→ 连接+首字节 + 读已远低于 0.4s+0.8s 预算；硬上限 `REQUEST_TIMEOUT=10s`；**批路径多码并行（≤`BATCH_MAX_WORKERS=20`，池上限 24 保证扇出不排队在池上）**，故 P95 由单码 RTT 主导而非 50×RTT | 任何单请求 ≤15s（AC-S7）；**仅对无失败历史的 URL** |
 | 故障快速路径（负缓存命中） | ≤1ms | 负缓存未过期 → 直接 `raise FetchError`，不触网 | AC-S3 模式 A/B |
 | 故障半开探测 | **高密度 P95 ≤5s / 低密度 ≤10s** | `_probe_budget(fail_count)` = 2→4→**5 封顶**（`_PROBE_BUDGET_CAP=5.0`）；持续黑洞稳态 = `5s 探测 + 5s NEG_TTL` = 10s 周期，慢占比 ≈50% ⇒ 高密度 P95 ≈5s、低密度退化为周期上界 ≈10s；**+ `_HISTORY_AGE=600s` 老化**每窗至多放行 1 次 10s 全预算探测（稀有事件，不改分档 P95） | AC-S3 模式 B（v1.5 重标；单请求 ≤15s；**6–10s"慢而未死"上游恢复延迟 ≤600s，见 §2.3 D-1 权衡**；P6c 校准，Q6） |
@@ -871,7 +923,7 @@ MAX_CODES_PER_SUB=200 只是**单组**上限，MAX_DEDUP_CODES=2000 才是**活�
 
 ## 5. 架构决策记录（ADR）
 
-> 每条含：背景 → 选项 → 决策 → 理由 → 影响 → 对应 AC。按"可逆性"排序：**低可逆 10 条（001-005 机制/契约 + 013 内存护栏 + 016 帧契约 + 017 代码身份 + 018 刷新新鲜度契约 + 020 上游线路拼写）**，**中可逆 12 条（006-012 + 014 + 015 + 019 传输池化 + 021 五档并入 + 022 发送去重）**。（v1.4 新增 015/016/017；v1.7 新增 **018-022**；001/003/009/013/014 按实现补正，v1.7 补 001/009/015/016。）
+> 每条含：背景 → 选项 → 决策 → 理由 → 影响 → 对应 AC。按"可逆性"排序：**低可逆 11 条（001-005 机制/契约 + 013 内存护栏 + 016 帧契约 + 017 代码身份 + 018 刷新新鲜度契约 + 020 上游线路拼写 + 023 RSS 条件请求校验器）**，**中可逆 12 条（006-012 + 014 + 015 + 019 传输池化 + 021 五档并入 + 022 发送去重）**。（v1.4 新增 015/016/017；v1.7 新增 **018-022**；**v1.8 新增 023**；001/003/009/013/014 按实现补正，v1.7 补 001/009/015/016。）
 
 ### ADR-001 TTL 单一权威来源（低可逆）
 **背景**：R16/R12/D1-D4——7 类互不引用的时间常量，至少 4 处断崖（含新发现的 feed 层 300s vs L3 30s）。
@@ -1038,7 +1090,16 @@ MAX_CODES_PER_SUB=200 只是**单组**上限，MAX_DEDUP_CODES=2000 才是**活�
 **理由**：排除 A（重复帧是伪信号）；排除 C（延迟真实变化不可接受）。B 从**源头**消除伪信号——同一内容绝不在一条流上连续出现两次，且它**只少发、不迟发**：变化仍在该 tick 发出，尚未收到任何帧的新连接由 `sent_any` 强制喂一帧而不必等下一个变化。**代价**：消费方必须把"本 tick 没有帧"理解为"数据未变"，而不是"流断了"（心跳 `event: ping` 每 20s 一次，仍可判活）。
 **影响**：`_frame_signature(frame)`（剔除前导 `ts` 后的 blake2b 16 字节摘要，O(1) 状态、固定长度比较）/ `SubscriptionGroup.last_sig` / `_SSEConn.sent_any`；`last_push_ts` **仅在真的发出帧时**刷新（去重跳过/目标全关不得冒充一次推送）；`_reserve_for` 为落后客户端丢帧仍是既有例外（该连接已在帧契约之外）。**AC**：E5/A1/A2；BUG-冷启动-01。
 
-**ADR 汇总**：**22 条**（低可逆 **10**：001-005 + **013** + **016** + **017** + **018** + **020**；中可逆 **12**：006-012 + **014** + **015** + **019** + **021** + **022**）；高可逆决策（如具体常数值、日志文案、"tick 网格 vs 0.25×tick 下限"这类一个函数即可回滚的节拍规则）不记 ADR（tick 节拍落点见 §2.6）。
+### ADR-023 RSS 条件请求：规范化体弱校验器（低可逆，v1.8 新增）
+**背景**：5 个 RSS feed 支持 HTTP 条件请求（`If-None-Match` / `If-Modified-Since` ⇒ `304`）。`generate_rss` 的 `<lastBuildDate>` 每次生成取当前时间，`<ttl>` 随盘/非盘在 `1↔3` 变化，且 eastmoney/ths/jin10 的 item 级 `<pubDate>` 在上游时间字段缺失/非法时**回落到当前时间**。若 ETag 直接派生自裸 body，则**每次 TTL 重生成后 ETag 必变 ⇒ 永远 200 ⇒ 能力静默失效**（表面正常、实则 304 永不命中）。校验器派生口径是**对外契约**（客户端缓存并回放旧 ETag），错一次即静默降级，故记 ADR。
+**选项**：A **裸 body 哈希**（实现最简；遇三个时钟派生字段即静默失效）；B **guid 序列哈希**（避开时钟；但丢失 channel 字段与 item 内容变化 ⇒ title/link/description 变了 ETag 不变 ⇒ **误 304** 返回旧 body）；C **规范化体弱校验器**——用空占位替换 `<lastBuildDate>`（`count=1`）、`<ttl>`（`count=1`）、`<pubDate>`（`count=0` 全量）的**内容**后对整串取 sha256，标记 `W/`。
+**决策**：C。
+**理由**：排除 A——它把"内容未变 ⇒ 304"从根上破坏（本专项 R1 的直接对立面）；排除 B——它以"漏报内容变化"换取"抗时钟抖动"，把 304 变成**过期的合法响应**（比 200 更危险）；C 用一次规范化同时满足双向不变式（除三项外内容未变 ⇒ ETag 不变；除三项外任一字节变 ⇒ ETag 必变），且 item 身份仍由 `<guid>` 承载。剔除字节差异 ⇒ 按 RFC 9110 §8.8.3 必须为弱校验器（`W/`）。
+**已知取舍**：仅 `<pubDate>` 字节变化（上游真实更正发布时间）⇒ ETag 不变、下游持旧副本至下一次真内容变化/TTL 重生成；理由：`pubDate` 在 3/5 feed 上是"解析失败回落"，纳入哈希会使功能必然失效，且其变化通常伴随 title/description/新 item 等**真内容**变化（漏报面极小，AR-16）。
+**影响**：`_feed_etag`/`_not_modified`/`_if_none_match_matches`/`_if_modified_since_not_modified`/`_send_not_modified`；`Last-Modified` 取缓存写入时刻（IMS-only 客户端跨 TTL 仍 200，已登记）；304 无 body / 无 `Content-Encoding` / 无 `Content-Length`；`<ttl>` advisory 最小 1 分钟（BR-SRV-43）；**仍为拉模型、HTTP/1.0、未启用 keep-alive**。**可逆性判据**：撤回只需删条件分支与两个可选形参；但 ETag 已发布给下游、`<ttl>` 可能诱导聚合器调整轮询，故定为**低可逆（对外契约）**。**AC**：**AC-A13**。
+**何时改变选择**：若上游提供稳定版本号 / 条目级时间戳（可作**强**校验器），可改为版本比进而放弃规范化投影；若引入 CDN，条件请求语义须交 CDN 统一实现。
+
+**ADR 汇总**：**23 条**（低可逆 **11**：001-005 + **013** + **016** + **017** + **018** + **020** + **023**；中可逆 **12**：006-012 + **014** + **015** + **019** + **021** + **022**）；高可逆决策（如具体常数值、日志文案、"tick 网格 vs 0.25×tick 下限"这类一个函数即可回滚的节拍规则）不记 ADR（tick 节拍落点见 §2.6）。
 
 ---
 
@@ -1061,7 +1122,7 @@ MAX_CODES_PER_SUB=200 只是**单组**上限，MAX_DEDUP_CODES=2000 才是**活�
 
 > ⚠️ 既有依赖说明：`cdp_engine.execute_js()` 内 `import websocket` 为**函数内延迟导入**，仅 CDP 模式使用；本架构不改该状态，且**不将其提升为硬依赖**。
 
-**tech-stack.json 已更新于 `doc/arch/tech-stack.json`（v1.7）**：含 `architectureRules`——`importRestrictions.denylist` 固化"零第三方库"红线；`allowlist` 补入 `websocket`（仅函数内延迟导入，修 P2-7）；`layerIsolation`/`fileStructure` 与 §2.6/§3 的模块划分一致，供 `code-developer` 自验与 `check-arch-compliance.sh` 校验。**帧计费（`_Frame`/refs/`stream_queue_bytes`）归 stream 层，cache.py 不得承载**——由现有 `layerIsolation`（cache.py 禁 import stream/server/stock_api/market_api）覆盖；**feed 缓存机制归 cache 层、`socket` 已在 allowlist**（D-3）；**v1.7：HTTP 连接池/DNS 缓存同属 cache 层**（仍是 stdlib `http.client`/`socket`，不新增依赖）。
+**tech-stack.json 已更新于 `doc/arch/tech-stack.json`（v1.8）**：含 `architectureRules`——`importRestrictions.denylist` 固化"零第三方库"红线；`allowlist` 补入 `websocket`（仅函数内延迟导入，修 P2-7）；`layerIsolation`/`fileStructure` 与 §2.6/§3 的模块划分一致，供 `code-developer` 自验与 `check-arch-compliance.sh` 校验。**帧计费（`_Frame`/refs/`stream_queue_bytes`）归 stream 层，cache.py 不得承载**——由现有 `layerIsolation`（cache.py 禁 import stream/server/stock_api/market_api）覆盖；**feed 缓存机制归 cache 层、`socket` 已在 allowlist**（D-3）；**v1.7：HTTP 连接池/DNS 缓存同属 cache 层**（仍是 stdlib `http.client`/`socket`，不新增依赖）。
 
 **v1.4 对 tech-stack.json 的两处实质变更（审计实测得到，非版本号联动）**：
 1. **`allowlist` = 实测 import 闭包**。逐模块扫描 `china_finance_rss/*.py` 的模块级 import 后，`allowlist` 遗漏了 **`hashlib` / `html` / `xml`**（三者均来自 `utils.py`：`cls_sign_params` 的 `hashlib`、HTML 实体反转义的 `html.unescape`、RSS/OPML 生成的 `xml.etree.ElementTree`）。它们是**标准库**，缺失会让 `check-arch-compliance.sh` 对 `utils.py` 报假阳性。同时 `itertools` 在包内**无任何引用**（保留无害，已标注为历史项）。`websocket` 仍是唯一"函数内延迟导入"的特例。
@@ -1082,6 +1143,12 @@ MAX_CODES_PER_SUB=200 只是**单组**上限，MAX_DEDUP_CODES=2000 才是**活�
 3. `namingRules.fetch` 措辞随实现扩为 `(code, deadline=None, ttl=None, refresh_epoch=None)`（仍只要求"至少含 `(code, deadline=None)`"）；`architectureRules.metrics` 补 `upstream_fetch_total` 的域键含 **`depth`**。
 4. `version: 1.6 → 1.7`。`allowlist`/`layerIsolation`/`fileStructure`/`importRestrictions` 均不变（传输层复用 stdlib）。
 
+**v1.8 对 tech-stack.json 的实质变更（本轮）**：
+1. **`allowlist` 补 `gzip`**——`server.py` 为模块级 `import gzip`（v1.4 引入 gzip 响应压缩时遗漏），缺失会让 `check-arch-compliance.sh` 对 `server.py` 报**假阳性**；与本轮 304「无 `Content-Encoding`」语义直接相关。
+2. `backend.cache` 补 **`feed_cache_get_entry`** 浅拷贝访问器（RSS `Last-Modified` 权威时间源；`feed_cache_get` 语义不变）。
+3. `namingRules` 补 **RSS 条件请求**条目（弱 ETag 规范化投影剔 `lastBuildDate`/`ttl`/`pubDate`；`<ttl>` advisory 最小 1 分钟；仍 HTTP/1.0 无 keep-alive）。
+4. `version: 1.7 → 1.8`。`layerIsolation`/`fileStructure`/`importRestrictions` 均不变。
+
 ## 7. 待决策、风险与假设
 
 ### 7.1 编排层裁决落地（Q1-Q6 + N1（v1.5 关闭）/N2）
@@ -1097,6 +1164,7 @@ MAX_CODES_PER_SUB=200 只是**单组**上限，MAX_DEDUP_CODES=2000 才是**活�
 | **N1（v1.4 发现 → v1.5 关闭）** | **JSON 单体/面板/工具端点在"整体降级"时的状态码**（原冲突：实现 503 vs PRD AC-A5 的 200） | **已裁决（关闭）：维持 HTTP 200 + error 客体**——「原来旧版本怎么返回就怎么返回，因为已经有业务系统在使用旧版本接口」⇒ 与 PRD AC-A5 一致（PRD v0.5 已固化"503 仅准入拒绝与 `/healthz`"）。**代码落地**：`_json_payload_has_data` 已删、`_send_json_shape` 恒 200；`http_503_total` 计数点 4→3。**§8 A5 由 ⚠️ 改 ✅；AR-12 关闭** | §2.4 / §3.1 关闭登记 / §8 A5 / §9.5 |
 | **N2（新，P7b 发现）** | **SSE 帧 `items` 由稀疏变稠密**（缺数据从"缺席"改为 `null` + `missing`），属语义补全但会改变既有客户端的遍历假设 | 归入 🟠 STABLE「只增」的边界情形：**建议按"只增"处理**（既有键类型/含义未变；`missing` 明示"本来就没有值"），但须与 N1 一同记入变更日志，并同步**流端口 API 文档**（`/stream/quote/<sid>` 的帧 schema 目前无正式对外文档） | §2.5 C-5 / §3.1 例外 3 |
 | **N3（新，v1.7 P7b）** | **两项「只增」对外变更须记变更日志**：① SSE `items[code].quote` 内新增 **`depth`（五档盘口）**——空 dict/全 0（指数）/非普通股/未知码 ⇒ **不出现该键**；② `POST`/`PATCH /stream/subscriptions` 响应新增 **`refresh_capacity_codes`/`refresh_lag_ticks`/`capacity_warning`** | 归入 🟠 STABLE「只增」（既有键类型/含义不变）：**按"只增"处理**，**须记入变更日志并同步流端口 API 文档**；帧字节随之增大（3 域×50 ≈2.0MB） | §2.5 C-5 / §3.1 例外 5·6 / §4.2 |
+| **N4（新，v1.8 P7b）** | **RSS 条件请求（`ETag`/`Last-Modified`/`304` + `<ttl>`）为 🟠 STABLE「只增」对外变更**：5 个 feed 的 200 新增 `ETag`/`Last-Modified` 头、条件命中返回 `304`、feed XML 新增 `<ttl>` | 归入「只增」（无条件下 200 body/状态码逐字不变；`304` 为客户端**显式 opt-in**）；**须记入变更日志 + 同步 `API.md`**：必须写入「**`<ttl>` 是聚合器缓存提示、非时效保证；最小粒度 1 分钟；推荐 `ETag` 条件请求优先、间隔 ≥30s；需 <60s 用 SSE（4s）**」与「**仅带 `If-Modified-Since` 的客户端跨 TTL 边界会完整重取（推荐 `If-None-Match`）**」 | §2.7 / §3.1 例外 7 / ADR-023 |
 
 **CDP 标注契约同步项（Q2）——⚠️ 状态更正：health 负载 + 首页 CDP 列已在代码落地，仅 `API.md` 待同步**
 
@@ -1129,6 +1197,8 @@ MAX_CODES_PER_SUB=200 只是**单组**上限，MAX_DEDUP_CODES=2000 才是**活�
 | **AR-13（v1.4 新 → v1.5 更新）** | **`_PROBE_BUDGET_CAP=5.0` 与 `_HISTORY_AGE=600s` 同为 AC-S3 分档 P95 的隐含参数**：封顶值决定稳态档位（5s ⇒ 高密度 P95≈5s；调大到 ~10s 会把慢占比推到 67% ⇒ P95≈10s、直接违反分档）；老化窗口决定"慢而未死（需 6–10s）"上游的恢复延迟上界（≈600s）。**任一分量与 `NEG_TTL` 变动必须连带重标 AC-S3 分档** | 中 | ① `_PROBE_BUDGET_CAP`/`_HISTORY_AGE` 均为 **cache.py 的机制常量**（不经 env），改动须走代码变更 + **重跑 AC-S3 模式 B 校准**（与 `NEG_TTL`/`PROBE_TIMEOUT` 的性质不同——后两者 env 可调且 `config.md` 要求覆盖后重跑校准）；② 量化依据见 §2.3 D-1 推导与 §4.1；③ "慢而未死"上游的出现频度与高/低密度两档 P95 **待 P6c 实测**（Q6）；④ **不缓解项**：不靠调小 `_HISTORY_AGE` 来"加速恢复"——那会把 10s 全预算探测变成常驻高频事件，直接违反分档 P95 |
 | **AR-14（v1.7 新）** | **上游传输层与容量模型的耦合**：若 `HTTP_POOL_MAX_PER_HOST < BATCH_MAX_WORKERS`，批扇出会**排队在连接池上**，使容量模型的 worker 数不可达（BUG-SSE-DEPTH-01）；keep-alive 复用还引入"服务端已关闭空闲连接"的失效路径 | 中 | ① 默认 `24 ≥ 20` 并登记为**耦合约束**（改 `BATCH_MAX_WORKERS` 必须连带核 `HTTP_POOL_MAX_PER_HOST`）；② 池统计 `_pool.stats{reuse,new,stale,evicted,ephemeral}` 可观测；③ 失效连接**丢弃并重试一次**（仅对**复用**连接生效，真失败不重试） | 
 | **AR-15（v1.7 新）** | **上游"HTTP 200 + 空壳"错误语义**：x-quote 对错误 `secu_code` 拼写返回 `200 + code:200` 的空壳（basic 全 null / volume 空 `data`），若取数只信 `code == 200`，会把空壳**缓存并推流**为"成功但全空"的行情（北交所历史症状） | 中 | ① 关键字段非空校验（`_basic_info_is_valid` 要求 `secu_name`/`last_px` 至少一个非空，否则 `upstream_error`）；② `depth` 空 `data`/全 0 ⇒ `None`（不伪造）；③ 线路拼写经 `upstream_secu_code` 单一权威（ADR-020）；`upstream_fail_total{upstream_error}` 可观测 |
+| **AR-16（v1.8 新）** | **RSS 条件请求的两处已登记语义取舍**：① **仅 `<pubDate>` 变化**（上游真实更正 item 发布时间）⇒ ETag 不变 ⇒ 下游最多持旧副本至下一次真内容变化 / TTL 重生成；② **`Last-Modified` = 缓存写入时刻** ⇒ **仅带 `If-Modified-Since`** 的客户端**跨 TTL 边界仍得 200 全量**（内容未变也重取） | 低 | ① `pubDate` 在 3/5 feed 上是"解析失败回落"，纳入哈希会使条件请求必然失效；其变化通常伴随 title/description/新 item 等真内容变化（漏报面极小）；item 身份由 `<guid>` 承载。② 缓存写入时刻是**唯一可用时间源**（降级路径无时间源）；**推荐下游用 `If-None-Match`**（不受 TTL 边界影响）。两条均须写入 `API.md`（N4） |
+| **AR-17（v1.8 新）** | **ETag 规范化对 `generate_rss` 输出形状的隐式依赖**：`count=1` 精确命中 channel 首个 `<lastBuildDate>`/`<ttl>` 的前提是——两者在 `generate_rss` 中**结构上先于 items**、其值由 `formatdate` 产出、且 `escape_xml` 使 item 字段不可能注入字面同名元素。该前提**无断言/护栏**：若将来重排 channel 元素、或 item 级出现同名元素、或改为直接产出 canonical 串，投影语义会**静默改变**（可能退化为误 200 或误 304） | 中 | ① `_feed_etag` 保持**纯函数 + 不读时钟/缓存**，单测以"仅 `<pubDate>` 不同 ⇒ ETag 相同"的纯函数断言 + 三 feed handler 层受控时钟断言钉死（`SRV-T52b`）；② 若 `generate_rss` 结构调整，**必须**连带复核 `_LASTBUILDDATE_RE`/`_RSS_TTL_RE`/`_PUBDATE_RE` 三正则；③ 更稳的收敛路径是让 `generate_rss` 直接产出 canonical 串（评审 P1-01 备选②），但那属体改动、须编排层批准 |
 
 ### 7.3 设计假设（变更即需重评架构）
 
@@ -1143,6 +1213,7 @@ MAX_CODES_PER_SUB=200 只是**单组**上限，MAX_DEDUP_CODES=2000 才是**活�
 9. **`_last_known` 的上界依赖"每 tick 按存活码池剪枝"（v1.4 新）**：结转表在 `_push_once` 每轮按 `codes` 重建，无活跃组时整表清空。违反（例如改成"只在码离开时删除"）⇒ 该表无界增长，且会把已不在池中的码的旧值继续喂回帧（对象引用被永久钉住，内存不随订阅收缩回收）。
 10. **`refresh_epoch` 只由 SSE 调度路径传入（v1.7 新，ADR-018）**：`fetch_json(..., refresh_epoch=None)` 的默认值保证 REST / prefetch 调用方**逐字保持普通 TTL 语义**；只有 `_refresh_pool` 对"`ttl <= tick`"的最快域传轮起点。违反（例如让 REST 也传 epoch）⇒ REST 缓存退化为"每次必回源"，失去并发单飞与失败吸收。**生产 handler 必须接受 `refresh_epoch` 关键字**（`_call_refresh_handler` 只在**调用帧** `TypeError` 时回退，单测钉死）。
 11. **上游"HTTP 200 + 空壳"是错误语义（v1.7 新，ADR-020）**：错误 `secu_code` 拼写返回 `200 + code:200` 的空壳而非错误码。因此任何个股取数**必须**做关键字段非空校验（`_basic_info_is_valid`）——违反 ⇒ 空壳被缓存并推流为"成功但全空"的行情（AR-15）。
+12. **RSS 条件请求的适用范围与连接模型不变（v1.8 新，ADR-023）**：仅 5 个 `ROUTES` feed 的 `GET`/`HEAD` 支持条件请求；`/opml.xml`、`/`、`/healthz`、JSON 端点**不支持**；服务端 `RSSHandler` **仍为 HTTP/1.0、未启用 keep-alive**（304 无 `Content-Length` 由 EOF 收尾）。违反（如顺带升级 HTTP/1.1 或把条件判定接到公共路径）⇒ 连接复用语义与线程池占用被波及（BR-SRV-44 出范围项），须独立评估。
 
 ---
 
@@ -1165,6 +1236,8 @@ MAX_CODES_PER_SUB=200 只是**单组**上限，MAX_DEDUP_CODES=2000 才是**活�
 | **2.3 上游线路拼写 `upstream_secu_code`（沪/深前缀、北交所点号）+ 空壳防御 `_basic_info_is_valid`（v1.7，ADR-020；`200 + 空壳` ⇒ `upstream_error`）** | R18/R14 | A6/A7/E9/S4 |
 | **2.3 `depth` 五档域并入 `quote` 负载（v1.7，ADR-021；非致命、空/全 0 ⇒ 无 `depth` 键；quote 每码成本 1→2）** | R12/R14 | A1/A3/E5/S10 |
 | **2.5 帧发送层去重 `_frame_signature`/`sent_any`（v1.7，ADR-022；内容未变不发、新连接强制首发）** | R8 | A1/A2/E5 |
+| **2.7 RSS 条件请求：规范化体弱校验器 `_feed_etag`（剔 `lastBuildDate`/`ttl`/**`pubDate`**）+ `Last-Modified` 取缓存写入时刻 + 304 组成 / 条件头优先级（v1.8，ADR-023；评审 D-1 漂移回填）** | 本专项 R1（**非根因编号**；见 §2.7 命名澄清）/ 带宽 | **AC-A13** |
+| **2.7 `<ttl>` advisory（最小 1 分钟；盘 1 / 非盘 3，剔除出 ETag）+ 仍为拉模型 / HTTP/1.0 无 keep-alive（v1.8）** | — | **AC-A13** |
 | 2.2 LRU 真实化 + 双触发清扫 | R3/R11 | E6/E9 |
 | 2.2 管理体 5s 预算 | R6/R17 | S7 |
 | 2.3 负缓存 + **五段式 fetch_json**（正缓存 → **deadline 闸门** → 负缓存门禁 → leader → follower）+ **探测预算阶梯 2→4→5 封顶 + `_HISTORY_AGE` 老化（P1-2/v1.5）** | R9/R10 | S3 |
@@ -1218,14 +1291,15 @@ MAX_CODES_PER_SUB=200 只是**单组**上限，MAX_DEDUP_CODES=2000 才是**活�
 | S9 | ✅ | §4.3 资源上界表 + 进程内存 ≈268MB（L1=3 域 + `_last_known`，修 P2-N5/v1.4）；**v1.6 内存总账统一为 PSS 口径**（Chrome = 基线 250MB + `N×60`（典型）/ `N×150`（保守）MB，N=6 内容页；**RSS 禁止跨进程求和**，§9.6） |
 | S10 | ✅ | §2.6 计分板（**冷却清单**可枚举、healthz 精确 schema，P2-6 已补）；**v1.4 补：`http_503_total` 计数点、`snapshot()` 零值恒定发布、`code_cooldown_list` 发布节流；v1.5 该计数点由四收敛为三** |
 | S11 | ✅ | **不改动 + 断言依据**（§3.1）：`_register_conn` 重连 + `push_loop` 下一 tick 全量快照 + `STREAM_GROUP_IDLE_TTL=300s` |
+| **AC-A13** | ✅ | **v1.8（PRD v0.7 由 prd-writer 并行落号）** §2.7 + ADR-023：弱 ETag 规范化投影（剔 `lastBuildDate`/`ttl`/`pubDate`）/ `Last-Modified` 时间源 / 304 组成 / `If-None-Match` 优先 / `<ttl>` advisory（最小 1 分钟）/ **仍为拉模型·HTTP/1.0**；详设 `server.md` BR-SRV-36..44 + 测试 `SRV-T46..T62` |
 
-**覆盖声明**：30 条 AC 全部有设计落点（E7/E9/S6/S11 的原缺口已补齐，见上表）；其中 **5 条标注 ⚠️**：E4（命中率降为观测项，Q1）、A3（条件 C1 不成立时降级，P1-1）、A8（TTL 口径同步，Q3）、S3（模式 B 分档 P95 待 P6c 校准，Q6）、S4（CDP 契约同步：代码已落地、`API.md` 待同步，Q2）。**v1.5：A5 由 ⚠️ 改 ✅**（N1 裁决关闭——业务降级恒 200，与 AC-A5 逐格一致；§7.1 N1）。**测试方法与阈值**由 task-decomposer→tester 阶段落实，本 SAD 保证"机制存在且可断言"。**v1.4 的"A5 裁决未落地前不得进入基线"前置约束已随 N1 关闭解除**；AC-A5 回归**须含"业务降级不得返回 503"断言**（§9.5 遗留 1）。**v1.7**：设计点矩阵新增 5 行（订阅驱动节拍 / `refresh_epoch` / 上游传输层 / 线路拼写+空壳防御 / `depth` 并入 / 发送层去重），30 条 AC 的**覆盖状态不变**（⚠️ 仍 5 条：E4/A3/A8/S3/S4），A3/E1-E3/A1 的**数值与口径**已按 `coverage=213`、`BATCH_MAX_WORKERS=20`、`_PER_FETCH_EST=0.3` 与传输层实测重标（见 §9.7）。
+**覆盖声明**：PRD 全部 AC 均有设计落点（v0.6 为 33 条；**v1.8 追加 AC-A13 后 34 条**；E7/E9/S6/S11 的原缺口已补齐，见上表）；其中 **5 条标注 ⚠️**：E4（命中率降为观测项，Q1）、A3（条件 C1 不成立时降级，P1-1）、A8（TTL 口径同步，Q3）、S3（模式 B 分档 P95 待 P6c 校准，Q6）、S4（CDP 契约同步：代码已落地、`API.md` 待同步，Q2）。**v1.5：A5 由 ⚠️ 改 ✅**（N1 裁决关闭——业务降级恒 200，与 AC-A5 逐格一致；§7.1 N1）。**测试方法与阈值**由 task-decomposer→tester 阶段落实，本 SAD 保证"机制存在且可断言"。**v1.4 的"A5 裁决未落地前不得进入基线"前置约束已随 N1 关闭解除**；AC-A5 回归**须含"业务降级不得返回 503"断言**（§9.5 遗留 1）。**v1.7**：设计点矩阵新增 5 行（订阅驱动节拍 / `refresh_epoch` / 上游传输层 / 线路拼写+空壳防御 / `depth` 并入 / 发送层去重），30 条 AC 的**覆盖状态不变**（⚠️ 仍 5 条：E4/A3/A8/S3/S4），A3/E1-E3/A1 的**数值与口径**已按 `coverage=213`、`BATCH_MAX_WORKERS=20`、`_PER_FETCH_EST=0.3` 与传输层实测重标（见 §9.7）。 **v1.8**：设计点矩阵新增 2 行（RSS 条件请求 / `<ttl>`+拉模型），**新增 AC-A13**（PRD v0.7 由 prd-writer 并行落号；AC 总数 33 → **34**），⚠️ 数量不变（仍 5 条：E4/A3/A8/S3/S4）。
 
 ---
 
 ## 9. 修订摘要
 
-> ⚠️ **§9.1-§9.3 是历史修订记录**（分别落地 REV-ARCH / 二轮复审 / P3b 详设评审的 SAD 侧动作），其中若干**数字口径已被后续实测或裁决推翻**（最典型：`coverage≈170` / `coverage_codes≈56` / "恒定 2s 探测" / "探测阶梯升到 10s" / "降级 503" / "`_LOCAL_BUDGET` 反转未确认" / **v1.4 的 `_PER_FETCH_EST=2.2`、`coverage=23`、`coverage_codes=23/11/7`、`quote` 稳态成本 1**）。**§9.4（v1.4）、§9.5（v1.5）、§9.6（v1.6）与 §9.7（v1.7，P7b 契约同步第二轮）是最新且唯一的现行口径**；冲突时以**编号最大者为准**：§9.7 覆盖 §9.4 的**容量常量与数值**（`_PER_FETCH_EST` 2.2→0.3、`BATCH_MAX_WORKERS` 8→20、`coverage` 23→213、`coverage_codes` 23/11/7→106/71/53）、`quote` 稳态成本（1→2）、tick 口径（L1 固定→订阅域最短 TTL）、以及 §2.6 的"帧间隔"不变式表述；§9.6 覆盖 §4.3 / R20 / ADR-012 / AR-5 / S9 的**内存口径**；§9.5 覆盖 §9.4 的三处表述（§2.4 降级状态码、§2.3 探测阶梯封顶、ADR-014 反转的"已确认"状态）。
+> ⚠️ **§9.1-§9.3 是历史修订记录**（分别落地 REV-ARCH / 二轮复审 / P3b 详设评审的 SAD 侧动作），其中若干**数字口径已被后续实测或裁决推翻**（最典型：`coverage≈170` / `coverage_codes≈56` / "恒定 2s 探测" / "探测阶梯升到 10s" / "降级 503" / "`_LOCAL_BUDGET` 反转未确认" / **v1.4 的 `_PER_FETCH_EST=2.2`、`coverage=23`、`coverage_codes=23/11/7`、`quote` 稳态成本 1**）。**§9.4（v1.4）、§9.5（v1.5）、§9.6（v1.6）与 §9.7（v1.7，P7b 契约同步第二轮）是最新且唯一的现行口径**；冲突时以**编号最大者为准**：§9.7 覆盖 §9.4 的**容量常量与数值**（`_PER_FETCH_EST` 2.2→0.3、`BATCH_MAX_WORKERS` 8→20、`coverage` 23→213、`coverage_codes` 23/11/7→106/71/53）、`quote` 稳态成本（1→2）、tick 口径（L1 固定→订阅域最短 TTL）、以及 §2.6 的"帧间隔"不变式表述；§9.6 覆盖 §4.3 / R20 / ADR-012 / AR-5 / S9 的**内存口径**；§9.5 覆盖 §9.4 的三处表述（§2.4 降级状态码、§2.3 探测阶梯封顶、ADR-014 反转的"已确认"状态）；**§9.8（v1.8，P7b SAD 回填：RSS 条件请求）覆盖"SAD 无该能力落点"的 P1 级契约缺口**（新增 §2.7 / ADR-023 / AC-A13 承接）。
 
 ### 9.1 v1.1（依据 REV-ARCH-20260915-001）
 
@@ -1546,5 +1620,45 @@ AR-6 校正后（供 P6c 校准）：`fundflow max(25,8)=25→8（×3.1）` · `
 
 ---
 
-*SAD v1.7 完 · 供 review-expert 复审（复核 §9.7 容量重标定（`coverage=213` / `coverage_codes=106/71/53` / `quote` 每码 2 次）、L0 档与订阅驱动节拍、`refresh_epoch`、上游传输层与双 wire 格式、`depth` 并入与发送层去重为重点）与 task-decomposer 承接（`stream.md` / `server.md` / `cache.md` / `stock_api.md` 的 P7b 侧需按 v1.7 复核；`API.md` 待同步 `/stock/basic_info` CDP 标注与 `depth` 契约）*
+### 9.8 v1.8（P7b SAD 回填：RSS 条件请求契约缺口，评审 D-1）
+
+> **性质**：本轮是**契约回填轮**——RSS 条件请求能力已于 P3a 实现并验证（详设 `doc/detailed/server.md` v1.7 / BR-SRV-36..44；测试 `doc/tester/RSS条件请求_测试执行报告.md` + `SRV-T46..T62`；集成 `doc/tester/integration-report.md`），但 SAD v1.7 全文无落点。设计评审「漂移检测」判定为 **P1 级契约缺口**（`doc/review/rss-conditional-get_详细设计评审_专家版.md` **D-1**；code-reviewer `CR-RSS-20260918-001` 待办①）——本轮把该能力**正式承接进 SAD**。范围严格限定 `doc/arch/SAD.md` + `doc/arch/tech-stack.json`；**未改代码、未改详设、未改 PRD、未改 `API.md`/`README.md`/`.opencode/**`/`opencode.json`/`_MEMORY_CACHE.md`**。每条均**先读代码确认再落笔**。
+
+**一、回填条目（逐项：代码证据 → SAD 落点）**
+
+| # | 项 | 代码证据（本轮实测） | SAD 落点 |
+|---|----|---------------------|---------|
+| 1 | **弱 ETag（规范化体）** | `server._feed_etag`（`server.py:799-816`）：`_LASTBUILDDATE_RE`/`_RSS_TTL_RE` 各 `count=1`、`_PUBDATE_RE` `count=0` 全量替换**内容**后再 sha256；`_ETAG_PREFIX='W/'`（`:557`） | **§2.7** / **ADR-023** / §8 |
+| 2 | **`Last-Modified` 时间源** | `_get_or_fetch_feed` 返回 **2-tuple `(xml, last_modified)`**（`:1307-1320`）；`last_modified = feed_cache_get_entry(path)['time']`（`cache.py:906-924`，浅拷贝 + 既有 `_feed_cache_lock`）；降级路径 `(error_xml, None)`（`server.py:1325-1328`） | §2.7 / §3 cache·server 行 |
+| 3 | **304 组成** | `_send_not_modified`（`:1415-1439`）：仅 `send_response(304)` + `ETag`/`Last-Modified`/`Cache-Control`/`Vary` + `end_headers()`；**无** `wfile.write`、无 `Content-*`、无 gzip、不写 feed 缓存 | §2.7 / §3 server 行 |
+| 4 | **条件头优先级** | `_not_modified`（`:863-871`）：INM 存在 ⇒ 只评估 INM、**完全忽略** IMS；`_if_none_match_matches`（`:819-837`）支持 `*`/多值/弱比较（**只认字面 `W/`**）；`_if_modified_since_not_modified`（`:840-860`）秒级、非法头忽略 ⇒ 200 | §2.7 / ADR-023 |
+| 5 | **`<ttl>`（advisory，分钟）** | `_feed_ttl_minutes`（`:789-796`）= `max(1, (cache_policy('feed')['ttl']+59)//60)`；`generate_rss(..., ttl=None)`（`utils.py:145-178`）`ttl>0` 才输出、位置在 `</lastBuildDate>` 与 `<atom:link>` 之间 | §2.7 / §3 utils 行 |
+| 6 | **仍为拉模型 / 无 keep-alive** | `server.py` **无** `protocol_version`（默认 HTTP/1.0）；全仓仅 `stream.py:1359` 为 HTTP/1.1（流端口）⇒ 主端口每响应后关连接、304 由 **EOF** 收尾 | §2.7 / §7.3#12 |
+| 7 | **范围纪律** | `/opml.xml`、`/`、JSON、`/healthz` 无 ETag/条件判定（`_serve_feed` 仅由 `path in ROUTES` 命中）；BR-SRV-44 出范围三项（HTTP/1.1 keep-alive / `/opml.xml` / JSON 条件请求）均未实现 | §2.7 / §7.3#12 / §3.1 例外 7 |
+
+**二、ADR 动作**：**新增 ADR-023**「RSS 条件请求：规范化体弱校验器」（**低可逆**：对外契约——客户端缓存并回放校验器，派生口径错一次即静默降级）。ADR 汇总 22 → **23** 条（低可逆 10 → **11**，中可逆 12 不变）。**不新增**「`<ttl>` 取值」「304 具体头项」——属高可逆 / 纯实现细节，落 §2.7 叙述。
+
+**三、tech-stack.json 动作**：`version: 1.7 → 1.8`；**`allowlist` 补 `gzip`**（`server.py:19` 模块级 import；v1.4 引入 gzip 响应压缩时遗漏，会造成 `check-arch-compliance.sh` 对 `server.py` **假阳性**，并与本轮 304「无 `Content-Encoding`」语义直接相关）；`backend.cache` 补 `feed_cache_get_entry` 浅拷贝访问器（Last-Modified 时间源）；`namingRules` 补 RSS 条件请求条目。`layerIsolation`/`fileStructure`/`importRestrictions` 不变。
+
+**四、发现的「描述-代码不符」（一律以代码为准）**
+
+| # | 描述 | 代码事实 | 处理 |
+|---|------|---------|------|
+| 1 | 评审 D-1 / 任务描述称 ETag 剔除"`lastBuildDate`/`ttl` **两项**" | 实现为**三项**——`<pubDate>` 亦**全量**（`count=0`）剔除（P1-01 定向修，`server.py:814`） | §2.7 明确三项；ADR-023 以三项立论 |
+| 2 | 任务描述"省 ~37KB body" | 部署实测 `Content-Length: 45003`（`/cls/telegraph`）、`12901`（`/jin10/flash`） | §2.7/§4.1 记 **~37–45KB**（随 feed 与条目数浮动），不钉死单一数值 |
+
+**五、本轮遗留（交编排层）**
+
+| # | 事项 | 性质 |
+|---|------|------|
+| 1 | **PRD 侧 `AC-A13`**（RSS 条件请求：内容未变 ⇒ 304 零 body；`<ttl>` advisory）由 **prd-writer 并行新增**（评审 D-2 建议编号；PRD「追加编号不重排」，总数 33 → 34） | 并行产出（PRD v0.7） |
+| 2 | **`API.md` / README / 变更日志**补 `ETag`/`Last-Modified`/`304`/`<ttl>` + 「`<ttl>` 非时效保证、最小 1 分钟、需 <60s 用 SSE」+ IMS-only 客户端跨 TTL 会完整重取（评审 D-6 / code-reviewer 待办 ⑤⑥） | 契约同步（编排层，N4） |
+| 3 | **命名统一（评审 D-4）**：`_MEMORY_CACHE.md` 的「本专项 R1」与根因 **R1–R20** 同名不同义；建议统一改称 `US-RSS-1` / `AC-RSS-1`——SAD 侧已在 §2.7 显式澄清并按 **`AC-A13`** 承接 | 登记 |
+| 4 | **证据已闭合，仅登记**：跨 TTL 重生成 ETag 不变由 `SRV-T52b`（受控时钟 + 红/绿方向 + 纯函数断言）与 `doc/tester/integration-report.md` 部署复测共同覆盖 | 测试（已闭合） |
+
+**本轮版本**：SAD v1.7 → **v1.8**；`doc/arch/tech-stack.json` 同步 `version: 1.8`（**内容有实质变更**：allowlist 补 `gzip` + cache/namingRules 条目）。**约束保持**：Python 3 标准库零依赖、`layerIsolation`、文件结构（扁平包 + 唯一新增 `metrics.py`）均未放宽。**未改代码、未改详设、未改 PRD、未改 `API.md`/`README.md`/`.opencode/**`/`opencode.json`/`_MEMORY_CACHE.md`。**
+
+---
+
+*SAD v1.8 完 · 供 review-expert 复审（复核 §9.8 RSS 条件请求回填（§2.7 / ADR-023 / **AC-A13**）、§9.7 容量重标定（`coverage=213` / `coverage_codes=106/71/53` / `quote` 每码 2 次）、L0 档与订阅驱动节拍、`refresh_epoch`、上游传输层与双 wire 格式、`depth` 并入与发送层去重为重点）与 task-decomposer 承接（`server.md` / `cache.md` / `utils.md` 的 RSS 条件请求侧需按 v1.8 复核；`API.md` 待同步 RSS `ETag`/`Last-Modified`/`304`/`<ttl>` 与 `/stock/basic_info` CDP 标注、`depth` 契约）*
 
