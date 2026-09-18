@@ -1,13 +1,14 @@
 # config.py 详细设计
 
-> **版本** v1.4 · **状态** 已契约同步（P7b 传输层 + L0/depth + env 注册表补全：以 `china_finance_rss/config.py` 实现为准）· **日期** 2026-09-17 · **作者/产出** task-decomposer
+> **版本** v1.5 · **状态** 已契约同步（P7b 传输层 + L0/depth + env 注册表补全：以 `china_finance_rss/config.py` 实现为准；★ **v1.5：溯源更正**——上游 SAD/PRD 版本由 v1.2/v0.3 更新为实际 **v1.11/v0.9**，**无接口/常量/行为变更**）· **日期** 2026-09-18 · **作者/产出** task-decomposer
+> **v1.5 变更（溯源更正 · 只改文档，不改代码）**：头部上游溯源由 **SAD v1.2 / PRD v0.3** 更正为实际版本 **SAD v1.11 / PRD v0.9**——依据 `doc/arch/SAD.md` 头部 `**版本** v1.11` 与 `doc/prd/perf-stability-optimization.md` 头部 **v0.9**（AC 总数 36）。这是 `_PROGRESS.md` 登记的本轮**最后一处**溯源滞后，现已闭环。**本模块的接口签名 / `DOMAIN_MATRIX` / `cache_policy` 返回值 / env 注册表 / 任何行为均不变**（v1.4 正文逐字保留）。**未改代码 / SAD / PRD / API.md / README.md / `.opencode`；`cache.md` → v1.11、`server.md` → v1.12、`_PROGRESS.md` 同步。**
 > **v1.4 变更（以代码为准）**：① **新增 L0 档**：`_trading_tiers()` 盘中 `{'L0':4,'L1':8,'L2':12,'L3':30,'L4':300}`，非盘中 `L0=120`；② **`quote` 由 L1 → L0**；**新增 `depth` 域**（L0、`pool_max='dedup'`、`cache_max=500`，与 quote 同拍）；③ **新增 `upstream_secu_code(code)`**（**单一权威**）：内部 canonical → 上游 wire 形（沪/深 = 前缀形 `sh600519`；北交所 = 点号大写形 `430047.BJ`）；`canonical_code` 的内部身份语义不变；④ **env 注册表补全**（§2.3 新增 7 项 + §2.7 全量表）；⑤ 新增 `_STOCK_DEPTH_URL`/`_STOCK_DEPTH_HEADERS`、`_SSE_HOT_PATH_URLS`、`warm_hosts()`；⑥ `DOMAIN_MATRIX` 现 **12 域**（原 11）。
 > **v1.3 变更（AC-S3 裁决 · 收尾契约同步）**：① `PROBE_TIMEOUT` 脚注更正——**阶梯封顶不再是 `REQUEST_TIMEOUT`**：`cache._probe_budget` 以 `cache._PROBE_BUDGET_CAP=5.0` 封顶（序列 `2→4→5`），`REQUEST_TIMEOUT(10s)` 仅用于"无失败历史 / 已老化"两支的全预算探测（§2.3 注 + §10#18）。**`PROBE_TIMEOUT` 默认值 2 不变**（仍是阶梯首级）。
 > 本版修订（P7b 契约同步，**只改文档、不改代码**）：① 新增 §2.6 **`canonical_code(code)`（冻结接口）**——股票代码归一的唯一权威（`strip + lower + 点号形映射`）；② `_is_trading_hours` 支持**休市日**（env `TRADING_HOLIDAYS`，默认空）；③ 新增 env `LISTEN_BACKLOG(128)` / `TRADING_HOLIDAYS('')` / `CDP_RESTART_THROTTLE(15)`；④ `DOMAIN_MATRIX.cache_max` 语义钉死为**终态/feed 缓存上限**，URL-cache-only 域（`plate`/`margin`/`news_url`/`longhu`）一律 `'n/a'`→`None`；⑤ §2.4 删除清单**已全部落地**（实现态），`VALID_STOCK_CODE` 保留但仅由 `canonical_code` 内部消费（`utils.py` 死 import 已删）。
 > 沿用 v1.1：REV-DES-04/06/07/08 + 逆向建议 2（删常量前置条件）+ 编排层裁决 #1/#2/#6 + 偏差 D-4/D-5 登记
 > 模块路径 `china_finance_rss/config.py` · 归属 **基础层（Layer 0）**
-> 上游 SAD `doc/arch/SAD.md` v1.2（§2.1 / §2.3 D-1 D-5 / §2.6 / §3 config.py 行 / ADR-001）
-> 上游 PRD `doc/prd/perf-stability-optimization.md` v0.3（AC-A3/A4/E6/E9/S3/S7）
+> 上游 SAD `doc/arch/SAD.md` **v1.11**（★ v1.5 溯源更正：原误记 v1.2；权威以 SAD 头部为准）（§2.1 / §2.3 D-1 D-5 / §2.6 / §3 config.py 行 / ADR-001）
+> 上游 PRD `doc/prd/perf-stability-optimization.md` **v0.9**（★ v1.5 溯源更正：原误记 v0.3；权威以 PRD 头部为准）（AC-A3/A4/E6/E9/S3/S7）
 > 端锁定 🟠 STABLE（仅**新增**函数与 env；内部常量删除属 🟡 FLEXIBLE）
 
 ## 1. 模块职责与边界
@@ -660,6 +661,7 @@ def cache_policy(domain, now=None):
 - [x] **v1.4**：L0 档 + `quote`→L0 + `depth` 域（§2.2/§3.1/§3.2/BR-CFG-18/19/§10#19·20；CFG-T15）
 - [x] **v1.4**：`upstream_secu_code` 单一权威（§2.8/§3.4/BR-CFG-20/CFG-T16；§2.6 身份 vs wire 措辞更正）
 - [x] **v1.4**：env 注册表补全（§2.3 补 7 项 + §2.7 全量清单/BR-CFG-16/CFG-T18）与 `_SSE_HOT_PATH_URLS`/`warm_hosts()`/`_STOCK_DEPTH_URL`（§2.9/BR-CFG-21/CFG-T17）
+- [x] **v1.5（溯源更正）**：头部上游版本由 **SAD v1.2 / PRD v0.3** 更正为 **SAD v1.11 / PRD v0.9**（`_PROGRESS.md` 登记的最后一处溯源滞后，闭环）；**接口 / `DOMAIN_MATRIX` / `cache_policy` 返回值 / env 注册表 / 任何行为零变更**（v1.4 正文逐字保留）
 
 
 

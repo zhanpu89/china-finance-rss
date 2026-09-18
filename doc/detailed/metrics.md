@@ -1,14 +1,15 @@
 # metrics.py 详细设计（新增模块）
 
-> **版本** v1.5 · **状态** 已契约同步（P8 F3：注册 `http_304_total`；P7b 传输层批次：以 `china_finance_rss/metrics.py` + `stream.py` 计数点实现为准；★ **P8 F8 顺带：修正"`metrics.py` 零代码变更"自检句 + 溯源版本更新**）· **日期** 2026-09-18 · **作者/产出** task-decomposer
+> **版本** v1.6 · **状态** 已契约同步（★ v1.6：溯源更正 SAD v1.11 / PRD v0.9（末处滞后闭环）；P8 F3：注册 `http_304_total`；P7b 传输层批次：以 `china_finance_rss/metrics.py` + `stream.py` 计数点实现为准；★ **P8 F8 顺带：修正"`metrics.py` 零代码变更"自检句 + 溯源版本更新**）· **日期** 2026-09-18 · **作者/产出** task-decomposer
+> **v1.6 变更（溯源更正 · 只改文档，不改代码）**：头部上游溯源由 **`SAD v1.9` / `PRD v0.8`** 更正为实际版本 **`SAD v1.11` / `PRD v0.9`**（依据 `doc/arch/SAD.md` 头部 `**版本** v1.11` 与 `doc/prd/perf-stability-optimization.md` 头部 **v0.9**，AC 总数 36；与 `config.md` v1.5 / `cache.md` v1.13 / `server.md` v1.14 同批）——**最后一处溯源滞后闭环**。**`metrics.py` 的函数签名 / 注册名集合（20 名）/ 锁 / 快照口径 / `http_304_total` 计数点全部不变**（v1.5 正文逐字保留）。**未改代码 / SAD / PRD / API.md / README.md / `.opencode`；`cache.md` → v1.13、`server.md` → v1.14、`_PROGRESS.md` 同步。**
 > **v1.5 变更（P8 F8 顺带修正 · 只改文档，不改代码）**：① **【自检句更正】** v1.4 的「**`metrics.py` 本身仍零代码变更**」与 **BR-MET-14**（要求在 `_KNOWN`/`_DEFAULTS` 注册 `http_304_total`）**自相矛盾**——本版改为与 BR-MET-14 一致的表述：**F3 的 304 计数点实现改在 `server._send_not_modified`，但注册表 `_KNOWN`/`_DEFAULTS` 的变更确实落在 `metrics.py`**（本版确实改了 `metrics.py`，19 → 20 名）。原句保留于 v1.4 变更块但**加注"已被 v1.5 更正"**（只增不删）。② **【溯源版本更新】** 头部上游溯源由滞后的 `SAD v1.2` / `PRD v0.3` 更新为实际版本 **`SAD v1.9` / `PRD v0.8`**（权威以各文档头部为准）。**`metrics.py` 的函数签名 / 注册名集合（20 名）/ 锁 / 快照口径全部不变；未改代码 / SAD / PRD / API.md / README.md / `.opencode`；`server.md` → v1.10、`cache.md` → v1.9、`_PROGRESS.md` 同步。**
 > **v1.4 变更（P8 对抗性盲审 F3 契约化 · 编排层裁定 · 只改文档，不改代码）**：新增指标 **`http_304_total`**（无标签计数器），在 `_KNOWN` 与 `_DEFAULTS` **同时注册**（`assert set(_DEFAULTS) == _KNOWN` 强制两者同步）；**写入者 = `server._send_not_modified`，单点计数**（与 `http_503_total` 的"单点"风格一致，保证任何 304 都被计入、不可能漏记）。**为什么只需要计数、不需要分母**：`http_304_total` **单调**；若"pubDate 抖动 ⇒ 永远 200"回归发生，该计数**停止增长**本身就是报警信号（无需 200 分母）。**注册表由 19 名 → 20 名**（§3.2）；**★ 原句"`metrics.py` 本身仍零代码变更"已被 v1.5 更正**——F3 的**计数点**实现虽在 `server.py`，但注册表 `_KNOWN`/`_DEFAULTS` 的变更**就在 `metrics.py`**（本版确实改了 `metrics.py`）。**未改代码 / SAD / PRD / API.md / README.md / `.opencode`；`server.md` → v1.9、`cache.md` → v1.8、`_PROGRESS.md` 同步。**
 > **v1.3 变更（以代码为准）**：① `upstream_fetch_total{domain}` 的 domain 集合**新增 `depth`**（`config.DOMAIN_MATRIX` 现 12 域，§3.2）；② 补记 **`stream_tick_degraded_total` / `stream_tick_slip_total` 的"进程首个真正刷新轮豁免"**（实现落点在 `stream._push_once`；仅一轮、次轮起照常计数、**空池轮不消耗豁免**，§3.2/§4 BR-MET-13/§8 MET-T17）。**`metrics.py` 本身零代码变更**（注册表 19 名与 `_DEFAULTS` 不变）。
 > **v1.2 变更（P7b 契约同步，**只改文档、不改代码**）**：① `snapshot()` 改为**锁内浅拷贝 + 锁外深拷贝**（dict `v.copy()`、list `list(v)`）；② **零值恒定发布**（`_DEFAULTS` 兜底，19 键在 `snapshot()` 中恒出现）；③ `set_gauge` 新增 **`_LABELED_GAUGES` 形状守卫**（与 `incr` 对称）。
 > 沿用 v1.1：REV-DES-02（`cache_hit_ratio` 公式/命名）/04（依赖图）/05（`_warned` 锁口径）/07（元数据）+ 逆向建议 3（MET-T8 注册表子集断言）+ 编排层裁决 #4/#5 + 偏差 D-6 登记
 > 模块路径 `china_finance_rss/metrics.py` · 归属 **基础层（Layer 0 叶子，零业务依赖）**
-> 上游 SAD `doc/arch/SAD.md` **v1.9**（★ v1.5 溯源更新：原误记 v1.2；权威以 SAD 头部为准）（§2.6 / §2.2 R-4 / §4.2 / ADR-010）
-> 上游 PRD `doc/prd/perf-stability-optimization.md` **v0.8**（★ v1.5 溯源更新：原误记 v0.3）（AC-S10 主；承载 E5/E7/S3/S4/S5/S6/S8/S9 的观测项）
+> 上游 SAD `doc/arch/SAD.md` **v1.11**（★ v1.5 溯源更新：原误记 v1.2；★ **v1.6 溯源更新：v1.9 → v1.11**——权威以 SAD 头部为准）（§2.6 / §2.2 R-4 / §4.2 / ADR-010）
+> 上游 PRD `doc/prd/perf-stability-optimization.md` **v0.9**（★ v1.5 溯源更新：原误记 v0.3；★ **v1.6 溯源更新：v0.8 → v0.9**）（AC-S10 主；承载 E5/E7/S3/S4/S5/S6/S8/S9 的观测项）
 > 端锁定 🟠 STABLE（纯新增模块；`/healthz` 仅**新增** `metrics` 字段）
 
 ## 1. 模块职责与边界
@@ -386,5 +387,6 @@ def reset():                                                      # BR-MET-9
 - [x] **v1.3**：`upstream_fetch_total` domain 补 `depth`（§3.2/MET-T17）；首个刷新轮豁免口径（§3.2/BR-MET-13/§8 MET-T17/§9/§10#12·13）；**`metrics.py` 零代码变更**（仍 19 名）（★ v1.4 / F3 起**不再成立**：注册表已增至 20 名，见下）
 - [x] **v1.4（P8 F3）**：新增 `http_304_total`（`_KNOWN` + `_DEFAULTS` 同步，19 → **20** 名）；`server._send_not_modified` 单点计数（§3.2 / BR-MET-14 / §5 / MET-T18 / §9 / §10#14）；**★ v1.5 更正**：**`metrics.py` 确有变更**——注册表 `_KNOWN`/`_DEFAULTS` 各新增 1 名（`http_304_total`），**计数点实现**改在 `server.py`（v1.4 原句"`metrics.py` 本身仍零代码变更"与 BR-MET-14 互斥，已作废）；`snapshot()` / `reset()` 口径同步为 20 名；**未改代码 / SAD / PRD / API.md / README.md / `.opencode`**
 - [x] **v1.5（P8 F8 顺带修正）**：修正 v1.4 自检句「`metrics.py` 零代码变更」——**本版确实改了 `metrics.py`**（`_KNOWN`/`_DEFAULTS` 注册 `http_304_total`，与 BR-MET-14 一致）；头部上游溯源由 `SAD v1.2`/`PRD v0.3` → **`SAD v1.9`/`PRD v0.8`**；**函数签名 / 注册名集合（20 名）/ 锁 / 快照口径全部不变**；**未改代码 / SAD / PRD / API.md / README.md / `.opencode`**
+- [x] **v1.6（溯源更正）**：头部上游由 **`SAD v1.9`/`PRD v0.8`** 更正为实际 **`SAD v1.11`/`PRD v0.9`**（**最后一处溯源滞后闭环**，与 `config.md` v1.5 / `cache.md` v1.13 / `server.md` v1.14 同批）；**函数签名 / 注册名集合（20 名）/ 锁 / 快照口径 / `http_304_total` 计数点零变更**（v1.5 正文逐字保留）；**未改代码 / SAD / PRD / API.md / README.md / `.opencode`**
 
 
