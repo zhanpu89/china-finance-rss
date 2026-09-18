@@ -115,11 +115,19 @@ def _sweep_expired(d):
     """Remove expired entries from a cache dict. Caller must hold its lock.
 
     Contract unchanged: returns the number removed and keeps ``None`` entries
-    (the read path handles them itself).
+    (the read path handles them itself).  Truthy non-mapping entries are also
+    kept (P2-6 defensive): they have no ``expires_at`` to compare and must not
+    raise here — the read path owns treating them as a miss.
     """
     now = time.time()
+    # P2-6 (defensive): a truthy non-mapping entry (str/list/…) has no `.get`;
+    # skip it here instead of raising.  Production writers only ever store
+    # dicts, so this is unreachable in production — the read path owns turning
+    # such an entry into a miss.  `entry and isinstance(...)` keeps the existing
+    # "falsy entries are kept" contract unchanged.
     expired = [k for k, entry in d.items()
-               if entry and now >= entry.get('expires_at', 0)]
+               if entry and isinstance(entry, dict)
+               and now >= entry.get('expires_at', 0)]
     for k in expired:
         del d[k]
     return len(expired)
@@ -907,6 +915,26 @@ _feed_fetch_refs = {}
 _feed_fetch_locks_lock = threading.Lock()
 _last_feed_sweep = 0.0
 
+# P2-2: read-side "entry shape is incomplete ⇒ treated as a miss" signals.
+# Deduplicated by *reason* only, never per key: the feed cache key embeds an
+# externally chosen Host (F2/F8), so per-key de-dup would let a client
+# enumerate keys and flood the log.  Deliberately lock-free (tolerated race),
+# mirroring ``metrics._warned``; a process warns at most once per shape.
+_feed_degraded_warned = set()
+
+
+def _warn_feed_degraded_once(reason, key):
+    """Emit one WARNING per degraded-entry *shape* (P2-2).
+
+    This is a self-heal signal for a malformed cache entry, **not** an upstream
+    failure — an incomplete entry simply triggers a clean refetch.  Total:
+    never raises, so the read path's fail-safe contract is preserved.
+    """
+    if reason not in _feed_degraded_warned:
+        _feed_degraded_warned.add(reason)
+        log.warning('[cache] feed entry degraded to miss (%s): key=%r',
+                    reason, key)
+
 
 def feed_cache_get_entry(path):
     """Return a shallow copy of the fresh feed entry, or None on miss/expiry.
@@ -918,14 +946,60 @@ def feed_cache_get_entry(path):
     authoritative Last-Modified source (BR-SRV-38 / F1: the instant the
     representation last *changed*), while ``entry['time']`` is simply the
     ``feed_cache_put`` write time (used for freshness/refresh_epoch).
+
+    Read-side fail-safe (BR-CACHE-32 / v1.11 · P2-4): a malformed entry must
+    degrade to "treat as absent" or "serve without that header" — never raise.
+    An exception here would be swallowed by ``_guard`` into an "upstream
+    failure" body, misreporting a merely incomplete entry as an outage.
+
+    * missing/``None`` ``xml`` ⇒ treat as a miss (return ``None``): one clean
+      refetch, and never a truncated body handed back to the caller.  This
+      degraded shape is logged once per process (``_warn_feed_degraded_once``)
+      so the self-heal is observable without letting a hot path flood the log.
+      An empty-but-present ``xml=''`` is **not** this shape — see the predicate
+      comment in the body (P2-1).
+    * a truthy *non-mapping* entry (``str``/``list``/…) ⇒ also a miss, guarded
+      defensively (P2-6): ``.get`` would otherwise raise ``AttributeError``.
+    * missing ``expires_at`` ⇒ ``entry.get('expires_at', 0)`` yields ``0`` and
+      ``now >= 0`` always holds ⇒ the entry reads as expired ⇒ also a miss.
+      This falls out of the same check; no extra branch is needed.
+    * missing ``last_modified`` / ``fingerprint`` *with* ``xml`` present
+      (legacy four-field entry) ⇒ still served, only ``last_modified`` is
+      ``None`` (⇒ no Last-Modified header, IMS disabled) — the P2-1 contract,
+      deliberately **not** merged with the missing-``xml`` case above.
     """
     with _feed_cache_lock:
         entry = feed_cache.get(path)
-        if not entry or time.time() >= entry.get('expires_at', 0):
+        if not entry:
+            return None
+        if not isinstance(entry, dict):
+            # P2-6 defensive guard: a truthy non-mapping entry (str/list/…)
+            # would raise AttributeError on `.get` below, which `_guard` would
+            # then misreport as an "upstream failure" body.  `feed_cache_put`
+            # always stores a dict, so this is unreachable in production; the
+            # guard only pins the boundary — same outcome as a missing `xml`
+            # (treat as a miss), never a raise.
+            _warn_feed_degraded_once('entry is not a mapping', path)
+            return None
+        # Missing `expires_at` reads as 0 ⇒ now >= 0 ⇒ expired (natural miss).
+        if time.time() >= entry.get('expires_at', 0):
+            return None
+        # ★ P2-1: the miss predicate is EXACTLY `is None` — never truthiness.
+        # ``xml=''`` is a legal-but-empty representation and MUST be served as
+        # usual.  "Simplifying" this to `if not xml` would classify it as a
+        # miss, so every read would refetch, `feed_cache_put` would write the
+        # same ``''`` back, and the next read would miss again — a permanent
+        # refetch loop no TTL can break.  `is None` is load-bearing; do not
+        # simplify it (T-CACHE-36 pins this boundary).
+        xml = entry.get('xml')
+        if xml is None:
+            # Incomplete entry (no body) ⇒ *miss*, not a fetch failure.  Warned
+            # once per process so the self-heal is observable (P2-2).
+            _warn_feed_degraded_once('xml is None', path)
             return None
         feed_cache.move_to_end(path)
         entry['last_access'] = time.time()
-        return {'xml': entry['xml'], 'time': entry['time'],
+        return {'xml': xml, 'time': entry.get('time'),
                 'last_modified': entry.get('last_modified'),  # P2-1: fail-safe
                 'fingerprint': entry.get('fingerprint'),
                 'last_access': entry['last_access'],
@@ -936,7 +1010,9 @@ def feed_cache_get(path):
     """Return the cached feed XML (refreshing LRU), or None on miss/expiry.
 
     Thin wrapper over `feed_cache_get_entry` (BR-CACHE-32): the public
-    signature and semantics are unchanged.
+    signature and semantics are unchanged.  Indexing ``entry['xml']`` is safe
+    by invariant: `feed_cache_get_entry` returns a dict only once a non-``None``
+    ``xml`` is present (its read-side fail-safe maps a missing body to ``None``).
     """
     entry = feed_cache_get_entry(path)
     return entry['xml'] if entry is not None else None
@@ -965,7 +1041,11 @@ def feed_cache_put(path, xml, ttl, fingerprint=None):
             _sweep_expired(feed_cache)
             while len(feed_cache) >= cap:
                 feed_cache.popitem(last=False)
-        if (fingerprint is not None and prev is not None
+        # isinstance(prev, dict) is a P2-6 defensive guard: a truthy
+        # non-mapping prev (unreachable in production — this writer always
+        # stores a dict) has no `.get` and simply cannot inherit (there is no
+        # fingerprint to compare), so the entry advances `last_modified`.
+        if (fingerprint is not None and isinstance(prev, dict)
                 and prev.get('fingerprint') == fingerprint):
             last_modified = prev.get('last_modified')               # ★ F1: inherit (unchanged; P2-1 fail-safe)
         else:
@@ -998,9 +1078,17 @@ def feed_fetch_acquire(key):
     between "caller holds the lock object" and "caller entered ``with``" is
     already covered — ``feed_fetch_release`` cannot pop the key underneath a
     caller that is about to use the lock it was just handed.
+
+    Look the key up first and only allocate a ``Lock`` on a real miss
+    (v1.11): ``setdefault(key, threading.Lock())`` would construct a throwaway
+    lock on *every* call, including the common hit path.  Identity, the
+    count-before-return ordering and the critical section are all unchanged.
     """
     with _feed_fetch_locks_lock:
-        lock = _feed_fetch_locks.setdefault(key, threading.Lock())
+        lock = _feed_fetch_locks.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _feed_fetch_locks[key] = lock
         _feed_fetch_refs[key] = _feed_fetch_refs.get(key, 0) + 1
         return lock
 

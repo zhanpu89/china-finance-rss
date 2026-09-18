@@ -17,7 +17,7 @@ from china_finance_rss import config, metrics
 _TRACKED_GLOBALS = ('cache', '_negative', '_fetch_inflight', '_cache_stats',
                     '_last_cache_sweep', 'feed_cache', '_last_feed_sweep',
                     '_feed_fetch_locks', '_feed_fetch_refs',
-                    'MAX_CACHE_SIZE')
+                    '_feed_degraded_warned', 'MAX_CACHE_SIZE')
 
 
 class _FakeResponse:
@@ -49,6 +49,7 @@ class _CacheTestCase(unittest.TestCase):
         cache_mod._last_feed_sweep = 0.0
         cache_mod._feed_fetch_locks = {}
         cache_mod._feed_fetch_refs = {}
+        cache_mod._feed_degraded_warned = set()
         metrics.reset()
 
     def tearDown(self):
@@ -353,6 +354,118 @@ class FeedEntryAccessorTests(_CacheTestCase):
         written['xml'] = 'z'                              # mutating the copy is safe
         written['last_modified'] = 0
         self.assertEqual(cache_mod.feed_cache['/p'], stored_before)
+
+    def test_t_cache_36_read_side_fail_safe(self):
+        # T-CACHE-36 (cache.md v1.11 / P2-4): the three malformed shapes have
+        # *different* outcomes — the contrast between ① and ③ is the point.
+        # The governing rule: the read side degrades to "treat as absent" or
+        # "serve without that header"; it must never raise, because `_guard`
+        # would turn a raised KeyError into an "upstream failure" body.
+
+        # ① missing `xml` ⇒ exactly a miss from *both* entry points, no raise.
+        no_xml = {'time': 1.0, 'last_modified': 2.0, 'fingerprint': 'FP',
+                  'last_access': 1.0, 'expires_at': time.time() + 30}
+        cache_mod.feed_cache['/no-xml'] = dict(no_xml)
+        self.assertIsNone(cache_mod.feed_cache_get_entry('/no-xml'))
+        self.assertIsNone(cache_mod.feed_cache_get('/no-xml'))
+        # An explicit None is the same shape as a missing key.
+        cache_mod.feed_cache['/none-xml'] = dict(no_xml, xml=None)
+        self.assertIsNone(cache_mod.feed_cache_get_entry('/none-xml'))
+        self.assertIsNone(cache_mod.feed_cache_get('/none-xml'))
+
+        # ② missing `expires_at` ⇒ `.get(..., 0)` and `now >= 0` always holds
+        #    ⇒ naturally expired ⇒ a miss (no extra branch required).
+        cache_mod.feed_cache['/no-exp'] = {
+            'xml': '<e/>', 'time': 1.0, 'last_modified': 2.0,
+            'fingerprint': 'FP', 'last_access': 1.0}
+        self.assertIsNone(cache_mod.feed_cache_get_entry('/no-exp'))
+        self.assertIsNone(cache_mod.feed_cache_get('/no-exp'))
+
+        # ③ a *present* `xml` with the legacy four fields is still served:
+        #    only `last_modified`/`fingerprint` degrade to None (no
+        #    Last-Modified header, IMS disabled).  This must NOT collapse into
+        #    ① — the body is complete, so a None here would force a needless
+        #    refetch.  (The ① vs ③ contrast is the falsification target.)
+        cache_mod.feed_cache['/legacy4'] = {
+            'xml': '<l/>', 'time': 1.0, 'last_access': 1.0,
+            'expires_at': time.time() + 30}
+        legacy = cache_mod.feed_cache_get_entry('/legacy4')
+        self.assertIsNotNone(legacy)
+        self.assertEqual(legacy['xml'], '<l/>')
+        self.assertIsInstance(legacy['time'], float)
+        self.assertIsNone(legacy['last_modified'])
+        self.assertIsNone(legacy['fingerprint'])
+        self.assertEqual(cache_mod.feed_cache_get('/legacy4'), '<l/>')
+        # `time` is read with `.get('time')` (default None) — a complete body
+        # with no write clock is still served rather than treated as a miss.
+        cache_mod.feed_cache['/no-time'] = {
+            'xml': '<t/>', 'last_modified': 2.0, 'fingerprint': 'FP',
+            'last_access': 1.0, 'expires_at': time.time() + 30}
+        no_time = cache_mod.feed_cache_get_entry('/no-time')
+        self.assertIsNotNone(no_time)
+        self.assertEqual(no_time['xml'], '<t/>')
+        self.assertIsNone(no_time['time'])               # missing ⇒ None
+
+        # ④ P2-1: a legal-but-empty body `xml=''` is served, NOT treated as a
+        #    miss.  The predicate is *exactly* `is None`; a truthiness
+        #    "simplification" (`if not xml`) would make every read of this
+        #    entry miss, refetch, write `''` back, and miss again — a permanent
+        #    refetch loop no TTL can break.  Falsification: change the predicate
+        #    to `not xml` ⇒ the two assertions below go red.
+        cache_mod.feed_cache['/empty-xml'] = {
+            'xml': '', 'time': 1.0, 'last_modified': None,
+            'fingerprint': None, 'last_access': 1.0,
+            'expires_at': time.time() + 30}
+        empty = cache_mod.feed_cache_get_entry('/empty-xml')
+        self.assertIsNotNone(empty)                      # ★ not None
+        self.assertEqual(empty['xml'], '')
+        self.assertEqual(cache_mod.feed_cache_get('/empty-xml'), '')
+
+        # ⑤ P2-6: a truthy *non-mapping* entry (defensive; unreachable in
+        #    production — the writer always stores a dict) reads as a miss
+        #    instead of raising AttributeError, which `_guard` would misreport
+        #    as an upstream failure.  Falsification: drop the
+        #    `isinstance(entry, dict)` guard ⇒ AttributeError.
+        cache_mod.feed_cache['/not-a-dict'] = ['not', 'a', 'dict']
+        self.assertIsNone(cache_mod.feed_cache_get_entry('/not-a-dict'))
+        self.assertIsNone(cache_mod.feed_cache_get('/not-a-dict'))
+        cache_mod.feed_cache['/not-a-dict2'] = 'not-a-mapping'
+        self.assertIsNone(cache_mod.feed_cache_get_entry('/not-a-dict2'))
+        # The write path tolerates the same shape too: the timed sweep and the
+        # `prev`-inheritance lookup must not touch `.get` on a non-mapping, and
+        # the put must overwrite it with a well-formed entry.
+        cache_mod._last_feed_sweep = 0.0                 # force sweep trigger ①
+        for key in ('/bad-prev', '/bad-prev2'):
+            cache_mod.feed_cache[key] = ['still', 'not', 'a', 'dict']
+        written = cache_mod.feed_cache_put('/bad-prev', '<ok/>', 30,
+                                           fingerprint='FP')
+        self.assertEqual(written['xml'], '<ok/>')
+        self.assertIsInstance(cache_mod.feed_cache['/bad-prev'], dict)
+        self.assertIsNotNone(written['last_modified'])   # no phantom inherit
+
+    def test_t_cache_36_degraded_miss_warns_once(self):
+        # P2-2: a degraded entry (missing/None `xml`) must be observable, but
+        # the warning is deduplicated by *reason* so a hot path cannot flood
+        # the log.  The message names the key and the reason; the wording is a
+        # cache-entry self-heal, never an "upstream error".
+        cache_mod.feed_cache['/no-xml'] = {
+            'time': 1.0, 'last_access': 1.0, 'expires_at': time.time() + 30}
+        cache_mod.feed_cache['/none-xml'] = {
+            'xml': None, 'time': 1.0, 'last_access': 1.0,
+            'expires_at': time.time() + 30}
+        cache_mod.feed_cache['/empty-xml'] = {
+            'xml': '', 'time': 1.0, 'last_access': 1.0,
+            'expires_at': time.time() + 30}
+        with self.assertLogs('cache', level='WARNING') as cm:
+            self.assertIsNone(cache_mod.feed_cache_get_entry('/no-xml'))
+            # Second read, same reason ⇒ deduped, NOT a second record.
+            self.assertIsNone(cache_mod.feed_cache_get_entry('/none-xml'))
+            # `xml=''` is legal-but-empty: served, and never warned about.
+            self.assertEqual(cache_mod.feed_cache_get('/empty-xml'), '')
+        self.assertEqual(len(cm.output), 1)              # once per reason
+        self.assertIn('xml is None', cm.output[0])
+        self.assertIn('/no-xml', cm.output[0])           # key in the evidence
+        self.assertNotIn('upstream', cm.output[0].lower())
 
 
 class FeedFetchLockTests(_CacheTestCase):

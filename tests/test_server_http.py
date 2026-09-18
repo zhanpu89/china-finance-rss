@@ -1843,6 +1843,81 @@ class RssConditionalGetTests(unittest.TestCase):
         self.assertEqual(len(cache_mod._feed_fetch_locks), 0)
         self.assertEqual(len(cache_mod._feed_fetch_refs), 0)
 
+    def test_t73_concurrent_distinct_hosts_bounded_and_in_sync(self):
+        """SRV-T73 / F8 / BR-SRV-50: K=8 distinct-Host keys for the same feed
+        path in flight at once.
+
+        A blocking fetch stub plus a `threading.Event` makes the overlap
+        deterministic (never a `sleep` roulette): each fetch parks until all K
+        keys have entered, so the tables can be sampled mid-flight.  Asserts
+        ① both tables are bounded by K and stay in sync; ② once every caller
+        returns both drain to zero.  A `release` outside `finally`, a pop of
+        only one table, or cumulative (never reclaimed) growth all turn this
+        red.
+        """
+        h = RSSHandler.__new__(RSSHandler)
+        K = 8
+        entered = threading.Event()
+        release = threading.Event()
+        state = {'entered': 0, 'calls': 0}
+        state_lock = threading.Lock()
+
+        def fetch():
+            with state_lock:
+                state['calls'] += 1
+                state['entered'] += 1
+                if state['entered'] >= K:
+                    entered.set()
+            release.wait(15.0)
+            return '<rss/>'
+
+        results = []
+        errors = []
+        with patch.object(srv, 'PUBLIC_BASE_URL', ''):
+            keys = [srv._feed_cache_key(self.PATH, f'http://h{i}.example.com')
+                    for i in range(K)]
+            self.assertEqual(len(set(keys)), K)     # distinct Host ⇒ distinct key
+
+            def worker(key):
+                try:
+                    results.append(h._get_or_fetch_feed(key, fetch))
+                except Exception as exc:            # pragma: no cover
+                    errors.append(exc)
+
+            threads = [threading.Thread(target=worker, args=(k,)) for k in keys]
+            for t in threads:
+                t.start()
+            try:
+                # 15s, not 5s: under extreme scheduler delay a 5s window can
+                # expire *before* all K threads park, releasing them early and
+                # producing a spurious red.  The event stays the sync primitive
+                # (never a sleep) — only the wait budget is generous.
+                self.assertTrue(entered.wait(15.0),
+                                'not all K fetches reached the stub in time')
+                # ① in flight: bounded by K and both tables stay in sync
+                self.assertGreaterEqual(len(cache_mod._feed_fetch_locks), 1)
+                self.assertLessEqual(len(cache_mod._feed_fetch_locks), K)
+                self.assertEqual(len(cache_mod._feed_fetch_refs),
+                                 len(cache_mod._feed_fetch_locks))
+                self.assertEqual(len(cache_mod._feed_fetch_refs), K)
+            finally:
+                release.set()
+                for t in threads:
+                    t.join(15.0)
+            # Every worker must actually be finished: a thread still running
+            # after `join(15.0)` is the concrete evidence of "who did not
+            # finish", instead of a silently-dropped result.
+            for t in threads:
+                self.assertFalse(t.is_alive(),
+                                 'a worker thread did not finish after join(15s)')
+
+        self.assertEqual(errors, [])
+        self.assertEqual(state['calls'], K)         # exactly one fetch per key
+        self.assertEqual(len(results), K)
+        # ② every caller returned ⇒ both tables fully drained
+        self.assertEqual(len(cache_mod._feed_fetch_locks), 0)
+        self.assertEqual(len(cache_mod._feed_fetch_refs), 0)
+
 
 if __name__ == '__main__':
     unittest.main()
