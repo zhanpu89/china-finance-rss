@@ -1,13 +1,15 @@
 # stock_api.py 详细设计
 
-> **版本** v1.3 · **状态** 已契约同步（P7b：以 `china_finance_rss/stock_api.py` 实现为准回写 · **depth 域 + 三阶段 basic_info + refresh_epoch 贯通**）· **日期** 2026-09-17 · **作者/产出** task-decomposer
+> **版本** v1.4 · **状态** 已契约同步（★ v1.4：**溯源收口 + 引用时点约定**——上游 **SAD v1.12 / PRD v0.10**、基础层接口权威 **config v1.6 / cache v1.14 / metrics v1.8**；**无 BR 语义变更、无对外契约变更**；P7b：以 `china_finance_rss/stock_api.py` 实现为准回写 · **depth 域 + 三阶段 basic_info + refresh_epoch 贯通**）· **日期** 2026-09-18 · **作者/产出** task-decomposer
+> **v1.4 变更（溯源收口 + 引用时点约定 · 只改文档，不改代码）**：① **【溯源收口】** 头部上游 **SAD v1.3 → v1.12 / PRD v0.3 → v0.10**；「基础层接口权威」栏 **config v1.1 → v1.6 / cache v1.1 → v1.14 / metrics v1.1 → v1.8**（均指向**现行版本**）；§11 自检中残留的「按基础层 v1.1 契约使用」改为按**现行**契约（版本见头部）。② **【引用时点约定（新增）】**「接口权威」栏所列版本 = **本文最后一次同步时点的快照**；被引文档的**权威版本以其自身头部为准**——故该栏**落后一版不属漂移、无需每次追平**；**内容以被引文档为准，此栏仅用于定位**。**本模块的代码 / 契约形态 / BR / 测试编号 / 偏差零变更**（v1.3 正文逐字保留）；**未改代码 / SAD / PRD / API.md / README.md / `.opencode`；`_PROGRESS.md` 同步。**
 > 本版修订（v1.3 契约同步，**只改文档、不改代码**）：① **新增码级取数器 `fetch_cls_stock_depth(stock_code, deadline=None, ttl=None, refresh_epoch=None)`**（五档盘口，`depth` 域；URL `_STOCK_DEPTH_URL?secu_code=…&field=five`；**空 dict / 20 档全 0 ⇒ 返回 `None`**；失败非致命）+ `_depth_store`（自持 depth 池 / 终点缓存，使 `DOMAIN_MATRIX['depth']` 的 pool_max/cache_max 成为活设置）；② **`fetch_cls_basic_info` 扩为三阶段**：阶段1 basic（致命）/ 阶段2 sector（非致命，7d sector 缓存）/ **阶段3 depth（非致命，只增字段 `result['depth']`）**；③ **空壳防御**：`code:200` 但 `secu_name`/`last_px` 全空、或 `data:{}` ⇒ 视为 **`upstream_error`**（不写缓存、不进阶段 2/3）；④ **`upstream_secu_code()` 全量应用**于 x-quote URL 构造（北交所点号形 `430047.BJ`；SH/SZ 前缀形）；⑤ **`BATCH_MAX_WORKERS` 8 → 20**（来源 `config.BATCH_MAX_WORKERS`）；⑥ **`refresh_epoch` 贯通**：`_fetch_rest_json` → `_rest_fetch` → `_call_fetcher`/`_fetch_one`/`_run_batch`/`_process_chunk`/`_handle_cached_batch` → 各 fetcher/handler；**终点缓存命中追加 `written >= refresh_epoch`**（仅刷新路径，`None` 逐字不变）；⑦ `_DOMAIN_STORES` 增 `depth` 行；`cached_batch` 域枚举扩 `depth`。
 > 本版修订（P7b 契约同步，**只改文档、不改代码**）：① `_prefetch_advance(name, visited, len(codes))`——**访问即推进**（含无数据/冷却跳过）；② 新增 `_LOCAL_BUDGET` 哨兵：**本地预算耗尽不计入 `_fail_ledger`**（客户端仍见 `upstream_timeout`）——**取代 v1.1 的 REV-DES-15 裁决②**；③ `_fail_ledger` 满额 O(1) 淘汰（插入序）+ 冷却发布 1 次/5s 限速 + 老化扫描限频；④ `_direct_fetch` REST 腿改经 `fetch_json`（缓存/负缓存/单飞），单次逻辑取数只计一次 `upstream_fetch_total`，删除 `_classify_exc`/`_urlopen_timeout`；⑤ `_fetch_one` 回退仅**调用帧** TypeError 降级（`_call_fetcher`），保留 deadline/ttl；⑥ `_fetch_rest_json` 向 `fetch_json` 传 `deadline`、删除前置闸门；⑦ 池/终端缓存/账本键一律 `canonical_code`，响应按请求原拼写回填；⑧ `fetch_cls_f10` "有数据但不匹配" ⇒ 计 `cdp_unavailable`；导航锁限时 `_acquire_nav_lock`；⑨ 新增 `_basic_sector_*`（detail 派生行业名缓存，BUG-P6C-01）。
 > 沿用 v1.1：REV-DES-20260915-002（REV-DES-10/12/13/14/16/17/18/21 + 登记项①-⑦）
 > 模块路径 `china_finance_rss/stock_api.py` · 归属 **Layer 2（业务/数据获取层）**
-> 上游 SAD `doc/arch/SAD.md` **v1.3**（§2.1 缓存分层 INV-1a/INV-1b / §2.2 R-3 R-6 / §2.3 D-2 D-4 D-6 / §2.4 / §2.6 / §3 stock_api 行 / ADR-001/005/008/009/014）
-> 上游 PRD `doc/prd/perf-stability-optimization.md` v0.3（AC-A3/A6/A7/A9/A10、AC-E2/E6/E9、AC-S1/S6/S7/S10；R12/R13/R14/R16）
-> 基础层接口权威 `doc/detailed/config.md` v1.1 · `cache.md` v1.1 · `metrics.md` v1.1
+> 上游 SAD `doc/arch/SAD.md` **v1.12**（★ v1.4 溯源更正：原误记 v1.3；权威以 SAD 头部为准）（§2.1 缓存分层 INV-1a/INV-1b / §2.2 R-3 R-6 / §2.3 D-2 D-4 D-6 / §2.4 / §2.6 / §3 stock_api 行 / ADR-001/005/008/009/014）
+> 上游 PRD `doc/prd/perf-stability-optimization.md` **v0.10**（★ v1.4 溯源更正：原误记 v0.3；权威以 PRD 头部为准）（AC-A3/A6/A7/A9/A10、AC-E2/E6/E9、AC-S1/S6/S7/S10；R12/R13/R14/R16）
+> 基础层接口权威 `doc/detailed/config.md` **v1.6** · `cache.md` **v1.14** · `metrics.md` **v1.8**（★ v1.4 溯源更正：原误记 config/cache/metrics 均 v1.1；均指向**现行版本**）
+> ★ **引用时点约定**：上列「接口权威」版本 = **本文最后一次同步时点的快照**；被引文档的**权威版本以其自身头部为准**——故该栏**落后一版不属漂移、无需每次追平**；**内容以被引文档为准，此栏仅用于定位**。
 > 端锁定 🟠 STABLE（6 个 `/stock/*` 批量 handler 的**响应字段集合**不变；仅新增 `_errors`/截断保留键，由 `cache.build_batch_response` 统一挂载）
 
 ## 1. 模块职责与边界
@@ -1714,7 +1716,7 @@ def _basic_sector_put(code, sector, now=None):
 - [x] 锁清单 + 锁序（域锁 ⊥ `_fail_ledger_lock`；metrics 永远最内层）+ 热点开销
 - [x] 错误处理含 kind 映射与降级路径；防重复计数口径明确
 - [x] 测试要点 **39 条**（SA-T1..T39；v1.1 新增 T25..T29；★ v1.3 新增 T35..T39）映射 PRD AC；AC 追溯矩阵覆盖 A3/A4/A6/A7/A9/A10/E2/E5/E6/S1/S4/S6/S7/S10
-- [x] 与基础层对齐：`cache_policy`/`FetchError`/`build_batch_response`/`metrics.incr,set_gauge` 全部按基础层 v1.1 契约使用
+- [x] 与基础层对齐：`cache_policy`/`FetchError`/`build_batch_response`/`metrics.incr,set_gauge` 全部按**现行**基础层契约使用（逐项见 §1.4；版本见头部「基础层接口权威」——★ v1.4：原写「基础层 v1.1」，按「引用时点约定」改为不绑版本号，内容以被引文档头部为准）
 - [x] **v1.1**：§1.3/§1.4/§2.1#3/§5.9 对 `cdp_engine.page_data` 的口径一致（REV-DES-10 无矛盾）
 - [x] **v1.1**：`cdp_unavailable` 4 处出口统一计数（REV-DES-12）；`_fetch_rest_json` 解码失败/非 dict 就地计数（REV-DES-13/14）
 - [x] **v1.1**：BR-SA-24/§6.2/§9 的 ≤15s 引据改为 **AC-E2**（REV-DES-17）；`_BATCH_BUDGET_CDP` 裁决回执入 §10#10（REV-DES-21）
@@ -1724,6 +1726,7 @@ def _basic_sector_put(code, sector, now=None):
 - [x] **v1.2（P7b）**：`_direct_fetch` REST 腿经 `fetch_json`、单次只计一次（§2.1#7-9/§5.10/BR-SA-28）；`_classify_exc`/`_urlopen_timeout` 已删（§1.3/§5.2/§6.1）
 - [x] **v1.2（P7b）**：归一与按请求拼写回填（§2.6/§5.4/§5.6/BR-SA-36/SA-T33）；f10 五出口 + 限时导航锁（§2.9/§5.9/BR-SA-37/SA-T34）；`_basic_sector_*`（§2.7b/§5.15）；`_fetch_rest_json` 期限透传、无前置闸门（§5.2）
 - [x] **v1.3**：`depth` 域 `fetch_cls_stock_depth`/`_depth_store`（§2.1#7/§3.3/§3.5/§5.9/BR-SA-26/SA-T35）；`fetch_cls_basic_info` 三阶段 + 空壳防御（§2.1#4/§5.9/SA-T36）；`upstream_secu_code` 全量应用（§1.3/§2.1/§5.9/§5.10/SA-T37）；`refresh_epoch` 贯通（§2.2/§2.3/§4.2 BR-SA-38/§5.2/§5.5/§5.6/§5.7/§5.8/SA-T38）；`BATCH_MAX_WORKERS=20`（§3.4/§5.1/SA-T39）
+- [x] **v1.4（溯源收口 + 引用时点约定）**：头部上游 **SAD v1.3 → v1.12 / PRD v0.3 → v0.10**；基础层接口权威 **config v1.1 → v1.6 / cache v1.1 → v1.14 / metrics v1.1 → v1.8**（指向现行版本）；「按基础层 v1.1 契约使用」改为不绑版本号（依「引用时点约定」，接口权威栏为快照、**落后一版不属漂移**，内容以被引文档头部为准）。**代码 / 契约 / BR / 测试编号 / 偏差零变更**；**未改代码 / SAD / PRD / API.md / README.md / `.opencode`**
 
 ---
 
@@ -1735,3 +1738,4 @@ def _basic_sector_put(code, sector, now=None):
 | v1.1 | 2026-09-15 | 按 `doc/review/数据层三模块_详细设计评审_专家版.md`（REV-DES-20260915-002）修订：**P1 REV-DES-10**（§1.3 允许 `cdp_engine(page_data)` + §1.4 补登记 + §1.3 依赖图）；**P2** REV-DES-12/13/14/15/16/17/18/21；登记项①-⑦ 裁决回执；引据恒 AC-E2 |
 | v1.2 | 2026-09-16 | **P7b 契约同步（以 `stock_api.py` 实现为准）**：`_LOCAL_BUDGET` 哨兵（取代 REV-DES-15 裁决②）·`_call_fetcher` 仅调用帧降级·`_prefetch_advance(name, visited, …)` 访问即推进·账本 5s 限频 + O(1) 淘汰·`_direct_fetch` REST 腿经 `fetch_json`（单计一次）并删 `_classify_exc`/`_urlopen_timeout`·`_fetch_rest_json` 期限透传无前置闸门·归一键与请求拼写回填·f10 五出口 + 限时导航锁·`_basic_sector_*` 新增。新增 BR-SA-34..37、SA-T30..T34、§10#17..20。**未改代码** |
 | v1.3 | 2026-09-17 | **P7b 契约同步（以 `stock_api.py` 实现为准 · depth 域 + 三阶段 basic_info + refresh_epoch）**：`fetch_cls_stock_depth`/`_depth_store`/`_DEPTH_VALUE_FIELDS`/`_DOMAIN_STORES['depth']`·`fetch_cls_basic_info` 扩三阶段 + `_basic_info_is_valid` 空壳防御·`upstream_secu_code` 全量应用于 x-quote URL·`BATCH_MAX_WORKERS` 8→20·`refresh_epoch` 全链路贯通 + 终点缓存 `written >= epoch`·`cached_batch` 域枚举扩 `depth`。新增 BR-SA-38·SA-T35..T39·§10#21..26·§12 本行。**未改代码** |
+| v1.4 | 2026-09-18 | **溯源收口 + 引用时点约定（只改文档）**：头部上游 **SAD v1.3 → v1.12 / PRD v0.3 → v0.10**；基础层接口权威 **config v1.1 → v1.6 / cache v1.1 → v1.14 / metrics v1.1 → v1.8**（指向现行版本）；新增「引用时点约定」——接口权威栏 = 本文最后同步时点快照，**落后一版不属漂移**，内容以被引文档头部为准。**无 BR 语义变更 / 无对外契约变更**；**未改代码 / SAD / PRD / API.md / README.md / `.opencode`** |

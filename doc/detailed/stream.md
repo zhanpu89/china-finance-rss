@@ -1,15 +1,19 @@
 # stream.py 详细设计
 
-> **版本** v1.3 · **状态** 已同步实现（P7b 契约同步 · **r5 容量重标定 + 冷启动去重/唤醒** · 以代码为准）· **日期** 2026-09-17 · **作者/产出** task-decomposer
+> **版本** v1.6 · **状态** 已同步实现（★ v1.6 **溯源收口 + 引用时点约定**：上游 PRD **v0.9 → v0.10**（SAD v1.12 已对）；接口权威栏 **config v1.5 → v1.6 / metrics v1.7 → v1.8**（`stock_api.md` v1.3 不变）；文末「共同构成」同步；**无 BR 语义变更、无对外契约变更**；★ v1.5 头部溯源更正：SAD v1.12 / PRD v0.9 / config v1.5 / metrics v1.7 · P7b 契约同步 · **r5 容量重标定 + 冷启动去重/唤醒** · **v1.4 过时措辞更正：建组 400 面同步落点已确认** · 以代码为准）· **日期** 2026-09-18 · **作者/产出** task-decomposer
+> **v1.6 变更（溯源收口 + 引用时点约定 · 只改文档，不改代码）**：① **【溯源收口】** 头部上游 **PRD v0.9 → v0.10**（SAD v1.12 已对）；「基础层/数据层接口权威」栏 **config v1.5 → v1.6 / metrics v1.7 → v1.8**（`stock_api.md` v1.3 维持）；文末「共同构成」清单同步（config v1.6 / metrics v1.8 / stock_api v1.3 / server v1.16）。② **【引用时点约定（新增）】**「接口权威」栏（及文末「共同构成」清单）所列版本 = **本文最后一次同步时点的快照**；被引文档的**权威版本以其自身头部为准**——故该栏**落后一版不属漂移、无需每次追平**；**内容以被引文档为准，此栏仅用于定位**。**无帧契约 / 无 BR / 无测试编号变更**（v1.5 正文逐字保留）；**未改代码 / SAD / PRD / API.md / README.md / `.opencode`；`_PROGRESS.md` 同步。**
+> **v1.5 变更（头部溯源更正 · 只改文档，不改代码）**：把**严重滞后**的头部溯源更新为**实际版本**——上游 **SAD v1.3 → v1.12 / PRD v0.3 → v0.9**；接口权威栏 **`config.md` v1.3 → v1.5 / `metrics.md` v1.2 → v1.7**（`metrics.md` 本批由 v1.6 补登 `market_api` owner 升至 v1.7）；文末「共同构成」清单同步（`config.md` v1.1 → v1.5 / `metrics.md` v1.1 → v1.7 / `stock_api.md` v1.0 → v1.3 / `server.md` v1.2 → v1.16）；`stock_api.md` 维持 v1.3；`cache.md` 与本模块**无接口**、不列版本。**无帧契约 / 无 BR / 无测试编号变更**；**未改代码 / SAD / PRD / API.md / README.md / `.opencode`；`server.md` → v1.16、`metrics.md` → v1.7、`_PROGRESS.md` 同步。**
+> **v1.4 变更（过时措辞更正 + 事实对齐 · 只改文档，不改代码）**：把本文档中**已过时**的「须编排层记变更日志 / 同步流端口 API 文档 / 同步权归编排层」措辞，按**已发生的同步事实**更正为**已同步**——① **【头部端锁定行】**「须编排层记变更日志」→ **✅ 已同步（`API.md:541`）**；② **【§2.1 组数上限行】**「须编排层记变更日志 + 同步流端口 API 文档」→ **✅ 已同步（`API.md:529` / `:541`）**；③ **【§10#9】**「同步权归编排层」→ **✅ 已由编排层同步（`API.md:541`）**；④ **【§10#18】**「须编排层记流端口 API 文档变更」→ **✅ 已同步（`API.md` §5「帧消费协议」/ §6.4）**。**无帧契约语义变更 / 无 BR 或测试编号变更**；**未改代码 / SAD / PRD / API.md / README.md / `.opencode`；`server.md` → v1.15、`_PROGRESS.md` 同步。**
 > **v1.3 变更（契约级同步 · 以代码为准）**：① **节拍 = 最短订阅域 tier**：`tick_interval(fields=None)` 返回活跃订阅字段域的最短 TTL（quote/depth = L0 盘中 **4s**；无订阅回落 L1），**一轮只算一次并下传**（`push_loop` → `_push_once(t0, tick=)` → `_refresh_pool(..., tick=)`）② **容量模型重标定（r5）**：`_PER_FETCH_EST = config.STREAM_PER_FETCH_EST`（默认 **0.3**）、`BATCH_MAX_WORKERS = 20`、`_FIELD_FETCH_CALLS['quote'] = 2`（basic + depth）⇒ `coverage` = tick4 **213** / tick8 **426** / tick120 **6400**；`coverage_codes` tick4 = quote-only **106** / 3 域 **53**；C1 门限 = `_fetches_per_code(fields) × n ≤ coverage` ③ **`refresh_epoch` 新鲜度下限**：设定 tick 的域（`cache_policy(d)['ttl'] ≤ tick`）传**本轮起点** ⇒ 每拍真回源；慢域（fundflow/timeline）传 `None` 仍交错（`_domain_refresh_epoch` + `_call_refresh_handler`）④ **帧发送层去重**：`_frame_signature`（排除 `ts` 的 blake2b 摘要）+ 组级 `last_sig` ⇒ 内容未变不发；连接级 `_SSEConn.sent_any` ⇒ 未首发连接**强制补发**；`last_push_ts` **仅真正发送时刷新** ⑤ **空闲唤醒**：`_wake_event`/`_idle_sleeping`/`_wake_pending`/`_last_round_idle`；`create_group` 成功 / `_serve_sse` 连接登记后调 `_wake_push_loop()`；**仅空闲等待可被打断**，活跃轮仍硬 `time.sleep`（无连发）⑥ **冷首轮豁免**：进程首个真正刷新轮超预算不计 `degraded`/`slip`（仅一轮，`_first_refresh_done`）⑦ **不变量订正（重要）**：`_tick_sleep_seconds` 的真实不变量是「**轮起点→轮起点 ≥ 1 tick**」，**不是**「帧到达间隔 ≥ 1 tick」；相邻**已发送**帧到达间隔 = `tick − dur_k + dur_{k+1}`，冷→温（`dur_k > dur_{k+1}`）可短于 tick（未变帧现由去重丢弃）⑧ **SSE 帧契约只增**：`items[code].quote` 现可含 **`depth`**（五档盘口，21 字段）
 > **v1.2 变更（契约级同步）**：① **对外帧格式扩元数据**（`codes_total`/`fields`/`missing`/`missing_count`/`errors`/`stale`/`stale_count`，items **覆盖全部订阅码**，可 `null`）② `_build_frame` **仅 `codes` 为空**时返回 `None` ③ **last-known 结转**（`_carry_forward`/`_last_known`，未刷新码带旧值并标 `_stale`）④ `_refresh_pool` 新签名 `(codes, now=None, fields=None, tick=None, deadline=None)`，按**订阅字段并集**刷新 + `deadline` 超预算跳过并标 `tick_budget_exceeded` ⑤ **容量模型重标定**：`_PER_FETCH_EST=2.2`、`_FIELD_FETCH_CALLS['quote']=1`、`coverage=23`、`coverage_codes`=1/2/3 域 → 23/11/7；C1 门限 `_fetches_per_code(fields)×n ≤ coverage` ⑥ **节拍整 tick 网格滑移**（`_tick_sleep_seconds`）+ 异常退避 1/2/4…封顶 8 tick；`_TICK_MIN_SLEEP_FRACTION` 已删 ⑦ lag gauge 空池/C1 发布 **0** ⑧ **准入 cap** `projected + largest ≤ budget`（单帧余量；满配组容量 **9→8**）⑨ `_valid_fields` **fail-closed**（显式非法字段 → 400）⑩ 码归一统一走 `config.canonical_code` ⑪ POST/PATCH **非 list → 400、非 object body → 400**；201/200 响应新增容量元数据 ⑫ `_serve_sse` `Connection: close` + `close_connection=True` + 抑制超时日志 ⑬ `_broadcast` 先滤 `closed`；`payload_bytes()` 已删 ⑭ `_MGMT_WORKER_RESERVE=10` 具名
 > **v1.1 变更**：P1-4 流端口 `max_inflight=110` · P2-6 `_reserve_for` 用本轮排除集 · P2-7 补"销毁 vs 注册"复检 · P2-8 测试清单降级 1 条 · P2-9 `stream_refresh_lag_ticks` owner 对齐 · P2-10 `cached_batch(_FIELD_DOMAINS[field], …)` 统一
 > 模块路径 `china_finance_rss/stream.py` · 归属 **Layer 2（SSE 推送 / 订阅管理）**
-> 上游 SAD `doc/arch/SAD.md` **v1.3**（§2.2 R-2/R-6 · §2.5 C-1/C-2/C-3 · §4.2 帧共享与字节计费 · §4.3 资源上界 · §3 stream.py 行 · ADR-004/008/013）
-> 上游 PRD `doc/prd/perf-stability-optimization.md` v0.3（AC-A1/A2/A7、AC-E5/E7、AC-S2/S7/S9/S10/S11；R5/R6/R7/R8）
-> 基础层/数据层接口权威：`config.md` **v1.3** · `metrics.md` v1.2 · `stock_api.md` **v1.3**（`cache.md` 与本模块**无接口**）
+> 上游 SAD `doc/arch/SAD.md` **v1.12**（★ v1.5 溯源更正：原误记 v1.3；权威以 SAD 头部为准）（§2.2 R-2/R-6 · §2.5 C-1/C-2/C-3 · §4.2 帧共享与字节计费 · §4.3 资源上界 · §3 stream.py 行 · ADR-004/008/013）
+> 上游 PRD `doc/prd/perf-stability-optimization.md` **v0.10**（★ v1.5 溯源更正：原误记 v0.3；★ **v1.6 溯源收口：v0.9 → v0.10**——权威以 PRD 头部为准）（AC-A1/A2/A7、AC-E5/E7、AC-S2/S7/S9/S10/S11；R5/R6/R7/R8）
+> 基础层/数据层接口权威：`config.md` **v1.6** · `metrics.md` **v1.8** · `stock_api.md` **v1.3**（★ v1.5 溯源更正：原误记 config v1.3 / metrics v1.2；★ **v1.6 溯源收口**：config v1.5 → v1.6 / metrics v1.7 → v1.8；`cache.md` 与本模块**无接口**，不列版本）
+> ★ **引用时点约定**：上列「接口权威」版本 = **本文最后一次同步时点的快照**；被引文档的**权威版本以其自身头部为准**——故该栏**落后一版不属漂移、无需每次追平**；**内容以被引文档为准，此栏仅用于定位**。
 > 跨模块约定（已锁定）：`doc/detailed/_PROGRESS.md` §A（分片轮转 / `_` 前缀 / 游标键 `'stream_refresh'`）
-> 端锁定 🟠 STABLE（路由与 SSE 帧格式不变；`POST /stream/subscriptions` **新增 400 失败模式**〔`MAX_GROUPS` 超限，须编排层记变更日志〕）
+> 端锁定 🟠 STABLE（路由与 SSE 帧格式不变；`POST /stream/subscriptions` **新增 400 失败模式**〔`MAX_GROUPS` 超限，**✅ 已同步：`API.md:541`**〕）
 
 ## 1. 模块职责与边界
 
@@ -143,7 +147,7 @@ paths:
 | 单组码数 > `MAX_CODES_PER_SUB`(200) | 400 | `{"error":"too many codes (max 200)"}` |
 | 去重池投影 > `MAX_DEDUP_CODES`(2000) | 400 | `{"error":"pool would exceed 2000 codes"}` |
 | 跨组帧工作集 + 单帧余量 > `STREAM_QUEUE_BYTES_BUDGET` | 400 | `{"error":"subscription frames would exceed the <budget>-byte stream frame budget"}` ★ v1.2（P1-4 准入 cap） |
-| **组数 ≥ `MAX_GROUPS`(200)** | **400** | `{"error":"too many groups (max 200)"}` ← ★ **新增对外失败模式**（SAD §7.1 P2-N7，须编排层记变更日志 + 同步流端口 API 文档） |
+| **组数 ≥ `MAX_GROUPS`(200)** | **400** | `{"error":"too many groups (max 200)"}` ← ★ **新增对外失败模式**（SAD §7.1 P2-N7；**✅ 已同步：`API.md:541`**，非法 `fields` ⇒ 400 见 `API.md:529`） |
 | 组不存在 | 404 | `{"error":"subscription not found"}`（PATCH）/ `{"error":"not found"}`（GET/DELETE）；**PATCH 与 destroy 竞态** ⇒ 404（`get_group` 返回 `None`） |
 | 连接数 ≥ `MAX_STREAM_CONNS`(100) | 503 | `{"error":"too many stream connections"}`（计 `http_503_total`） |
 | 路径未注册 | 404 | `{"error":"not found"}` |
@@ -1553,7 +1557,7 @@ def _read_json_body(self):
 | 6 | `_reserve_for` 的"保留字节最大的组" | SAD §4.2：*从"当前保留字节最大的组中队列最满的连接"丢弃其最旧帧* | 用 `_group_bytes[sid]`（按 `refs 0→1 / 1→0` 维护的**帧字节和**）作为"组保留字节"，**不逐帧扫描**；无可丢 `_Frame` 的组只加入**本轮排除集 `skip`**（**不** `pop(_group_bytes[sid])`，修 P2-6） | 数学等价（帧只属于一个组）+ O(1) 维护；逐帧扫描每 tick 最坏 O(组×连接×8) 不可接受；整组 `pop` 会把仍有 `refs>0` 帧的组账抹掉 ⇒ 系统性低估、破坏丢弃选靶确定性（v1.0 缺陷） |
 | 7 | 分片游标落点 | SAD §2.2 R-6：*复用 `_prefetch_rotate/_prefetch_advance` 的 round-robin 语义*；`_PROGRESS.md` §A.2：*可用 `_prefetch_advance('stream_refresh', ...)`* | 使用 `stock_api._prefetch_slice(view, lock, 'stream_refresh', size)` + `_prefetch_advance('stream_refresh', len(sl), n)`；`view` 为 **临时轮转视图**（`{code: 0.0}`），复用 `_prefetch_cursor['stream_refresh']` | stream 的活跃码集**不是池**（`_active_codes()` 非 `pool` 成员账）；`_prefetch_slice` 只依赖 `list(pool.keys())` + 共享游标 ⇒ 语义等价且不复制游标逻辑。**登记：使用了私有名（stock_api.md §2.7 已明文提供）** |
 | 8 | `stream_frame_peak_bytes` 语义 | SAD §2.2 R-4 列"distinct 帧数/**帧平均**/峰值字节" | 注册表冻结（`metrics.md` §3.2）只有 `stream_frame_distinct` + `stream_frame_peak_bytes` 两名 ⇒ `peak` = **历史最大单帧字节**；**"帧平均"无注册名，不实现** | 不得新增 metrics 名（注册表冻结，ADR-010/`metrics.md` §3.2）；总量口径由 `stream_queue_bytes` 承载 |
-| 9 | `MAX_GROUPS` 400 | SAD §7.1 P2-N7：**新增对外失败模式**，须编排层记变更日志 + 同步流端口 API 文档 | 已实现 + 登记（§2.1 / §6.1）；**同步权归编排层** | 🟠 STABLE 下端锁定要求显式登记；`§3.1「不增删路径/不改方法」由此获得显式例外` |
+| 9 | `MAX_GROUPS` 400 | SAD §7.1 P2-N7：**新增对外失败模式**，须编排层记变更日志 + 同步流端口 API 文档 | 已实现 + 登记（§2.1 / §6.1）；**✅ 已由编排层同步（`API.md:541`）** | 🟠 STABLE 下端锁定要求显式登记；`§3.1「不增删路径/不改方法」由此获得显式例外` |
 | 10 | `_Frame` 归还时点 | SAD §4.2：*handler 出队消费时 `refs−=1`* | 在**写完该帧的 `finally`** 中归还（而非出队瞬间） | 更保守：写阻塞（≤40s）期间该帧仍计入预算，不会低估占用；异常路径由 `finally` 保证不泄漏。**语义与 SAD 一致（"消费时"），时点细化** |
 | 11 | tick 观测的两个计数名 | SAD §2.6 表只列 `stream_tick_duration_ms` / `stream_tick_slip_total`；另在 §2.2 R-6 列 `stream_tick_degraded_total` | `slip` = `duration >= tick`（超出整 tick）；`degraded` = `duration > 0.8 × tick` | 二者语义不同（预算超支 vs 已滑动），SAD 未给判据，此处钉死 |
 | 12 | `_FIELD_DOMAINS` 显式映射 | SAD/`_PROGRESS.md` 隐含"字段名 == 域名" | 显式建表 `{quote: quote, fundflow: fundflow, timeline: timeline}` | 防未来字段名与域解耦时 `cached_batch` 传错域（静默取空缓存） |
@@ -1562,7 +1566,7 @@ def _read_json_body(self):
 | 14 | `SubscriptionGroup.payload_bytes()` | SAD R7：*`payload_bytes = len(codes)×70KB` 仅作估算未参与调度* | **v1.2：已删除该方法**（无引用面；跨组工作集改用 `config.stream_frame_bytes(codes, fields)`）；帧字节的真实口径始终由 `_Frame.size` 承担 | v1.1 的"保留以避免破坏引用面"经核已无引用；且 `stream_frame_bytes` 是含 `fields` 维度的唯一权威 |
 | 15 | `coverage` 与 tick / 订阅字段的关系 | SAD §2.1 INV-1b 只给盘中口径（170 / 56） | ★ **v1.3（r5）**：`_PER_FETCH_EST=0.3`、`BATCH_MAX_WORKERS=20` ⇒ `coverage = int(0.8×tick×20/0.3)` **随 tick 线性增长**（tick4 **213** / tick8 **426** / tick120 **6400**）；`coverage_codes` 由**订阅字段**（+tick）决定（tick4 quote-only **106** / 3 域 **53**）。v1.2 的"恒 23"与旧"非盘中 2560/853"口径均作废 | SAD 的 170/56 属旧标定（8 worker + `_PER_FETCH_EST=0.3`）；**登记以防评审按 56/23/853 硬断言**（BUG-P6C-06 + BUG-SSE-DEPTH-01） |
 | 16 | `_slice_view_lock` 的用途 | SAD 未涉及 | 每次刷新新建 `view` dict（局部变量）并配一把模块级叶锁传给 `_prefetch_slice` | `_prefetch_rotate(pool, lock, key)` 要求 lock 参数；局部 dict 无并发（仅 `push_loop` 单线程）⇒ 锁仅满足接口契约、临界区纳秒级 |
-| 18 | **SSE 帧 schema 扩展**（v1.2） | SAD §2.5 C-1 / §4.2：帧为 `{ts, items}`（items 仅含有数据的码） | 帧体扩为 `{ts, codes_total, fields, items(全码,可 null), missing, missing_count, errors?, stale?, stale_count?}` | 端锁定 🟠 STABLE 下"只增字段/只增语义"：`items[code]` 结构不变，但**新增 null 占位**与元数据——消除"静默省略码导致客户端无法区分未覆盖/无数据/上游失败"。**须编排层记流端口 API 文档变更** |
+| 18 | **SSE 帧 schema 扩展**（v1.2） | SAD §2.5 C-1 / §4.2：帧为 `{ts, items}`（items 仅含有数据的码） | 帧体扩为 `{ts, codes_total, fields, items(全码,可 null), missing, missing_count, errors?, stale?, stale_count?}` | 端锁定 🟠 STABLE 下"只增字段/只增语义"：`items[code]` 结构不变，但**新增 null 占位**与元数据——消除"静默省略码导致客户端无法区分未覆盖/无数据/上游失败"。**✅ 已同步（`API.md` §5「帧消费协议」/ §6.4：`missing`/`stale`/`errors` 与全码 `null` 占位均已写明）** |
 | 19 | **`_build_frame` 返回 `None` 的条件**（v1.2） | v1.1 口径：`items` 为空 ⇒ `None`（本组本 tick 不发帧） | 仅 `codes` 为空 ⇒ `None`；组有码则**必产帧**（全 null 也发） | 旧口径下"全部码无数据"会不发帧 ⇒ `last_push_ts` 不刷新 ⇒ **活跃组被 `_sweep_idle_groups` 误回收**；且与"全量快照"语义矛盾。僵尸组（无连接）仍由 `_broadcast` 前置跳过 |
 | 20 | **last-known 结转**（v1.2） | SAD 未定义（属 v1.0 缺陷：C2 分片下 200 码订阅 >95% 为 null） | 新增 `_last_known` + `_carry_forward`：未刷新但有历史的码带旧值并标 `stale`；每 tick 裁剪到活跃码集（有界） | 使客户端可区分"未刷新（stale）"与"无数据（missing）"；池缩即回收内存，上界 `MAX_DEDUP_CODES` |
 | 21 | **容量模型重标定（v1.2 → v1.3 r5 复标定）** | SAD §2.1 INV-1b：`coverage≈170`、`coverage_codes≈56` | **v1.3 最终态**：`_PER_FETCH_EST=0.3`（`config.STREAM_PER_FETCH_EST`）、`BATCH_MAX_WORKERS=20`、`_FIELD_FETCH_CALLS['quote']=2` ⇒ `coverage` 随 tick（213/426/6400）、`coverage_codes` tick4 = **106/53** | v1.2 的 `2.2` 按**连接池前冷路径**定价、高估 ≈16×，把覆盖封在 23 取数（50 码 × 3 域 / 8s 目标不达）。r5 池化后单次 ≈0.14s（139ms p50 / 167ms max），0.3 留 ≈2.2× 余量；`HTTP_POOL_MAX_PER_HOST=24 ≥ BATCH_MAX_WORKERS=20` 保证扇出不排队。**登记以防评审按 56/23 硬断言**（BUG-P6C-06 + BUG-SSE-DEPTH-01） |
@@ -1594,6 +1598,7 @@ def _read_json_body(self):
 - [x] 测试要点 **48 条**映射 PRD AC（含 AR-7 陷阱点、预算驱逐、竞态、lag、`MAX_GROUPS` 400；v1.1 新增 T33/T34；v1.2 新增 T13b/T35–T43；**v1.3 新增 T44–T48**）
 - [x] AC 追溯：A1/A2/A3/A7/A10/E5/E7/S2/S7/S9/S10/S11 主承载
 - [x] 与 `stock_api` 跨模块契约逐项对齐（`_PROGRESS.md` §A）：handler 组装体（+`deadline` +**`refresh_epoch`**）/ `cached_batch(domain, rest, now)` / `BATCH_MAX_WORKERS`（=20）/ 轮转原语 / `_` 前缀；`fetch_cls_basic_info` 的 `quote` 客体可含 `depth`
+- [x] **v1.6（溯源收口 + 引用时点约定）**：头部上游 PRD **v0.9 → v0.10**（SAD v1.12 已对）；接口权威栏 **config v1.5 → v1.6 / metrics v1.7 → v1.8**、`stock_api.md` v1.3（不变）；文末「共同构成」同步；新增「引用时点约定」——接口权威栏 = 本文最后同步时点快照、**落后一版不属漂移**，内容以被引文档头部为准。**无帧契约 / 无 BR / 无测试编号变更**；**未改代码 / SAD / PRD / API.md / README.md / `.opencode`**
 - [x] 偏差 **33 项**全部登记（**不改 SAD / 不改 PRD / 不改 config.md / 不改 stock_api.md**）
 
 ### 11.3 v1.2 契约同步对照（P7b · 以代码为准）
@@ -1662,7 +1667,11 @@ def _read_json_body(self):
 | `BatchShardingTests` | 60 码走真实 `handle_cls_basic_infos` | **无需改**（`stock_api.md` SA-T23 保证） | 交叉引用 |
 | 新增 | — | `STREAM-T*` **48 条** | 本详设 §8 |
 
-> 本文档与 `config.md` v1.1 / `metrics.md` v1.1 / `stock_api.md` v1.0 / `server.md` **v1.2** 共同构成 P6c 优化专项的模块级详设；**stream.py 的编码依赖 `stock_api` 的 `cached_batch`/`_prefetch_slice`/`_prefetch_advance`/`BATCH_MAX_WORKERS` 已就位**（批次 2 已产出），与 `server.py` 无共享文件写冲突（仅 `make_stream_server` 延迟 import `server`）。
+> 本文档与 `config.md` **v1.6** / `metrics.md` **v1.8** / `stock_api.md` **v1.3** / `server.md` **v1.16** 共同构成 P6c 优化专项的模块级详设（★ v1.6 溯源收口；**本清单为快照——版本以各文档头部为准，落后一版不属漂移，见头部「引用时点约定」**）；**stream.py 的编码依赖 `stock_api` 的 `cached_batch`/`_prefetch_slice`/`_prefetch_advance`/`BATCH_MAX_WORKERS` 已就位**（批次 2 已产出），与 `server.py` 无共享文件写冲突（仅 `make_stream_server` 延迟 import `server`）。
+>
+> **v1.6 修订（溯源收口 + 引用时点约定 · 只改文档，不改代码）**：头部上游 **PRD v0.9 → v0.10**（SAD v1.12 已对）；接口权威栏 **`config.md` v1.5 → v1.6 / `metrics.md` v1.7 → v1.8**（`stock_api.md` v1.3 不变）；文末「共同构成」清单同步（config v1.6 / metrics v1.8 / stock_api v1.3 / server v1.16）；新增**引用时点约定**。**无帧契约 / 无 BR / 无测试编号变更。**
+>
+> **v1.5 修订（头部溯源更正 · 只改文档，不改代码）**：头部上游 **SAD v1.3 → v1.12 / PRD v0.3 → v0.9**；接口权威栏 **`config.md` v1.3 → v1.5 / `metrics.md` v1.2 → v1.7**（`metrics.md` 本批 owner 补登升至 v1.7）；文末「共同构成」清单同步（config v1.5 / metrics v1.7 / stock_api v1.3 / server v1.16）。**无帧契约 / 无 BR / 无测试编号变更。**
 >
 > **v1.3 修订**：**P7b 契约同步（r5 容量重标定 + 冷启动去重/唤醒 · 以代码为准）**——见 §11.4 对照表（8 组同步项）；§10 偏差扩至 **33 项**；测试要点扩至 **48 条**。**未改代码、未改其他文档**。
 >

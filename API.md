@@ -13,6 +13,7 @@ Base URL: `http://localhost:8053`
 - [5. SSE 实时推送](#5-sse-实时推送端口-8054)
 - [6. 接入指南](#6-接入指南)
 - [7. 通用说明](#7-通用说明)
+- [8. 变更记录（对外可观察）](#8-变更记录对外可观察)
 
 ---
 
@@ -29,6 +30,7 @@ Base URL: `http://localhost:8053`
 - ⚠️ **304 省的是响应体（实测 ~37–45KB/次），不省上游回源**：服务端缓存 TTL 到期后仍会回源重生成（这正是 ETag 能保持稳定的前提）。职责分工——**缓存 TTL 管上游新鲜度，ETag 管客户端带宽**。
 - **`Last-Modified` = 该 feed「表示最后一次变更」的时刻**（**不是**服务端缓存的写入时刻）：内容未变时，即使缓存 TTL 到期、服务端回源重生成，这个值**也不会前进**——因此**仅携带 `If-Modified-Since`** 的客户端同样能在跨 TTL 后拿到 304。不变式：**`ETag` 变 ⟺ `Last-Modified` 前进**，两条条件通道（`If-None-Match` / `If-Modified-Since`）行为对等。
 - ⚠️ 副作用：正因如此，`Last-Modified` 可能**早于** body 内的 `<lastBuildDate>`（后者是本次生成时刻）。这是刻意的——表示没变就不该宣称"刚改过"；不要用 `Last-Modified` 当作"数据生成时间"。
+- ⚠️ **304 不带 `Content-Length`**：RFC 9110 §8.6 明令 304 **不得**发 `Content-Length: 0`（若发则须等于 200 的体长）。本服务以 HTTP/1.0 + 每响应关闭连接作答，客户端读到 **EOF** 即完成——**不要**依赖 304 的 body 长度判断是否读全。
 - ⚠️ 范围：**仅这 5 个 feed**。`/opml.xml`、`/` 与全部 JSON 端点**不支持**条件请求（带条件头也照常返回 200）。
 
 ---
@@ -504,7 +506,7 @@ Base URL: `http://localhost:8053`
 | `feeds[].items` | number | 仅当 `check=1` 时：RSS 源的条目数 |
 | `feeds[].error` | string | 仅当 `check=1` 且出错时 |
 | `stale` | boolean | 仅当 `check=1` 但健康检查准入已满时：返回上次快照并标 `true`（不触网） |
-| `metrics` | object | 运行指标快照（计数/仪表；`snapshot()` 恒定发布全部注册名，未发生为 0） |
+| `metrics` | object | 运行指标快照（计数/仪表；`snapshot()` 恒定发布全部注册名，未发生为 0）。其中 **`http_304_total`** = RSS 条件请求命中 304 的单调计数——**停滞即说明「内容未变 ⇒ 304」失效**（见 §1） |
 | `policy` | object | 各数据域的 TTL/池策略快照（`cache_policy` 派生，观测用） |
 | `cdp` | object | CDP 引擎状态（`state`: `idle`/`restarting`/`unavailable` 等） |
 
@@ -615,6 +617,20 @@ Base URL: `http://localhost:8053`
 **交易时段判定**：A 股连续竞价时段内走「盘中」列；收盘后走「非盘中」列（TTL 放宽，减少对外部源的无效轮询）。
 
 **失败语义**（重要）：上游失败 / CDP 不可用时，服务端做**负缓存**——失败后 5s 内请求**立即快速失败**（不重复打上游），5s 后进入**半开探测**（探测预算 2s→4s→5s 递增）。因此接入方看到 `error` 时**不要再立即重试**：服务端已在探测，你的重试只会追加延迟。建议退避 ≥5s 或用 SSE 自动恢复。
+
+**响应头口径（客户端与中间缓存可依赖的承诺）**：
+
+| 端点类别 | `Cache-Control` | `Vary` |
+|----------|-----------------|--------|
+| JSON 数据端点（批量 6 个 `/stock/*`、单体、4 面板） | `public, max-age=<该端点**所属域的 TTL**>`（与上表同源，随盘中/非盘中变化） | 有 gzip ⇒ `Accept-Encoding`；未设 `PUBLIC_BASE_URL` ⇒ 另加 `Host, X-Forwarded-Host, X-Forwarded-Proto` 且降为 `private` |
+| 5 个 RSS 源 | `public, max-age=30`（盘中）/ `180`（非盘）；未设 `PUBLIC_BASE_URL` 时 `private` | `Accept-Encoding`（+ 同上 Host 三件套）；另带弱 `ETag` / `Last-Modified`，见 §1 |
+| `/ths/longhu`、`/healthz` | **不带** `Cache-Control` | — |
+
+> 实测（非盘中、未设 `PUBLIC_BASE_URL`）：`/market/margin` → `public, max-age=600`；`/finance/market` → `public, max-age=120`；`/cls/telegraph` → `private, max-age=180` + `ETag` + `Last-Modified`；`/ths/longhu` → 无 `Cache-Control`。
+
+> ⚠️ 两个容易踩的点：
+> ① **4 面板（`/finance/market`、`/finance/timeline`、`/quotation/market`、`/market/timeline`）的 `max-age` 跟随 `quote` 域**（盘中 **4s** / 非盘 120s），**不是**固定值、也不是历史上那个面板默认域的 300s——**不要硬编码**，随盘中/非盘变化。
+> ② 未设 `PUBLIC_BASE_URL` 时，服务端只能由请求 `Host` 回推对外 URL，故响应**刻意**降为 `private` 并多带一个 `Host` 的 `Vary`（否则一条伪造 `Host` 就能污染共享缓存）；生产环境**建议显式设置** `PUBLIC_BASE_URL`，以拿到可共享的 `public` 响应。
 
 ## 6.2 接入方是否需要再次缓存？
 
@@ -741,6 +757,22 @@ Base URL: `http://localhost:8053`
 - 服务器使用 `BoundedThreadPoolServer`，默认最大 20 个工作线程
 - 每个 RSS 源有独立锁防止并发取回
 - 个股导航通过 `_navigate_lock` 实现公平排队
+
+---
+
+# 8. 变更记录（对外可观察）
+
+> 只列**接入方可见**的变更（响应头 / 状态码 / 字段 / 元素）；内部重构与本文件措辞修订不列。**兼容性口径**：本 API 端锁定 🟠 STABLE，除另行标注者一律「只增不改」。
+
+| 变更 | 影响面 | 兼容性 |
+|------|--------|--------|
+| **RSS 条件请求**：5 个 feed 支持 `If-None-Match` / `If-Modified-Since`，内容未变 ⇒ **`304`（无 body）**；`<channel>` 新增 `<ttl>`（分钟，advisory）；`Last-Modified` 语义 = **表示最后一次变更的时刻** | §1 全部 | **只增不改**：不带条件头的行为逐字不变 |
+| **4 面板 `max-age` 改归 `quote` 域**：`/finance/market`、`/finance/timeline`、`/quotation/market`、`/market/timeline` 的 `Cache-Control: max-age` 跟随 `quote`（**现行盘中 4s / 非盘 120s**），**不再是**默认域的 300s | 响应头 | 值变更 ⇒ **勿硬编码**（见 §6.1） |
+| **gzip 协商**：`Accept-Encoding: gzip` 且体 ≥ `GZIP_MIN_BYTES` 时压缩，回 `Content-Encoding: gzip` + `Vary: Accept-Encoding` | 响应头 / 传输 | 只增 |
+| **`/healthz` 只增字段**：`stale` / `metrics` / `policy` / `cdp` | §4 | 只增 |
+| **`feeds[].status` 三处取值修正**：`/stock/data`、`/stock/basic_info` → `configured`（纯 REST）；`/stock/f10` → `requires_chrome_cdp` | §4 `/healthz` | 既有字段取值变更 |
+| **SSE 帧字段只增**：`items[code].quote` 可含 `depth`（五档盘口）+ 8 项元信息；内容未变不发帧 | §5 | 只增（消费方按需取键） |
+| **未设 `PUBLIC_BASE_URL` 时响应为 `private` 且多带 `Vary: Host, X-Forwarded-Host, X-Forwarded-Proto`** | 响应头 | 见 §6.1（生产建议显式设置该变量） |
 
 ---
 

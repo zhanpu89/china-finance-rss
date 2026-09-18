@@ -1,15 +1,19 @@
 # market_api.py 详细设计
 
-> **版本** v1.4 · **状态** 已契约同步（P7b 传输层批次：以 `china_finance_rss/market_api.py` 实现为准）· **日期** 2026-09-17 · **作者/产出** task-decomposer
+> **版本** v1.7 · **状态** 已契约同步（★ v1.7：**溯源收口 + 引用时点约定**——上游 SAD v1.12 / PRD v0.10（已对），基础层接口权威 **config v1.6 / cache v1.14 / metrics v1.8**；**无内容变更**；★ v1.6：溯源更正——上游 SAD v1.12 / PRD v0.10；★ v1.5：REV-DES-20 收口——`metrics.md` §3.2 owner 列已补 `market_api`；P7b 传输层批次：以 `china_finance_rss/market_api.py` 实现为准）· **日期** 2026-09-18 · **作者/产出** task-decomposer
+> **v1.7 变更（溯源收口 + 引用时点约定 · 只改文档，不改代码）**：① **【溯源收口】** 头部上游 **SAD v1.12 / PRD v0.10**（v1.6 已对，本版复核无变化）；「基础层接口权威」栏由 **config v1.5 / cache v1.13 / metrics v1.7** 更新为**现行版本 config v1.6 / cache v1.14 / metrics v1.8**。② **【引用时点约定（新增）】**「接口权威」栏所列版本 = **本文最后一次同步时点的快照**；被引文档的**权威版本以其自身头部为准**——故该栏**落后一版不属漂移、无需每次追平**；**内容以被引文档为准，此栏仅用于定位**。**本模块的代码 / 契约形态 / BR / 测试编号 / 偏差零变更**（v1.6 正文逐字保留）；**未改代码 / SAD / PRD / API.md / README.md / `.opencode`；`_PROGRESS.md` 同步。**
+> **v1.6 变更（溯源更正 · 只改文档，不改代码）**：仅更正头部**溯源**——上游 **SAD v1.3 → v1.12**（依据 `doc/arch/SAD.md` 头部 `**版本** v1.12`，AC 总数 36）、**PRD v0.3 → v0.10**（依据 `doc/prd/perf-stability-optimization.md` 头部 **v0.10**）；基础层接口权威栏 **config v1.1 → v1.5 / cache v1.1 → v1.13 / metrics v1.1 → v1.7**。**溯源更正，无内容变更**——本模块代码 / 契约形态 / BR / 测试编号 / 偏差**零变更**（v1.5 正文逐字保留）；**未改代码 / SAD / PRD / API.md / README.md / `.opencode`；`_PROGRESS.md` 同步。**
+> **v1.5 变更（REV-DES-20 owner 收口 · 只改文档，不改代码）**：`metrics.md` §3.2 的 `upstream_fail_total` owner 列**已补 `market_api`**（本轮补登；事实依据见 `metrics.md` v1.7——`market_api.py:72/78/145` 为本模块自行判定的语义失败写入点）⇒ 本模块 §10#5 / §11 登记的「由编排层同步」待办 **✅ 闭环**；v1.1 变更记录行「`metrics.md` 同步权归编排层」**原文保留并加 v1.5 更正注**。**本模块代码 / 契约形态零变更**（`market_api.py` 未改）。**未改代码 / SAD / PRD / API.md / README.md / `.opencode`；`metrics.md` → v1.7、`_PROGRESS.md` 同步。**
 > **v1.4 变更（以代码为准）**：① **§3.3 `margin.cache_max` 由 `16` 更正为 `null`**——`config.DOMAIN_MATRIX` 的 `margin` 行为 `[L4, 2.0, 2.0, 'fixed:16', 'n/a']`，`cache_policy('margin')['cache_max']` 归一化为 `None`（margin 仅走共享 URL 缓存，`cache.MAX_CACHE_SIZE=2000` 全局约束；per-domain 上限是运维无法生效的死设置，`config.md` §3.1/§10#15 已钉死）。★ **这是本模块本轮唯一的"描述与代码不符"项**。
 > **本轮逐项核对结论（清单 vs 代码）**：`fetch_margin` 透传 `deadline`（BR-MKT-11）✅ 已在 v1.3 记载；`zb` 归一为 float ✅；`_to_float` 逐字段容错 ✅；`_DEGRADED_LATEST` 全 `0.0` ✅。**四项均与代码一致，无需改动**（`market_api.py` 代码零变更）。
 > **v1.3 变更（AC-S3 裁决 · 收尾契约同步）**：⑤ **BR-MKT-11 的"预算封顶"更正**——`fetch_json` 的 `deadline` 透传使 `urlopen` 超时 = `cache._effective_timeout` = `min(_fetch_budget(url), max(0.05, 剩余 deadline))`；其中 `_fetch_budget` 的**阶梯封顶是 `cache._PROBE_BUDGET_CAP=5.0`**（**不是** `REQUEST_TIMEOUT(10s)`）。`REQUEST_TIMEOUT` 仅在"无失败历史 / 已老化"两支作冷/全预算探测 ⇒ **margin 在故障期的单次回源上界实际 ≤5s**（旧表述"可跑满固定 `REQUEST_TIMEOUT`"仅在冷预算期成立）。
 > 本版修订（P7b 契约同步，**只改文档、不改代码**）：① `fetch_margin` 把 `deadline` **透传给 `fetch_json`**（`urlopen` 超时随预算收缩）；② `zb` **归一为 float**、`_transform_margin` **逐字段容错**（新增 `_to_float`）；③ **`_DEGRADED_LATEST` 为 `0.0`**（float）；④ 新增 **`VALID_MARKETS` 枚举闸**（URL 拼装前拒绝非法 `market`）。
 > 沿用 v1.1：REV-DES-20260915-002（REV-DES-11 裁决回执 + REV-DES-20 owner 引据更正）
 > 模块路径 `china_finance_rss/market_api.py` · 归属 **Layer 2（业务/数据获取层）**
-> 上游 SAD `doc/arch/SAD.md` **v1.3**（§2.1 `cache_policy` / §2.3 D-1 `FetchError` / §3 `market_api.py` 行 / ADR-001/005/008）
-> 上游 PRD `doc/prd/perf-stability-optimization.md` v0.3（AC-S1 / AC-S10 / AC-A5；R16）
-> 基础层接口权威 `doc/detailed/config.md` v1.1 · `cache.md` v1.1 · `metrics.md` v1.1
+> 上游 SAD `doc/arch/SAD.md` **v1.12**（★ v1.6 溯源更正：原误记 v1.3；权威以 SAD 头部为准）（§2.1 `cache_policy` / §2.3 D-1 `FetchError` / §3 `market_api.py` 行 / ADR-001/005/008）
+> 上游 PRD `doc/prd/perf-stability-optimization.md` **v0.10**（★ v1.6 溯源更正：原误记 v0.3；权威以 PRD 头部为准）（AC-S1 / AC-S10 / AC-A5；R16）
+> 基础层接口权威 `doc/detailed/config.md` **v1.6** · `cache.md` **v1.14** · `metrics.md` **v1.8**（★ v1.7 溯源收口：v1.6 记为 config v1.5 / cache v1.13 / metrics v1.7，已更新至**现行版本**；权威以各文档头部为准）
+> ★ **引用时点约定**：上列「接口权威」版本 = **本文最后一次同步时点的快照**；被引文档的**权威版本以其自身头部为准**——故该栏**落后一版不属漂移、无需每次追平**；**内容以被引文档为准，此栏仅用于定位**。
 > 端锁定 🟠 STABLE（响应字段集合不变；仅 `_error` 取值由自由文本收敛为**枚举错误码**）
 
 ## 1. 模块职责与边界
@@ -378,7 +382,7 @@ def handle_margin(market='99'):
 | 2 | `_error` 取值 | 未定义 | 由自由文本 `str(e)` 收敛为枚举 kind | AC-S6/AC-A10 枚举封闭口径；字段名/类型不变 |
 | 3 | `deadline` 形参 | SAD §2.3 D-2 只要求**码级**取数器带 `deadline` | `fetch_margin` 为非码取数器，按命名规则不受限；仍新增可选 `deadline=None`（向后兼容） | 与 `fetch_cls_telegraph(feed_url=None)` 同类；新增可选参数不破坏 server 调用 |
 | 4 | `upstream_fetch_total` 计数口径 | SAD §2.6/AR-6 仅说"每域上游取数计数" | 定义为"该域**取数调用次数**"：URL 缓存命中亦计数（上界估计）；直连路径为真实回源 | 无法在调用点区分 cache 命中；AR-6 目标是核对**负载增幅量级**，上界口径足够（登记为口径细化） |
-| 5 | `upstream_fail_total` 防重复 owner（**REV-DES-20**） | SAD 未定义 owner 边界；`metrics.md` §3.2 注册表 owner 列**仅** `cache.fetch_json / stock_api`，**未列 `market_api`**（本模块实际写入） | BR-MKT-8 明确"网络失败归 cache、语义失败归 API 层"，**同一次失败只计一次**；`upstream_fail_total` owner 列补 `market_api` **由编排层同步 `metrics.md`**（本 agent 不改基础层文档） | 避免同一故障被两层各计一次导致指标虚高；owner 缺登记会使 MET-T8b/§3.2 的注册表"全名断言"遗漏本模块 |
+| 5 | `upstream_fail_total` 防重复 owner（**REV-DES-20**） | SAD 未定义 owner 边界；`metrics.md` §3.2 注册表 owner 列**仅** `cache.fetch_json / stock_api`，**未列 `market_api`**（本模块实际写入） | BR-MKT-8 明确"网络失败归 cache、语义失败归 API 层"，**同一次失败只计一次**；`upstream_fail_total` owner 列补 `market_api` **由编排层同步 `metrics.md`**（本 agent 不改基础层文档）——**★ v1.5：✅ 已同步（`metrics.md` v1.7 §3.2 owner 列已补 `market_api`，本轮补登）** | 避免同一故障被两层各计一次导致指标虚高；owner 缺登记会使 MET-T8b/§3.2 的注册表"全名断言"遗漏本模块 |
 | 6 | **P7b · `market` 枚举闸** | SAD §2.1 未定义 `market` 值域校验 | 新增模块级 `VALID_MARKETS`（**本模块为定义方**，`server` 导入做边界检查）+ 拼 URL 前的拒绝（BR-MKT-10 / §2.1 / §10#…） | `market` 被插值进路径段：未校验可注入同主机路径/查询，且每个伪造值铸一个 URL 缓存键 |
 | 7 | **P7b · `deadline` 透传；★ v1.3 封顶更正** | SAD §2.3 D-2 只要求"期限可传入" | 除入口快速判定外，**把 `deadline` 交给 `fetch_json`**（BR-MKT-11） | 否则通过入口判定的调用仍可跑满 `_fetch_budget`（**v1.3 更正**：故障期该值 = `_PROBE_BUDGET_CAP=5s`，冷期/老化期才是 `REQUEST_TIMEOUT=10s`），越过调用方预算 |
 | 9 | **v1.3 · `_PROBE_BUDGET_CAP` 对 margin 的影响（AC-S3 裁决）** | SAD §2.3 D-1 未定义探测阶梯上限 | BR-MKT-11 的封顶表述更正为 `cache._PROBE_BUDGET_CAP=5.0`（**非** `REQUEST_TIMEOUT`）⇒ margin 故障期单次回源 ≤5s；**本模块代码零改动**（约束来自 `cache` 侧） | 与 `cache.md` §4.2 BR-CACHE-22 / `config.md` §2.3 注保持单一口径；旧表述会让读者以为故障期 margin 仍可 10s 回源 |
@@ -395,11 +399,13 @@ def handle_margin(market='99'):
 - [x] 与基础层接口逐项对齐（`cache_policy`/`FetchError`/`metrics`）
 - [x] 无裸 TTL 字面量；无新增锁；无不必要新容器
 - [x] AC 追溯覆盖 S1/S6/S7/A3/A5/A10/S10/E6
-- [x] **v1.1**：§10#1 更新为 **REV-DES-11 裁决回执**（设计保持，PRD AC-A5 表述回改）；§10#5/BR-MKT-8 的 owner 引据改为"本模块与 cache 的防重复计数约定"（**REV-DES-20**，`metrics.md` owner 列由编排层补登）
+- [x] **v1.1**：§10#1 更新为 **REV-DES-11 裁决回执**（设计保持，PRD AC-A5 表述回改）；§10#5/BR-MKT-8 的 owner 引据改为"本模块与 cache 的防重复计数约定"（**REV-DES-20**，`metrics.md` owner 列由编排层补登）——**★ v1.5：✅ 已闭环（`metrics.md` v1.7 §3.2 已补 `market_api`）**
 - [x] **v1.2（P7b）**：`VALID_MARKETS` 枚举闸（§2.1/BR-MKT-10/MKT-T10）；`deadline` 透传 `fetch_json`（§1.4/§2.1/BR-MKT-11/MKT-T11）
 - [x] **v1.2（P7b）**：`_to_float` 逐字段容错 + `zb` 归一 float + `_DEGRADED_LATEST` 全 `0.0`（§2.3/§2.5/§3.1/§3.2/BR-MKT-12/MKT-T12）——§5 伪代码与实现逐行一致
 - [x] **v1.3（AC-S3 裁决）**：BR-MKT-11 封顶更正为 `cache._PROBE_BUDGET_CAP=5.0`（§2.1 参数表 / §4.1 BR-MKT-11 / §10#7·#9）；故障期 margin 单次回源上界 **5s**（冷期/老化期 10s）；MKT-T11 断言不变但预算期望值更正
 - [x] **v1.4**：§3.3 `margin.cache_max` 由 `16` 更正为 `null`（BR 无改动；§10#10/MKT-T13）；逐项核对 `deadline` 透传/`zb` float/`_to_float`/`_DEGRADED_LATEST=0.0` **四项均与代码一致**
+- [x] **v1.6（溯源更正）**：头部上游 **SAD v1.3 → v1.12 / PRD v0.3 → v0.10**；基础层接口权威 **config v1.1 → v1.5 / cache v1.1 → v1.13 / metrics v1.1 → v1.7**；**代码 / 契约 / BR / 测试编号 / 偏差零变更**（v1.5 正文逐字保留）；**未改代码 / SAD / PRD / API.md / README.md / `.opencode`**
+- [x] **v1.7（溯源收口 + 引用时点约定）**：上游 **SAD v1.12 / PRD v0.10**（复核无变化）；基础层接口权威 **config v1.5 → v1.6 / cache v1.13 → v1.14 / metrics v1.7 → v1.8**（指向现行版本）；新增「引用时点约定」——接口权威栏 = 本文最后同步时点快照、**落后一版不属漂移**，内容以被引文档头部为准。**代码 / 契约 / BR / 测试编号 / 偏差零变更**；**未改代码 / SAD / PRD / API.md / README.md / `.opencode`**
 
 ---
 
@@ -408,8 +414,11 @@ def handle_margin(market='99'):
 | 版本 | 日期 | 说明 |
 |------|------|------|
 | v1.0 | 2026-09-15 | 首版（批次 2 数据层） |
-| v1.1 | 2026-09-15 | 按 `doc/review/数据层三模块_详细设计评审_专家版.md`（REV-DES-20260915-002）修订：**P1 REV-DES-11**（§10#1 改裁决回执：设计保持、PRD 回改）；**P2 REV-DES-20**（BR-MKT-8/§10#5 owner 引据更正，`metrics.md` 同步权归编排层）。**代码/契约形态不变** |
+| v1.1 | 2026-09-15 | 按 `doc/review/数据层三模块_详细设计评审_专家版.md`（REV-DES-20260915-002）修订：**P1 REV-DES-11**（§10#1 改裁决回执：设计保持、PRD 回改）；**P2 REV-DES-20**（BR-MKT-8/§10#5 owner 引据更正，`metrics.md` 同步权归编排层 → ★ **v1.5 更正：✅ 已同步（本轮补登 owner，见 `metrics.md` v1.7 §3.2）**）。**代码/契约形态不变** |
 | v1.2 | 2026-09-16 | P7b 契约同步（以 `market_api.py` 实现为准）：`deadline` 透传 `fetch_json`（BR-MKT-11）·`VALID_MARKETS` 枚举闸（BR-MKT-10）·`_to_float` 逐字段容错 + `_DEGRADED_LATEST` 全 `0.0`（BR-MKT-12）。**未改代码** |
 | v1.3 | 2026-09-16 | **AC-S3 裁决收尾同步**：BR-MKT-11 的"预算封顶"更正为 `cache._PROBE_BUDGET_CAP=5.0`（非 `REQUEST_TIMEOUT`）⇒ 故障期 margin 单次回源 ≤5s（§2.1/§4.1 BR-MKT-11/§10#7·#9/§11）。**未改代码**（约束来自 `cache` 侧） |
 | v1.4 | 2026-09-17 | **P7b 传输层批次契约同步（以 `market_api.py` 实现为准）**：§3.3 `margin.cache_max` 由 `16` 更正为 `null`（URL-cache-only 域归一；§10#10/MKT-T13）。逐项核对 `deadline` 透传、`zb` float、`_to_float` 容错、`_DEGRADED_LATEST=0.0` **均与代码一致**。**未改代码** |
 | v1.2 | 2026-09-16 | **P7b 契约同步（以 `market_api.py` 实现为准）**：`VALID_MARKETS` 枚举闸（拼 URL 前拒绝）·`deadline` 透传 `fetch_json`·`_to_float` 逐字段容错 + `zb` 归一 float + `_DEGRADED_LATEST` 全 `0.0`。新增 BR-MKT-10..12、MKT-T10..T12、§10#6..8。**未改代码** |
+| v1.5 | 2026-09-18 | **REV-DES-20 owner 收口（只改文档）**：`metrics.md` §3.2 `upstream_fail_total` owner 列已补 `market_api`（`market_api.py:72/78/145` 语义失败写入点）⇒ §10#5 / §11「由编排层同步」待办闭环；v1.1 历史行加更正注。**本模块代码/契约零变更** |
+| v1.6 | 2026-09-18 | **溯源更正（只改文档）**：头部上游 **SAD v1.3 → v1.12**（AC 总数 36）/ **PRD v0.3 → v0.10**（权威以各文档头部为准）；基础层接口权威 **config v1.1 → v1.5 / cache v1.1 → v1.13 / metrics v1.1 → v1.7**。**溯源更正，无内容变更**（本模块代码/契约/BR/测试编号/偏差零变更） |
+| v1.7 | 2026-09-18 | **溯源收口 + 引用时点约定（只改文档）**：上游 **SAD v1.12 / PRD v0.10**（复核）；基础层接口权威 **config v1.5 → v1.6 / cache v1.13 → v1.14 / metrics v1.7 → v1.8**（指向现行版本）；新增「引用时点约定」——接口权威栏 = 本文最后同步时点快照，**落后一版不属漂移**，内容以被引文档头部为准。**无内容变更 / 无对外契约变更** |

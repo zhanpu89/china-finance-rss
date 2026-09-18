@@ -1,13 +1,15 @@
 # cdp_engine.py 详细设计
 
-> **版本** v1.3 · **状态** 已契约同步（P7b 传输层批次：以 `china_finance_rss/cdp_engine.py` 实现为准回写）· **日期** 2026-09-17 · **作者/产出** task-decomposer
+> **版本** v1.4 · **状态** 已契约同步（★ v1.4：**溯源收口 + 引用时点约定**——上游 **SAD v1.12 / PRD v0.10**、基础层接口权威 **config v1.6 / metrics v1.8**；**无 BR 语义变更、无对外契约变更**；P7b 传输层批次：以 `china_finance_rss/cdp_engine.py` 实现为准回写）· **日期** 2026-09-18 · **作者/产出** task-decomposer
+> **v1.4 变更（溯源收口 + 引用时点约定 · 只改文档，不改代码）**：① **【溯源收口】** 头部上游 **SAD v1.3 → v1.12 / PRD v0.3 → v0.10**；「基础层接口权威」栏 **config v1.1 → v1.6 / metrics v1.1 → v1.8**（均指向**现行版本**；`cache.md` 与本模块无接口、不列版本）。② **【引用时点约定（新增）】**「接口权威」栏所列版本 = **本文最后一次同步时点的快照**；被引文档的**权威版本以其自身头部为准**——故该栏**落后一版不属漂移、无需每次追平**；**内容以被引文档为准，此栏仅用于定位**。**本模块的代码 / 契约形态 / BR / 测试编号 / 偏差零变更**（v1.3 正文逐字保留）；**未改代码 / SAD / PRD / API.md / README.md / `.opencode`；`_PROGRESS.md` 同步。**
 > **v1.3 变更（以代码为准）**：① `/proc/{pid}/cmdline` 读取改为 `with open(...)`（**修复每次探测泄漏一个 fd**）——`_chrome_pids_by_flag` 逐 PID 读 cmdline，旧写法在 OOM 循环/高频 watch 下会耗尽进程 fd；② 补记 `_chrome_pids_by_flag`/`_kill_chrome_on_port` 的防御面（`/proc` 不可读、PID 竞态消失、`pkill` 兜底）。**§2/§3/§4 的 P7b 口径（窗口终态保证 / `_last_data_ts` 老化 / 对称淘汰 / 限时导航锁 / `CDP_RESTART_THROTTLE` 源自 config）不变。**
 > 本版（v1.2 P7b 契约同步，**只改文档、不改代码**）：① `get_data` 以 `_last_data_ts` 老化（**时钟缺失 = 陈旧**）；`_reconnect` 同时清 `_last_data`/`_last_data_ts`；② `navigate_stock` 快路径与锁后兜底改用带 max-age 的 `_fresh_secu_code_locked`，导航锁 `acquire(timeout)` 限时；③ 新增 `_evict_stalest_last_data_locked`（硬上限淘汰**同步清** `_last_data_ts`/`_key_last_seen`/`_api_urls`）；④ 重启窗口**异常兜底**（`ensure_chrome`/`full_chrome_restart` 必然收口终态）；⑤ `CDP_RESTART_THROTTLE` 改由 config 注册；⑥ **§2.1 A′ 收口**：`fetch_cls_f10` 五出口全部 `cdp_unavailable`（含"有数据但不匹配"），修正 v1.1 `REV-DES-18` 的 `None` 例外。
 > 沿用 v1.1：REV-DES-20260915-002（REV-DES-18 / REV-DES-19）
 > 模块路径 `china_finance_rss/cdp_engine.py` · 归属 **基础设施（CDP 客户端）· 仅依赖 config/metrics**
-> 上游 SAD `doc/arch/SAD.md` **v1.3**（§2.3 D-4 CDP 降级 / §2.4 R18 防御取数 / §2.6 `cdp_restart_window` / §3 cdp_engine 行 / ADR-005/012）
-> 上游 PRD `doc/prd/perf-stability-optimization.md` v0.3（AC-S1 / AC-S4 / AC-S9 / AC-S10；R18/R19/R20）
-> 基础层接口权威 `doc/detailed/config.md` v1.1 · `metrics.md` v1.1（`cache.md` 与本模块无接口）
+> 上游 SAD `doc/arch/SAD.md` **v1.12**（★ v1.4 溯源更正：原误记 v1.3；权威以 SAD 头部为准）（§2.3 D-4 CDP 降级 / §2.4 R18 防御取数 / §2.6 `cdp_restart_window` / §3 cdp_engine 行 / ADR-005/012）
+> 上游 PRD `doc/prd/perf-stability-optimization.md` **v0.10**（★ v1.4 溯源更正：原误记 v0.3；权威以 PRD 头部为准）（AC-S1 / AC-S4 / AC-S9 / AC-S10；R18/R19/R20）
+> 基础层接口权威 `doc/detailed/config.md` **v1.6** · `metrics.md` **v1.8**（★ v1.4 溯源更正：原误记 config/metrics 均 v1.1；均指向**现行版本**；`cache.md` 与本模块无接口）
+> ★ **引用时点约定**：上列「接口权威」版本 = **本文最后一次同步时点的快照**；被引文档的**权威版本以其自身头部为准**——故该栏**落后一版不属漂移、无需每次追平**；**内容以被引文档为准，此栏仅用于定位**。
 > 端锁定 🟠 STABLE（纯新增函数与观测字段；`CDPPage`/`CDPEngine` 既有公开方法签名不变）
 
 ## 1. 模块职责与边界
@@ -802,6 +804,7 @@ def _chrome_pids_by_flag(flag):
 - [x] **v1.2（P7b）**：`navigate_stock` max-age 快路径 + 锁后兜底 + `_acquire_navigate_lock` 限时（§2.6/§4 BR-CDP-16/17/§5.7/CDP-T17）
 - [x] **v1.2（P7b）**：重启窗口终态保证（`ensure_chrome` except + `full_chrome_restart` finally，§3.2/§4 BR-CDP-19/§5.5/CDP-T18）；`CDP_RESTART_THROTTLE` 改由 config 注册（§1.3/CDP-T19）
 - [x] **v1.3**：`_chrome_pids_by_flag` 的 `/proc/{pid}/cmdline` 改 `with open(...)`（修复 fd 泄漏；§2.7/BR-CDP-20/§5.8/§6/CDP-T20/§9/§10#16）
+- [x] **v1.4（溯源收口 + 引用时点约定）**：头部上游 **SAD v1.3 → v1.12 / PRD v0.3 → v0.10**；基础层接口权威 **config v1.1 → v1.6 / metrics v1.1 → v1.8**（指向现行版本）；新增「引用时点约定」——接口权威栏 = 本文最后同步时点快照、**落后一版不属漂移**，内容以被引文档头部为准。**代码 / 契约 / BR / 测试编号 / 偏差零变更**；**未改代码 / SAD / PRD / API.md / README.md / `.opencode`**
 
 ---
 
@@ -813,3 +816,4 @@ def _chrome_pids_by_flag(flag):
 | v1.1 | 2026-09-15 | 按 `doc/review/数据层三模块_详细设计评审_专家版.md`（REV-DES-20260915-002）修订：**P2 REV-DES-18**（§2.1 A′ 与 stock_api 统一 `page_data=None`=取数失败）；**P2 REV-DES-19**（模块加载发布初始 idle 快照，BR-CDP-5/§5.1/§5.4/§10#10 同步）。**既有公开签名与状态机不变** |
 | v1.2 | 2026-09-16 | **P7b 契约同步（以 `cdp_engine.py` 实现为准）**：`get_data` 以 `_last_data_ts` 老化（缺失=陈旧）·`_reconnect` 双表同清·`_evict_stalest_last_data_locked` 对称清理·`navigate_stock` max-age 快路径/锁后兜底/限时导航锁·`_same_code` 归一·重启窗口异常兜底（终态保证）·`CDP_RESTART_THROTTLE` 改由 config 注册·**A′ 收口为五出口全 `cdp_unavailable`**（修正 REV-DES-18）。新增 BR-CDP-13..19、CDP-T14..T19、§10#11..15。**未改代码** |
 | v1.3 | 2026-09-17 | **P7b 传输层批次契约同步（以 `cdp_engine.py` 实现为准）**：`_chrome_pids_by_flag` 的 `/proc/{pid}/cmdline` 改 `with open(...)`（**修复 fd 泄漏**）·补记 `/proc` 不可读/PID 竞态/pkill 兜底防御面。新增 BR-CDP-20、CDP-T20、§2.7、§5.8、§10#16。**未改代码** |
+| v1.4 | 2026-09-18 | **溯源收口 + 引用时点约定（只改文档）**：头部上游 **SAD v1.3 → v1.12 / PRD v0.3 → v0.10**；基础层接口权威 **config v1.1 → v1.6 / metrics v1.1 → v1.8**（指向现行版本）；新增「引用时点约定」——接口权威栏 = 本文最后同步时点快照，**落后一版不属漂移**，内容以被引文档头部为准。**无 BR 语义变更 / 无对外契约变更**；**未改代码 / SAD / PRD / API.md / README.md / `.opencode`** |
