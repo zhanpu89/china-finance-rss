@@ -9,7 +9,8 @@ from china_finance_rss import metrics
 
 # Every metric name the production code publishes (metrics.md §3.2 registry).
 PUBLISHED_NAMES = {
-    'http_503_total', 'stream_frame_dropped_total', 'stream_queue_bytes',
+    'http_503_total', 'http_304_total', 'stream_frame_dropped_total',
+    'stream_queue_bytes',
     'stream_frame_distinct', 'stream_frame_peak_bytes',
     'stream_tick_duration_ms', 'stream_tick_slip_total',
     'stream_refresh_lag_ticks', 'stream_tick_degraded_total',
@@ -164,6 +165,18 @@ class MetricsTests(unittest.TestCase):
         metrics.set_gauge('stream_queue_bytes', 9, key='x')
         metrics.set_gauge('stream_queue_bytes', 7)
         self.assertEqual(metrics.snapshot()['stream_queue_bytes'], 7)
+
+    def test_http_304_total_registered_and_zero_valued(self):   # MET-T18
+        """F3 / BR-MET-14: `http_304_total` is registered in both `_KNOWN` and
+        `_DEFAULTS`, publishes 0 before its first event, and counts once
+        incremented (the integration point is server._send_not_modified)."""
+        self.assertIn('http_304_total', metrics._KNOWN)
+        self.assertIn('http_304_total', metrics._DEFAULTS)
+        self.assertEqual(metrics._DEFAULTS['http_304_total'], 0)
+        self.assertEqual(metrics.snapshot()['http_304_total'], 0)  # not missing
+        metrics.incr('http_304_total')
+        self.assertEqual(metrics.snapshot()['http_304_total'], 1)
+        self.assertEqual(set(metrics.snapshot()), metrics._KNOWN)
 
 
 class SnapshotLockTests(unittest.TestCase):

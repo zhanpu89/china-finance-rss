@@ -899,6 +899,11 @@ def fetch_json(url, headers=None, ttl=None, encoding='utf-8', deadline=None,
 feed_cache = OrderedDict()
 _feed_cache_lock = threading.Lock()
 _feed_fetch_locks = {}
+# Reference counts guarding the lifetime of the per-key fetch locks above
+# (BR-CACHE-35 / F8).  Same lock; a key is popped from both tables only once
+# its count reaches zero, so a thread that has acquired the lock but not yet
+# entered `with` can never race a later arrival onto a *different* lock (TS-4).
+_feed_fetch_refs = {}
 _feed_fetch_locks_lock = threading.Lock()
 _last_feed_sweep = 0.0
 
@@ -909,9 +914,10 @@ def feed_cache_get_entry(path):
     BR-CACHE-32: same source as `feed_cache_get` — same `_feed_cache_lock`,
     same `now < expires_at` rule and same LRU side effects (`move_to_end` +
     `last_access`, exactly once).  The copy keeps the caller from mutating the
-    stored entry outside the lock.  `entry['time']` is the `feed_cache_put`
-    write time and is the authoritative Last-Modified source (server.md
-    BR-SRV-38).
+    stored entry outside the lock.  ``entry['last_modified']`` is the
+    authoritative Last-Modified source (BR-SRV-38 / F1: the instant the
+    representation last *changed*), while ``entry['time']`` is simply the
+    ``feed_cache_put`` write time (used for freshness/refresh_epoch).
     """
     with _feed_cache_lock:
         entry = feed_cache.get(path)
@@ -920,6 +926,8 @@ def feed_cache_get_entry(path):
         feed_cache.move_to_end(path)
         entry['last_access'] = time.time()
         return {'xml': entry['xml'], 'time': entry['time'],
+                'last_modified': entry.get('last_modified'),  # P2-1: fail-safe
+                'fingerprint': entry.get('fingerprint'),
                 'last_access': entry['last_access'],
                 'expires_at': entry['expires_at']}
 
@@ -934,11 +942,21 @@ def feed_cache_get(path):
     return entry['xml'] if entry is not None else None
 
 
-def feed_cache_put(path, xml, ttl):
-    """Store feed XML with double-trigger sweep + LRU eviction (cap from policy)."""
+def feed_cache_put(path, xml, ttl, fingerprint=None):
+    """Store feed XML with double-trigger sweep + LRU eviction (cap from policy).
+
+    BR-CACHE-33/34: returns a shallow copy of the written entry (six fields,
+    never None).  Before the sweeps run, the previous entry on the *same key*
+    is captured — **even when it has expired** — so an identical
+    ``fingerprint`` inherits its ``last_modified``.  That is exactly what makes
+    a cross-TTL regeneration answer 304 (the representation did not change).
+    Capturing ``prev`` before the sweeps matters: an expired entry removed by
+    the sweep would lose the inheritance chance and always advance.
+    """
     with _feed_cache_lock:
         now = time.time()
         global _last_feed_sweep
+        prev = feed_cache.get(path)                                 # ★ F1: capture before sweeps
         if now - _last_feed_sweep >= _CACHE_SWEEP_INTERVAL:         # trigger ①
             _sweep_expired(feed_cache)
             _last_feed_sweep = now
@@ -947,11 +965,60 @@ def feed_cache_put(path, xml, ttl):
             _sweep_expired(feed_cache)
             while len(feed_cache) >= cap:
                 feed_cache.popitem(last=False)
-        feed_cache[path] = {'xml': xml, 'time': now, 'last_access': now,
+        if (fingerprint is not None and prev is not None
+                and prev.get('fingerprint') == fingerprint):
+            last_modified = prev.get('last_modified')               # ★ F1: inherit (unchanged; P2-1 fail-safe)
+        else:
+            last_modified = now                                     # changed / no prior entry
+        feed_cache[path] = {'xml': xml, 'time': now,
+                            'last_modified': last_modified,
+                            'fingerprint': fingerprint,
+                            'last_access': now,
                             'expires_at': _expires_at(ttl)}
         feed_cache.move_to_end(path)
         entries = len(feed_cache)
+        written = dict(feed_cache[path])                            # ★ F5: copy while locked
     metrics.set_gauge('cache_entries', entries, key='feed')         # S1-4: lock released
+    return written                                                  # ★ F5: always a dict
+
+
+# ── ★ F8: feed fetch-lock table primitives (BR-CACHE-35) ───────────────────
+# The lock table must converge with the key space: with the request-derived
+# base_url part of the feed cache key (F2), a legal Host enumerates keys, so an
+# ever-growing table is an externally triggerable leak.  Reference counting
+# reclaims a key lazily — only once no thread holds or is about to take its
+# lock.  Popping *before* the count hits zero (the old TS-4 approach) would let
+# a thread that has the lock but has not yet entered `with` race a late arrival
+# onto a different lock ⇒ the same key fetched twice.
+
+def feed_fetch_acquire(key):
+    """BR-CACHE-35: build (if needed) + reference-count the key, return its lock.
+
+    The count is incremented *before* the lock is returned, so the window
+    between "caller holds the lock object" and "caller entered ``with``" is
+    already covered — ``feed_fetch_release`` cannot pop the key underneath a
+    caller that is about to use the lock it was just handed.
+    """
+    with _feed_fetch_locks_lock:
+        lock = _feed_fetch_locks.setdefault(key, threading.Lock())
+        _feed_fetch_refs[key] = _feed_fetch_refs.get(key, 0) + 1
+        return lock
+
+
+def feed_fetch_release(key):
+    """BR-CACHE-35: drop one reference; reclaim the key when it reaches zero.
+
+    Both tables are popped together so the count table cannot itself become an
+    unbounded map.  While the count is still positive the key is left in place
+    (invariant: a lock with holders or waiters is never popped).
+    """
+    with _feed_fetch_locks_lock:
+        n = _feed_fetch_refs.get(key, 1) - 1
+        if n <= 0:
+            _feed_fetch_locks.pop(key, None)        # no holders/waiters left ⇒ safe pop
+            _feed_fetch_refs.pop(key, None)         # count table must not grow unbounded
+        else:
+            _feed_fetch_refs[key] = n
 
 
 def build_batch_response(requested, results, errors=None, dropped=0):

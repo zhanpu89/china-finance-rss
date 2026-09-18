@@ -49,7 +49,7 @@ from .config import (
     cdp_engine,
 )
 from .cache import (fetch_json, feed_cache_get_entry, feed_cache_put,
-                    _feed_fetch_locks, _feed_fetch_locks_lock,
+                    feed_fetch_acquire, feed_fetch_release,
                     build_batch_response, _fill_missing, FetchError,
                     warm_transport)
 from .utils import (
@@ -528,9 +528,9 @@ _CACHE_AGE_DOMAINS = {
     '/stock/f10': 'f10', '/stock/announcement': 'announcement',
     '/cls/hotplate': 'plate', '/cls/plate': 'plate',
     '/ths/longhu': 'longhu', '/market/margin': 'margin',
-    '/cls/telegraph': 'news_url', '/eastmoney/kuaixun': 'news_url',
-    '/ths/kuaixun': 'news_url', '/jin10/flash': 'news_url',
-    '/wallstreetcn/live': 'news_url',
+    '/cls/telegraph': 'feed', '/eastmoney/kuaixun': 'feed',
+    '/ths/kuaixun': 'feed', '/jin10/flash': 'feed',
+    '/wallstreetcn/live': 'feed',       # ★ F4: RSS max-age authority = feed (was news_url)
 }
 _DEFAULT_AGE_DOMAIN = 'f10'          # L4, factor 1.0 ⇒ constant 300
 
@@ -555,6 +555,7 @@ _LASTBUILDDATE_RE = re.compile(r'<lastBuildDate>[^<]*</lastBuildDate>')
 _RSS_TTL_RE = re.compile(r'<ttl>[^<]*</ttl>')
 _PUBDATE_RE = re.compile(r'<pubDate>[^<]*</pubDate>')
 _ETAG_PREFIX = 'W/'                 # weak validator (ETag derived from a normalised body)
+_FEED_KEY_SEP = '\x00'              # feed cache key path/base_url separator (F2); never in a valid base_url
 
 
 def _accepts_gzip(header):
@@ -796,6 +797,22 @@ def _feed_ttl_minutes():
     return max(1, (ttl + 59) // 60)
 
 
+def _feed_fingerprint(xml):
+    """Canonical digest (sha256 hex) of the feed XML — the ETag's source (F1).
+
+    Blank the *content* of the same derived, non-content metadata as the ETag:
+    <lastBuildDate> and <ttl> (one each) and <pubDate> (all items).  Pure
+    function: no clock, no cache access.  ``feed_cache_put`` receives this so
+    that two regenerations with identical canonical content inherit the prior
+    ``last_modified`` (BR-CACHE-33), keeping the invariant
+    ``ETag changes ⟺ Last-Modified advances``.
+    """
+    normalized = _LASTBUILDDATE_RE.sub('<lastBuildDate/>', xml, count=1)
+    normalized = _RSS_TTL_RE.sub('<ttl/>', normalized, count=1)
+    normalized = _PUBDATE_RE.sub('<pubDate/>', normalized)   # count=0: all items
+    return hashlib.sha256(normalized.encode('utf-8')).hexdigest()
+
+
 def _feed_etag(xml):
     """Weak ETag `W/"<sha256>"` over the canonicalised feed XML (BR-SRV-37).
 
@@ -808,12 +825,27 @@ def _feed_etag(xml):
     the upstream timestamp is unparseable, and that fallback sits inside the
     hashed region.  Item identity is carried by <guid>; <pubDate> is upstream
     metadata.  Pure function: no clock, no cache access.
+
+    ★ F1: built from `_feed_fingerprint` so the ETag and the cache
+    ``fingerprint`` are always the *same* digest.
     """
-    normalized = _LASTBUILDDATE_RE.sub('<lastBuildDate/>', xml, count=1)
-    normalized = _RSS_TTL_RE.sub('<ttl/>', normalized, count=1)
-    normalized = _PUBDATE_RE.sub('<pubDate/>', normalized)   # count=0: all items
-    digest = hashlib.sha256(normalized.encode('utf-8')).hexdigest()
-    return _ETAG_PREFIX + '"' + digest + '"'
+    return _ETAG_PREFIX + '"' + _feed_fingerprint(xml) + '"'
+
+
+def _feed_cache_key(path, base_url):
+    """Opaque feed cache key covering every dimension of the representation (F2).
+
+    BR-SRV-45: when ``PUBLIC_BASE_URL`` is set the representation does not
+    depend on the request Host ⇒ key is exactly ``path`` (unchanged).  When it
+    is unset the body embeds a Host-derived ``<atom:link>`` ⇒ key is
+    ``path + '\\x00' + base_url``, matching
+    ``Vary: Host, X-Forwarded-Host, X-Forwarded-Proto`` so the header and the
+    behaviour agree (an unvalidated Host cannot be used to hijack subscribers'
+    links).  The key is opaque to cache.py.
+    """
+    if PUBLIC_BASE_URL:
+        return path
+    return path + _FEED_KEY_SEP + base_url
 
 
 def _if_none_match_matches(header, etag):
@@ -1294,37 +1326,50 @@ class RSSHandler(BaseHTTPRequestHandler):
         payload = _guard(fn, shape=_JSON_SHAPES[path])
         self._send_json(payload, write_body=write_body, cache=cache)
 
-    def _get_or_fetch_feed(self, path, fetch_func):
-        """BR-SRV-6/38: stampede protection + double-checked cache lookup.
+    def _get_or_fetch_feed(self, cache_key, fetch_func):
+        """BR-SRV-6/38/48/50: stampede protection + double-checked cache lookup.
 
         LRU / TTL / sweeping are owned by cache.py; this only sequences
-        miss → per-path lock → second get → fetch → put.
+        miss → per-key lock → second get → fetch → put.
 
-        Returns ``(xml, last_modified)``; ``last_modified`` is the feed cache
-        entry's write time (epoch seconds), or ``None`` when there is no entry
-        — never a stale timestamp borrowed for a degraded body.
+        ``cache_key`` is an opaque key built by `_feed_cache_key` (F2).  Returns
+        ``(xml, last_modified)`` where ``last_modified`` is the entry's
+        ``last_modified`` — the instant the representation last *changed*
+        (BR-SRV-38 / F1) — or ``None`` when there is no entry (degrade path),
+        never a stale timestamp borrowed for a degraded body.  The miss path
+        consumes `feed_cache_put`'s return value directly (F5), with no second
+        lookup afterwards.
+
+        F8 / BR-SRV-50: the lock comes from `feed_fetch_acquire`, which
+        reference-counts the key before handing out the lock; the matching
+        `feed_fetch_release` runs in a ``finally`` so the count cannot leak on
+        the fetch/put exception paths and the table converges on the in-flight
+        key count rather than the cumulative Host count.
         """
-        entry = feed_cache_get_entry(path)              # ① hit path: no policy read
+        entry = feed_cache_get_entry(cache_key)         # ① hit path: no policy read
         if entry is not None:
-            return entry['xml'], entry['time']
-        with _feed_fetch_locks_lock:                    # ② build lock, release at once
-            lock = _feed_fetch_locks.setdefault(path, threading.Lock())
-        with lock:                                      # ③
-            entry = feed_cache_get_entry(path)          # ★ double-check
-            if entry is not None:
-                return entry['xml'], entry['time']
-            ttl = cache_policy('feed')['ttl']           # ★ P2-1: only after 2nd miss
-            xml = fetch_func()                          # fetch only on a real miss
-            feed_cache_put(path, xml, ttl)              # failure ⇒ raises, no cache write
-            entry = feed_cache_get_entry(path)          # authoritative time just written
-        return xml, (entry['time'] if entry is not None else None)
+            return entry['xml'], entry['last_modified']
+        lock = feed_fetch_acquire(cache_key)            # ② count +1, then return lock
+        try:
+            with lock:                                  # ③
+                entry = feed_cache_get_entry(cache_key)  # ★ double-check
+                if entry is not None:
+                    return entry['xml'], entry['last_modified']
+                ttl = cache_policy('feed')['ttl']       # ★ P2-1: only after 2nd miss
+                xml = fetch_func()                      # fetch only on a real miss
+                entry = feed_cache_put(cache_key, xml, ttl,  # ★ F5: use the returned entry
+                                       fingerprint=_feed_fingerprint(xml))  # ★ F1
+        finally:
+            feed_fetch_release(cache_key)               # ★ F8: also on the exception path
+        return xml, entry['last_modified']              # entry is always a dict
 
     def _serve_feed(self, path, base_url, write_body=True):
         info = ROUTES[path]
         feed_url = base_url + path
+        cache_key = _feed_cache_key(path, base_url)     # ★ F2: key covers the Host dimension
         xml, last_modified = _guard(                    # ★ rss shape: 2-tuple
             lambda: self._get_or_fetch_feed(
-                path, lambda: info['handler'](feed_url=feed_url)),
+                cache_key, lambda: info['handler'](feed_url=feed_url)),
             shape='rss', rss_info=info, feed_url=feed_url)
         etag = _feed_etag(xml)
         # S2-3: the feed body embeds feed_url (derived from the request Host when
@@ -1422,8 +1467,15 @@ class RSSHandler(BaseHTTPRequestHandler):
         match the 200 exactly, otherwise a shared cache could key its stored
         metadata off a different policy than the representation.  Nothing is
         written to the feed cache here; the read path already refreshed the LRU.
+
+        F3: entering this method increments `http_304_total` — a single point,
+        so no 304 can be missed.  F6: `RSSHandler` does not set
+        `protocol_version`, so this is HTTP/1.0 and the response is terminated
+        by connection close (EOF); RFC 9110 §8.6 forbids `Content-Length: 0`
+        (if sent it must equal the 200 body length), so we simply omit it.
         """
         self.send_response(304)
+        metrics.incr('http_304_total')                  # ★ F3: single-point 304 count
         self.send_header('ETag', etag)                  # same weak tag as the 200
         if last_modified is not None:
             self.send_header('Last-Modified',

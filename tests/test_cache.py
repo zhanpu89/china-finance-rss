@@ -16,6 +16,7 @@ from china_finance_rss import config, metrics
 
 _TRACKED_GLOBALS = ('cache', '_negative', '_fetch_inflight', '_cache_stats',
                     '_last_cache_sweep', 'feed_cache', '_last_feed_sweep',
+                    '_feed_fetch_locks', '_feed_fetch_refs',
                     'MAX_CACHE_SIZE')
 
 
@@ -46,6 +47,8 @@ class _CacheTestCase(unittest.TestCase):
         cache_mod._last_cache_sweep = 0.0
         cache_mod.feed_cache = OrderedDict()
         cache_mod._last_feed_sweep = 0.0
+        cache_mod._feed_fetch_locks = {}
+        cache_mod._feed_fetch_refs = {}
         metrics.reset()
 
     def tearDown(self):
@@ -239,8 +242,8 @@ class FeedCacheTests(_CacheTestCase):
     def test_feed_get_miss_and_expiry(self):
         self.assertIsNone(cache_mod.feed_cache_get('/feed/missing'))
         cache_mod.feed_cache['/feed/exp'] = {
-            'xml': '<x/>', 'time': 0, 'last_access': 0,
-            'expires_at': time.time() - 1}
+            'xml': '<x/>', 'time': 0, 'last_modified': 0, 'fingerprint': None,
+            'last_access': 0, 'expires_at': time.time() - 1}
         self.assertIsNone(cache_mod.feed_cache_get('/feed/exp'))
 
     def test_feed_get_refreshes_lru(self):
@@ -251,22 +254,41 @@ class FeedCacheTests(_CacheTestCase):
 
 
 class FeedEntryAccessorTests(_CacheTestCase):
-    """SRV-T60 / T-CACHE-32: `feed_cache_get_entry` contract (BR-CACHE-32) and
-    the shallow-copy isolation the RSS Last-Modified time source relies on."""
+    """SRV-T60 / T-CACHE-32/33/34: the `feed_cache_get_entry` contract
+    (BR-CACHE-32), the shallow-copy isolation the RSS Last-Modified time source
+    relies on, fingerprint inheritance (BR-CACHE-33) and the put return value
+    (BR-CACHE-34)."""
 
     def test_srv_t60_feed_cache_get_entry_contract(self):
         self.assertIsNone(cache_mod.feed_cache_get_entry('/p'))       # cold
-        cache_mod.feed_cache_put('/p', '<x/>', 30)
+        written = cache_mod.feed_cache_put('/p', '<x/>', 30)
+        self.assertIsInstance(written, dict)             # BR-CACHE-34: never None
+        self.assertEqual(set(written),
+                         {'xml', 'time', 'last_modified', 'fingerprint',
+                          'last_access', 'expires_at'})
         entry = cache_mod.feed_cache_get_entry('/p')
         self.assertEqual(set(entry),
-                         {'xml', 'time', 'last_access', 'expires_at'})
+                         {'xml', 'time', 'last_modified', 'fingerprint',
+                          'last_access', 'expires_at'})
         self.assertEqual(entry['xml'], '<x/>')
-        self.assertIsInstance(entry['time'], float)      # Last-Modified source
+        self.assertIsInstance(entry['time'], float)      # write time
+        self.assertIsInstance(entry['last_modified'], float)   # Last-Modified source
+        self.assertEqual(entry['last_modified'], entry['time'])  # no fingerprint ⇒ now
         entry['xml'] = 'z'                               # value-side copy
         self.assertEqual(cache_mod.feed_cache_get_entry('/p')['xml'], '<x/>')
         cache_mod.feed_cache_put('/p2', '<y/>', 0)       # ttl=0 ⇒ expired
         self.assertIsNone(cache_mod.feed_cache_get_entry('/p2'))
         self.assertEqual(cache_mod.feed_cache_get('/p'), '<x/>')      # compat
+        # P2-1: a legacy/injected entry missing `last_modified` must degrade to
+        # None instead of raising KeyError (which `_guard` would turn into a
+        # degraded body).
+        cache_mod.feed_cache['/legacy'] = {
+            'xml': '<l/>', 'time': 1.0, 'last_access': 1.0,
+            'expires_at': time.time() + 30}
+        legacy = cache_mod.feed_cache_get_entry('/legacy')
+        self.assertIsNotNone(legacy)
+        self.assertIsNone(legacy['last_modified'])
+        self.assertIsNone(legacy['fingerprint'])
 
     def test_t_cache_32_shallow_copy_isolates_the_container(self):
         cache_mod.feed_cache_put('/p', '<x/>', 30)
@@ -274,13 +296,152 @@ class FeedEntryAccessorTests(_CacheTestCase):
         stored_before = dict(cache_mod.feed_cache['/p'])
         entry['xml'] = 'z'
         entry['time'] = 0
+        entry['last_modified'] = 0
+        entry['fingerprint'] = 'z'
         entry['last_access'] = 0
         entry['expires_at'] = 0
         self.assertEqual(cache_mod.feed_cache['/p'], stored_before)
         again = cache_mod.feed_cache_get_entry('/p')
         self.assertEqual(again['xml'], '<x/>')
         self.assertEqual(again['time'], stored_before['time'])
+        self.assertEqual(again['last_modified'], stored_before['last_modified'])
         self.assertEqual(again['expires_at'], stored_before['expires_at'])
+
+    def test_t_cache_33_fingerprint_inherits_across_expiry(self):
+        # T-CACHE-33 (F1): the prior entry participates even once expired — this
+        # is the mechanism behind a cross-TTL 304.
+        cache_mod.feed_cache_put('/p', '<x/>', 30, fingerprint='FP')
+        first = cache_mod.feed_cache_get_entry('/p')
+        cache_mod.feed_cache['/p']['expires_at'] = time.time() - 1  # expire in place
+        # P2-4: force trigger ① (the timed full sweep) to fire inside the next
+        # put.  `prev` must be captured *before* the sweep — the expired entry is
+        # otherwise deleted and inheritance is lost.  This is exactly the F1
+        # ordering requirement, so assert the sweep ran *and* inheritance holds.
+        cache_mod._last_feed_sweep = 0.0
+        written = cache_mod.feed_cache_put('/p', '<x/>', 30, fingerprint='FP')
+        self.assertGreater(cache_mod._last_feed_sweep, 0.0)   # sweep really ran
+        self.assertEqual(written['last_modified'], first['last_modified'])
+        # A different fingerprint advances last_modified to the new write time.
+        time.sleep(0.01)
+        changed = cache_mod.feed_cache_put('/p', '<y/>', 30, fingerprint='FP2')
+        self.assertGreaterEqual(changed['last_modified'], first['last_modified'])
+        self.assertNotEqual(changed['last_modified'], first['last_modified'])
+        # P2-1: a legacy prior entry with a matching fingerprint but no
+        # `last_modified` field must not raise — inheritance degrades to None.
+        cache_mod.feed_cache['/legacy'] = {
+            'xml': '<l/>', 'time': 1.0, 'fingerprint': 'FP',
+            'last_access': 1.0, 'expires_at': time.time() + 30}
+        legacy = cache_mod.feed_cache_put('/legacy', '<l/>', 30, fingerprint='FP')
+        self.assertIsNone(legacy['last_modified'])
+
+    def test_t_cache_33_none_fingerprint_does_not_inherit(self):
+        # BR-CACHE-33: fingerprint=None (existing callers) never inherits.
+        cache_mod.feed_cache_put('/p', '<x/>', 30)
+        first = cache_mod.feed_cache_get_entry('/p')
+        time.sleep(0.01)
+        written = cache_mod.feed_cache_put('/p', '<x/>', 30)
+        self.assertGreater(written['last_modified'], first['last_modified'])
+
+    def test_t_cache_34_put_returns_six_field_copy(self):
+        written = cache_mod.feed_cache_put('/p', '<x/>', 30, fingerprint='FP')
+        self.assertEqual(written['xml'], '<x/>')
+        self.assertEqual(written['fingerprint'], 'FP')
+        self.assertEqual(set(written),
+                         {'xml', 'time', 'last_modified', 'fingerprint',
+                          'last_access', 'expires_at'})
+        stored_before = dict(cache_mod.feed_cache['/p'])
+        written['xml'] = 'z'                              # mutating the copy is safe
+        written['last_modified'] = 0
+        self.assertEqual(cache_mod.feed_cache['/p'], stored_before)
+
+
+class FeedFetchLockTests(_CacheTestCase):
+    """T-CACHE-35 / BR-CACHE-35 / F8: feed fetch-lock table primitives.
+
+    `feed_fetch_acquire` counts a key before returning its lock; a key is
+    reclaimed from *both* tables only when that count reaches zero.  A key with
+    holders or waiters is never popped (TS-4), and the table is bounded by the
+    in-flight key count rather than the cumulative key count.
+    """
+
+    def test_t_cache_35_refcount_reclaims_both_tables(self):
+        la = cache_mod.feed_fetch_acquire('/k')
+        lb = cache_mod.feed_fetch_acquire('/k')
+        self.assertIs(la, lb)                              # one lock per key
+        self.assertEqual(cache_mod._feed_fetch_refs['/k'], 2)
+        cache_mod.feed_fetch_release('/k')
+        self.assertIn('/k', cache_mod._feed_fetch_locks)   # count 1 ⇒ not popped
+        self.assertEqual(cache_mod._feed_fetch_refs['/k'], 1)
+        cache_mod.feed_fetch_release('/k')
+        self.assertNotIn('/k', cache_mod._feed_fetch_locks)  # both tables reclaimed
+        self.assertNotIn('/k', cache_mod._feed_fetch_refs)
+
+    def test_t_cache_35_same_lock_no_double_fetch_before_with(self):
+        # TS-4 regression net: A holds the lock (inside `with`) while B acquires
+        # the *same* key before its own `with`.  B must receive the same lock and
+        # stay blocked until A releases.  If the key were popped early, B would
+        # get a fresh lock and enter concurrently (double fetch).
+        lock_a = cache_mod.feed_fetch_acquire('/k')
+        order = []
+        b_acquired = threading.Event()
+
+        def worker_b():
+            lock_b = cache_mod.feed_fetch_acquire('/k')
+            b_acquired.set()
+            try:
+                with lock_b:
+                    order.append('b')
+            finally:
+                cache_mod.feed_fetch_release('/k')
+
+        tb = None
+        try:
+            with lock_a:
+                order.append('a')
+                tb = threading.Thread(target=worker_b)
+                tb.start()
+                self.assertTrue(b_acquired.wait(2.0))
+                self.assertEqual(cache_mod._feed_fetch_refs['/k'], 2)
+                self.assertIn('/k', cache_mod._feed_fetch_locks)  # no early pop
+                time.sleep(0.1)
+                # B cannot have entered: it would need a *different* lock object.
+                self.assertEqual(order, ['a'])
+        finally:
+            cache_mod.feed_fetch_release('/k')
+        tb.join(2.0)
+        self.assertEqual(order, ['a', 'b'])
+        self.assertNotIn('/k', cache_mod._feed_fetch_locks)
+        self.assertNotIn('/k', cache_mod._feed_fetch_refs)
+
+    def test_t_cache_35_exception_path_releases(self):
+        def _use():
+            lock = cache_mod.feed_fetch_acquire('/k')
+            try:
+                with lock:
+                    raise RuntimeError('boom')
+            finally:
+                cache_mod.feed_fetch_release('/k')
+
+        with self.assertRaises(RuntimeError):
+            _use()
+        self.assertNotIn('/k', cache_mod._feed_fetch_locks)
+        self.assertNotIn('/k', cache_mod._feed_fetch_refs)
+
+    def test_t_cache_35_bounded_by_in_flight_not_cumulative(self):
+        for i in range(50):                                 # serial, no in-flight
+            lock = cache_mod.feed_fetch_acquire(f'/k{i}')
+            self.assertIsNotNone(lock)
+            cache_mod.feed_fetch_release(f'/k{i}')
+        self.assertEqual(len(cache_mod._feed_fetch_locks), 0)
+        self.assertEqual(len(cache_mod._feed_fetch_refs), 0)
+        for i in range(5):                                  # K held at once
+            cache_mod.feed_fetch_acquire(f'/held{i}')
+        self.assertEqual(len(cache_mod._feed_fetch_locks), 5)   # bounded by K
+        self.assertEqual(len(cache_mod._feed_fetch_refs), 5)
+        for i in range(5):
+            cache_mod.feed_fetch_release(f'/held{i}')
+        self.assertEqual(len(cache_mod._feed_fetch_locks), 0)
+        self.assertEqual(len(cache_mod._feed_fetch_refs), 0)
 
 
 # ── negative cache / half-open probe ───────────────────────────────────────

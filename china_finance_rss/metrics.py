@@ -18,7 +18,7 @@ _warned = set()               # warning de-dup; intentionally lock-free (tolerat
 
 # Frozen name registry (§3.2). Used for warning only — writes are never blocked.
 _KNOWN = frozenset({
-    'http_503_total', 'stream_frame_dropped_total', 'stream_queue_bytes',
+    'http_503_total', 'http_304_total', 'stream_frame_dropped_total', 'stream_queue_bytes',
     'stream_frame_distinct', 'stream_frame_peak_bytes', 'stream_tick_duration_ms',
     'stream_tick_slip_total', 'stream_refresh_lag_ticks', 'stream_tick_degraded_total',
     'stream_slow_client_total', 'cache_entries', 'cache_hit_ratio',
@@ -33,6 +33,7 @@ _KNOWN = frozenset({
 # still fixes its shape (int vs labelled dict) per BR-MET-1.
 _DEFAULTS = {
     'http_503_total': 0,
+    'http_304_total': 0,          # 304 count (BR-MET-14 / owner server._send_not_modified)
     'stream_frame_dropped_total': 0,
     'stream_queue_bytes': 0,
     'stream_frame_distinct': 0,

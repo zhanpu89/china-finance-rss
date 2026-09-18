@@ -323,7 +323,19 @@ class FeedDoubleCheckTests(unittest.TestCase):
 
     @staticmethod
     def _entry(xml):
-        return {'xml': xml, 'time': FeedDoubleCheckTests.TIME}
+        # Six fields (BR-CACHE-32/34): last_modified is the Last-Modified source
+        # and fingerprint the inheritance key.
+        return {'xml': xml, 'time': FeedDoubleCheckTests.TIME,
+                'last_modified': FeedDoubleCheckTests.TIME, 'fingerprint': None,
+                'last_access': FeedDoubleCheckTests.TIME,
+                'expires_at': FeedDoubleCheckTests.TIME + 30}
+
+    @staticmethod
+    def _store_put(state):
+        def _put(p, xml, ttl, fingerprint=None):
+            state['entry'] = FeedDoubleCheckTests._entry(xml)
+            return state['entry']            # F5: put returns the written entry
+        return _put
 
     def test_double_check_single_fetch_single_thread(self):
         state = {'entry': None}
@@ -337,8 +349,7 @@ class FeedDoubleCheckTests(unittest.TestCase):
         with patch.object(srv, 'feed_cache_get_entry',
                           side_effect=lambda p: state['entry']), \
              patch.object(srv, 'feed_cache_put',
-                          side_effect=lambda p, xml, ttl:
-                          state.__setitem__('entry', self._entry(xml))):
+                          side_effect=self._store_put(state)):
             self.assertEqual(h._get_or_fetch_feed('/cls/telegraph', fetch),
                              ('<rss/>', self.TIME))
             self.assertEqual(h._get_or_fetch_feed('/cls/telegraph', fetch),
@@ -367,8 +378,7 @@ class FeedDoubleCheckTests(unittest.TestCase):
         with patch.object(srv, 'feed_cache_get_entry',
                           side_effect=lambda p: state['entry']), \
              patch.object(srv, 'feed_cache_put',
-                          side_effect=lambda p, xml, ttl:
-                          state.__setitem__('entry', self._entry(xml))):
+                          side_effect=self._store_put(state)):
             threads = [threading.Thread(target=worker) for _ in range(8)]
             for t in threads:
                 t.start()
@@ -395,6 +405,15 @@ class CacheAgeTests(unittest.TestCase):
                      '/quotation/market', '/market/timeline'):
             h.path = path
             self.assertEqual(h._cache_age(), cache_policy('quote')['ttl'], path)
+
+    def test_rss_paths_use_feed_domain(self):
+        """F4 / SRV-T11: the 5 RSS max-age values read the *feed* domain (the
+        same authority as the feed cache TTL / <ttl>), not news_url."""
+        h = RSSHandler.__new__(RSSHandler)
+        for path in srv.ROUTES:
+            self.assertEqual(srv._CACHE_AGE_DOMAINS[path], 'feed', path)
+            h.path = path
+            self.assertEqual(h._cache_age(), cache_policy('feed')['ttl'], path)
 
     def test_unregistered_path_uses_default_domain(self):
         h = RSSHandler.__new__(RSSHandler)
@@ -1029,6 +1048,17 @@ class _StepClock:
         return formatdate(timeval, localtime=localtime, usegmt=usegmt)
 
 
+class _FixedClock:
+    """Controllable epoch clock for SRV-T63: ``now`` is advanced explicitly so a
+    missing fingerprint inheritance is guaranteed to move past a whole TTL."""
+
+    def __init__(self, start):
+        self.now = start
+
+    def time(self):
+        return self.now
+
+
 class RssConditionalGetTests(unittest.TestCase):
     """SRV-T46..T62: RSS conditional requests (ETag / Last-Modified / 304).
 
@@ -1057,7 +1087,11 @@ class RssConditionalGetTests(unittest.TestCase):
 
     def setUp(self):
         cache_mod.feed_cache.clear()
+        cache_mod._feed_fetch_locks.clear()     # F8: isolate the lock table
+        cache_mod._feed_fetch_refs.clear()
         self.addCleanup(cache_mod.feed_cache.clear)
+        self.addCleanup(cache_mod._feed_fetch_locks.clear)
+        self.addCleanup(cache_mod._feed_fetch_refs.clear)
 
     # ---- helpers --------------------------------------------------------
 
@@ -1101,9 +1135,9 @@ class RssConditionalGetTests(unittest.TestCase):
         calls = {'put': 0}
         real_put = cache_mod.feed_cache_put
 
-        def counting_put(path, xml, ttl):
+        def counting_put(path, xml, ttl, fingerprint=None):
             calls['put'] += 1
-            return real_put(path, xml, ttl)
+            return real_put(path, xml, ttl, fingerprint=fingerprint)
 
         with self._patch_handler(self._fake_handler()), \
              patch.object(srv, 'feed_cache_put', side_effect=counting_put):
@@ -1120,9 +1154,9 @@ class RssConditionalGetTests(unittest.TestCase):
         calls = {'put': 0}
         real_put = cache_mod.feed_cache_put
 
-        def counting_put(path, xml, ttl):
+        def counting_put(path, xml, ttl, fingerprint=None):
             calls['put'] += 1
-            return real_put(path, xml, ttl)
+            return real_put(path, xml, ttl, fingerprint=fingerprint)
 
         with self._patch_handler(self._fake_handler()), \
              patch.object(srv, 'feed_cache_put', side_effect=counting_put):
@@ -1340,15 +1374,42 @@ class RssConditionalGetTests(unittest.TestCase):
         self.assertIn('content-length', h_none)
 
     def test_t55_public_base_url_unset_304_private_vary_host(self):
+        # F2 rewrite: the old case was pseudo-green — it still answered 304 only
+        # because the *path* key had cached a representation from before
+        # PUBLIC_BASE_URL was toggled.  Now the key carries the Host when
+        # PUBLIC_BASE_URL is unset, so author the stale entry explicitly
+        # (no reliance on TTL timing) and pin the 304 header shape.
+        #
+        # P2-2: the injected entry is genuinely consumed, not decorative.  Its
+        # fingerprint matches the refetched body, so `feed_cache_put` inherits
+        # its `last_modified=1.0`; the 304 must echo exactly that inherited
+        # value.  A broken inheritance restamps "now" ⇒ the assertion reddens.
+        inherited_lm = formatdate(1.0, localtime=False, usegmt=True)
+
+        def _inject(base_url):
+            xml = self._fake_handler()(feed_url=base_url + self.PATH)
+            key = srv._feed_cache_key(self.PATH, base_url)
+            cache_mod.feed_cache[key] = {
+                'xml': xml, 'time': 1.0, 'last_modified': 1.0,
+                'fingerprint': srv._feed_fingerprint(xml),
+                'last_access': 1.0, 'expires_at': time.time() - 1}  # stale
+            return xml
+
         with self._patch_handler(self._fake_handler()):
-            _, h0, _ = self._req()
-            etag = h0['etag']
             with patch.object(srv, 'PUBLIC_BASE_URL', ''):
+                base = f'http://127.0.0.1:{self.port}'
+                xml = _inject(base)
                 st_priv, h_priv, _ = self._req(
-                    headers={'If-None-Match': etag})
+                    headers={'If-None-Match': srv._feed_etag(xml)})
+                self.assertEqual(h_priv.get('last-modified'), inherited_lm)
+            cache_mod.feed_cache.clear()
             with patch.object(srv, 'PUBLIC_BASE_URL',
                               'https://feeds.example.com'):
-                st_pub, h_pub, _ = self._req(headers={'If-None-Match': etag})
+                base = 'https://feeds.example.com'
+                xml = _inject(base)
+                st_pub, h_pub, _ = self._req(
+                    headers={'If-None-Match': srv._feed_etag(xml)})
+                self.assertEqual(h_pub.get('last-modified'), inherited_lm)
         self.assertEqual(st_priv, 304)
         self.assertIn('private', h_priv['cache-control'])
         for part in ('Host', 'X-Forwarded-Host',
@@ -1488,6 +1549,299 @@ class RssConditionalGetTests(unittest.TestCase):
                            'content-encoding'):
                 self.assertNotIn(absent, h304, (base_url, absent))
             self.assertTrue(body200, base_url)
+
+    # ---- SRV-T63..T70 (v1.9 / F1..F6) -----------------------------------
+
+    def test_t63_ims_cross_ttl_still_304(self):
+        """F1 decisive evidence: a TTL regeneration of the same canonical
+        content must not advance Last-Modified, so an IMS-only client keeps
+        getting 304.  A missing fingerprint inheritance makes the rewrite time
+        (clock.now, advanced a whole TTL) the new Last-Modified ⇒ 200 (red)."""
+        path = self.PATH
+        base = 'https://feeds.example.com'
+        clock = _FixedClock(time.time())
+        with patch.object(srv, 'PUBLIC_BASE_URL', base), \
+             self._patch_handler(self._fake_handler()), \
+             patch.object(cache_mod.time, 'time', clock.time):
+            st1, h1, _ = self._req()
+            self.assertEqual(st1, 200)
+            key = srv._feed_cache_key(path, base)
+            lm1 = cache_mod.feed_cache[key]['last_modified']
+            cache_mod.feed_cache[key]['expires_at'] = clock.now - 1  # expire in place
+            clock.now += 3600                       # cross a whole TTL
+            with patch.object(utils_mod, 'formatdate', _StepClock().formatdate):
+                st2, h2, body2 = self._req(
+                    headers={'If-Modified-Since': h1['last-modified']})
+            self.assertEqual(st2, 304)
+            self.assertEqual(body2, b'')
+            self.assertEqual(h2['last-modified'], h1['last-modified'])
+            self.assertEqual(cache_mod.feed_cache[key]['last_modified'], lm1)
+            self.assertLess(lm1, clock.now)         # the rewrite clock did advance
+
+    def test_t64_fingerprint_inherit_and_change_two_ways(self):
+        """F1: derived-metadata-only changes inherit (no LM advance); real
+        content changes advance both ETag and LM and defeat the old INM."""
+        x1 = utils_mod.generate_rss('T', 'L', 'D', [dict(self.ITEM)],
+                                    feed_url='u', ttl=1)
+        x2 = utils_mod.generate_rss(
+            'T', 'L', 'D',
+            [dict(self.ITEM, pubDate='Fri, 02 Jan 2026 00:00:00 GMT')],
+            feed_url='u', ttl=3)
+        self.assertNotEqual(x1, x2)                 # bytes differ …
+        self.assertEqual(srv._feed_fingerprint(x1), srv._feed_fingerprint(x2))
+        self.assertEqual(srv._feed_etag(x1), srv._feed_etag(x2))   # … fingerprint does not
+        cache_mod.feed_cache.clear()
+        e1 = cache_mod.feed_cache_put('/k', x1, 30,
+                                      fingerprint=srv._feed_fingerprint(x1))
+        cache_mod.feed_cache['/k']['expires_at'] = time.time() - 1
+        time.sleep(0.01)
+        e2 = cache_mod.feed_cache_put('/k', x2, 30,
+                                      fingerprint=srv._feed_fingerprint(x2))
+        self.assertEqual(e2['last_modified'], e1['last_modified'])  # inherited
+        time.sleep(0.01)
+        x3 = utils_mod.generate_rss('T', 'L', 'D',
+                                    [dict(self.ITEM, title='CHANGED')],
+                                    feed_url='u', ttl=1)
+        self.assertNotEqual(srv._feed_etag(x1), srv._feed_etag(x3))
+        e3 = cache_mod.feed_cache_put('/k', x3, 30,
+                                      fingerprint=srv._feed_fingerprint(x3))
+        self.assertGreater(e3['last_modified'], e1['last_modified'])  # advanced
+        # End-to-end: an old INM against changed content is a 200 full body.
+        with self._patch_handler(self._fake_handler()):
+            _, h200, _ = self._req()
+        cache_mod.feed_cache.clear()
+        holder = {'items': [dict(self.ITEM, title='CHANGED')]}
+
+        def changed(feed_url=None):
+            return utils_mod.generate_rss('T', 'L', 'D', holder['items'],
+                                          feed_url=feed_url, ttl=1)
+
+        with self._patch_handler(changed):
+            st, _, body = self._req(headers={'If-None-Match': h200['etag']})
+        self.assertEqual(st, 200)
+        self.assertIn(b'CHANGED', body)
+
+    def test_t65_cross_host_key_isolation(self):
+        """F2: with PUBLIC_BASE_URL unset the key carries base_url, so one
+        forged Host cannot rewrite another host's <atom:link>; with it set the
+        key is Host-independent (one entry)."""
+        with patch.object(srv, 'PUBLIC_BASE_URL', ''), \
+             self._patch_handler(self._fake_handler()):
+            st_a, _, body_a = self._req(headers={'Host': 'a.example'})
+            st_b, _, body_b = self._req(headers={'Host': 'b.example'})
+            self.assertEqual((st_a, st_b), (200, 200))
+            self.assertIn(b'http://a.example', body_a)
+            self.assertNotIn(b'a.example', body_b)
+            self.assertIn(b'http://b.example', body_b)
+            key_a = srv._feed_cache_key(self.PATH, 'http://a.example')
+            key_b = srv._feed_cache_key(self.PATH, 'http://b.example')
+            self.assertNotEqual(key_a, key_b)
+            self.assertIn(key_a, cache_mod.feed_cache)
+            self.assertIn(key_b, cache_mod.feed_cache)
+            self.assertEqual(cache_mod.feed_cache[key_a]['xml'],
+                             body_a.decode('utf-8'))   # no Host bleed
+        cache_mod.feed_cache.clear()
+        with patch.object(srv, 'PUBLIC_BASE_URL', 'https://feeds.example.com'), \
+             self._patch_handler(self._fake_handler()):
+            self._req(headers={'Host': 'a.example'})
+            self._req(headers={'Host': 'b.example'})
+            self.assertEqual(list(cache_mod.feed_cache), [self.PATH])
+
+    def test_t66_http_304_total_increments(self):
+        srv.metrics.reset()
+        try:
+            with self._patch_handler(self._fake_handler()):
+                st200, h200, _ = self._req()
+                self.assertEqual(st200, 200)
+                self.assertEqual(srv.metrics.snapshot()['http_304_total'], 0)
+                st304, _, _ = self._req(
+                    headers={'If-None-Match': h200['etag']})
+                self.assertEqual(st304, 304)
+                self.assertEqual(srv.metrics.snapshot()['http_304_total'], 1)
+        finally:
+            srv.metrics.reset()
+
+    def test_t67_304_header_set_whitelist(self):
+        with self._patch_handler(self._fake_handler()):
+            _, h200, _ = self._req()
+            conn = http.client.HTTPConnection('127.0.0.1', self.port)
+            try:
+                conn.request('GET', self.PATH,
+                             headers={'If-None-Match': h200['etag']})
+                resp = conn.getresponse()
+                status = resp.status
+                body = resp.read()
+                names = {k.lower() for k, _ in resp.getheaders()}
+            finally:
+                conn.close()
+        self.assertEqual(status, 304)
+        self.assertEqual(body, b'')
+        self.assertEqual(names,
+                         {'etag', 'last-modified', 'cache-control', 'vary',
+                          'server', 'date'})
+        for absent in ('content-length', 'content-type', 'content-encoding'):
+            self.assertNotIn(absent, names)
+
+    def test_t68_inm_extreme_inputs_are_200_and_do_not_raise(self):
+        with self._patch_handler(self._fake_handler()):
+            _, h0, _ = self._req()
+            opaque = h0['etag'][len('W/'):]
+            for value in ('', 'x' * 9000, 'W/', 'w/' + opaque, ', ,',
+                          '"a b"', 'W/"unquoted'):
+                st, _, body = self._req(headers={'If-None-Match': value})
+                self.assertEqual(st, 200, repr(value))
+                self.assertTrue(body, repr(value))
+                self.assertEqual(
+                    len(ET.fromstring(body).findall('./channel/item')), 1)
+
+    def test_t69_feed_ttl_minutes_matches_max_age_authority(self):
+        h = RSSHandler.__new__(RSSHandler)
+        real_ttl = cache_policy('feed')['ttl']
+        for path in srv.ROUTES:
+            self.assertEqual(srv._CACHE_AGE_DOMAINS[path], 'feed', path)
+            h.path = path
+            self.assertEqual(h._cache_age(), real_ttl, path)
+        self.assertEqual(srv._feed_ttl_minutes(), -(-real_ttl // 60))
+        for raw, minutes in ((30, 1), (180, 3)):
+            with patch.object(srv, 'cache_policy', return_value={'ttl': raw}):
+                h.path = self.PATH
+                self.assertEqual(h._cache_age(), raw)
+                self.assertEqual(srv._feed_ttl_minutes(), minutes)
+                self.assertEqual(srv._feed_ttl_minutes(), -(-raw // 60))
+
+        # P2-3: today feed and news_url coincide (same L3 / factor 1.0), so the
+        # checks above cannot tell the two authorities apart.  Force a controlled
+        # divergence: both the <ttl> and the Cache-Control max-age must follow
+        # `feed` (7 → 1 minute), never `news_url` (999 → 17 minutes).
+        def _divergent(domain, now=None):
+            return {'ttl': 7} if domain == 'feed' else {'ttl': 999}
+
+        with patch.object(srv, 'cache_policy', side_effect=_divergent):
+            h.path = self.PATH
+            self.assertEqual(h._cache_age(), 7)               # feed, not news_url
+            self.assertNotEqual(h._cache_age(), 999)
+            self.assertEqual(srv._feed_ttl_minutes(), 1)      # ceil(7/60)
+            self.assertNotEqual(srv._feed_ttl_minutes(), 17)  # ceil(999/60)
+
+    def test_t70_put_return_used_and_no_second_lookup(self):
+        """F5: the miss path consumes `feed_cache_put`'s return value — exactly
+        two `feed_cache_get_entry` calls (① first + ③ double-check), never a
+        third after put; the response still carries Last-Modified."""
+        h = RSSHandler.__new__(RSSHandler)
+        h.headers = {}
+        captured = {}
+        h._send_text = lambda *a, **kw: captured.update(kw)
+        cache_mod.feed_cache.clear()
+        get_calls = {'n': 0}
+        put_returns = []
+        real_get = cache_mod.feed_cache_get_entry
+        real_put = cache_mod.feed_cache_put
+
+        def counting_get(key):
+            get_calls['n'] += 1
+            return real_get(key)
+
+        def counting_put(key, xml, ttl, fingerprint=None):
+            entry = real_put(key, xml, ttl, fingerprint=fingerprint)
+            put_returns.append(entry)
+            return entry
+
+        with self._patch_handler(self._fake_handler()), \
+             patch.object(srv, 'feed_cache_get_entry',
+                          side_effect=counting_get), \
+             patch.object(srv, 'feed_cache_put', side_effect=counting_put):
+            h._serve_feed(self.PATH, 'http://localhost:8000')
+        self.assertEqual(get_calls['n'], 2)          # ① + ③ double-check only
+        self.assertEqual(len(put_returns), 1)
+        self.assertIsInstance(put_returns[0], dict)
+        self.assertEqual(set(put_returns[0]),
+                         {'xml', 'time', 'last_modified', 'fingerprint',
+                          'last_access', 'expires_at'})
+        self.assertIsNotNone(captured.get('last_modified'))
+        self.assertRegex(captured.get('etag'), r'^W/"[0-9a-f]{64}"$')
+
+    def test_t71_feed_fetch_lock_table_converges(self):
+        """SRV-T71 / F8 / BR-SRV-50: serial requests for N distinct Hosts on the
+        same feed path.  Each key is reclaimed once its request finishes, so the
+        fetch-lock table size is bounded by the in-flight key count and does not
+        track the cumulative Host count."""
+        seen_keys = set()
+        with self._patch_handler(self._fake_handler()), \
+             patch.object(srv, 'PUBLIC_BASE_URL', ''):
+            for i in range(50):
+                host = f'h{i}.example.com'
+                status, _, body = self._req(headers={'Host': host})
+                self.assertEqual(status, 200)
+                self.assertTrue(body)
+                seen_keys.add(
+                    srv._feed_cache_key(self.PATH, f'http://{host}'))
+                self.assertEqual(
+                    len(cache_mod._feed_fetch_locks), 0,
+                    f'lock table leaked after request {i} ({host})')
+        # 50 distinct keys were exercised, yet nothing remains: not N-bounded.
+        self.assertEqual(len(seen_keys), 50)
+        self.assertEqual(len(cache_mod._feed_fetch_locks), 0)
+        self.assertEqual(len(cache_mod._feed_fetch_refs), 0)
+
+    def test_t72_concurrent_same_key_single_fetch(self):
+        """SRV-T72 ① / F8: two concurrent requests for one key fetch exactly
+        once — the second thread blocks on the acquired per-key lock, then its
+        double-check hits the entry the first thread wrote."""
+        h = RSSHandler.__new__(RSSHandler)
+        cache_mod.feed_cache.clear()
+        calls = {'n': 0}
+        entered = threading.Event()
+        finish = threading.Event()
+
+        def fetch():
+            calls['n'] += 1
+            entered.set()
+            finish.wait(2.0)
+            return '<rss/>'
+
+        results = []
+
+        def worker():
+            results.append(h._get_or_fetch_feed('/t71-key', fetch))
+
+        first = threading.Thread(target=worker)
+        first.start()
+        self.assertTrue(entered.wait(2.0))       # first thread is inside fetch
+        second = threading.Thread(target=worker)
+        second.start()
+        deadline = time.time() + 2.0
+        while (cache_mod._feed_fetch_refs.get('/t71-key') != 2
+               and time.time() < deadline):
+            time.sleep(0.005)                    # wait until the second is waiting
+        self.assertEqual(calls['n'], 1)          # never a second fetch
+        self.assertEqual(cache_mod._feed_fetch_refs.get('/t71-key'), 2)
+        finish.set()
+        first.join(2.0)
+        second.join(2.0)
+        self.assertEqual(calls['n'], 1)
+        self.assertEqual(len(results), 2)
+        self.assertEqual(results[0][0], '<rss/>')
+        self.assertEqual(results[1][0], '<rss/>')
+        self.assertNotIn('/t71-key', cache_mod._feed_fetch_locks)
+        self.assertNotIn('/t71-key', cache_mod._feed_fetch_refs)
+
+    def test_t72_exception_path_reclaims_key(self):
+        """SRV-T72 ② / F8: a raising fetch degrades to a valid feed (HTTP 200)
+        and still releases the per-key reference in `finally` — the key is
+        popped from both tables instead of leaking."""
+        def boom(feed_url=None):
+            raise RuntimeError('boom')
+
+        with self._patch_handler(boom), \
+             patch.object(srv, 'PUBLIC_BASE_URL', ''):
+            status, _, body = self._req(headers={'Host': 'boom.example.com'})
+            key = srv._feed_cache_key(self.PATH, 'http://boom.example.com')
+        self.assertEqual(status, 200)            # rss shape degrades, never 500
+        self.assertIn(b'<rss', body)
+        self.assertNotIn(key, cache_mod._feed_fetch_locks)
+        self.assertNotIn(key, cache_mod._feed_fetch_refs)
+        self.assertEqual(len(cache_mod._feed_fetch_locks), 0)
+        self.assertEqual(len(cache_mod._feed_fetch_refs), 0)
 
 
 if __name__ == '__main__':
