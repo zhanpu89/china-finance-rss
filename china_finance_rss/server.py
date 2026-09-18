@@ -17,6 +17,7 @@ Dependencies:
 
 import atexit
 import gzip
+import hashlib
 import json
 import re
 import signal
@@ -25,7 +26,8 @@ import threading
 import time
 import logging
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
-from email.utils import formatdate
+from datetime import timezone
+from email.utils import formatdate, parsedate_to_datetime
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse
 from urllib.parse import parse_qs, urlencode
@@ -46,7 +48,7 @@ from .config import (
     CDP_RESTART_INTERVAL, stock_nav_page_names,
     cdp_engine,
 )
-from .cache import (fetch_json, feed_cache_get, feed_cache_put,
+from .cache import (fetch_json, feed_cache_get_entry, feed_cache_put,
                     _feed_fetch_locks, _feed_fetch_locks_lock,
                     build_batch_response, _fill_missing, FetchError,
                     warm_transport)
@@ -85,7 +87,8 @@ def handle_cls_telegraph(feed_url=None):
     headers = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.cls.cn/telegraph'}
     data = json.loads(fetch_json(f'{url}?{urlencode(params)}', headers, ttl=cache_policy('news_url')['ttl']))
     return generate_rss('财联社电报', 'https://www.cls.cn/telegraph',
-                        '财联社实时快讯', parse_cls_items(data), feed_url=feed_url)
+                        '财联社实时快讯', parse_cls_items(data),
+                        feed_url=feed_url, ttl=_feed_ttl_minutes())
 
 
 def handle_eastmoney_kuaixun(feed_url=None):
@@ -96,7 +99,8 @@ def handle_eastmoney_kuaixun(feed_url=None):
     match = re.search(r'var ajaxResult=(\{.*\})', data, re.DOTALL)
     if not match:
         return generate_rss('东方财富快讯', 'https://kuaixun.eastmoney.com/',
-                            '东方财富7x24快讯', [], feed_url=feed_url)
+                            '东方财富7x24快讯', [],
+                            feed_url=feed_url, ttl=_feed_ttl_minutes())
     result = json.loads(match.group(1))
     items = []
     for item in result.get('LivesList', []):
@@ -114,7 +118,8 @@ def handle_eastmoney_kuaixun(feed_url=None):
             'guid': f"eastmoney_{item.get('newsid', '')}"
         })
     return generate_rss('东方财富快讯', 'https://kuaixun.eastmoney.com/',
-                        '东方财富7x24快讯', items, feed_url=feed_url)
+                        '东方财富7x24快讯', items,
+                        feed_url=feed_url, ttl=_feed_ttl_minutes())
 
 
 def handle_ths_kuaixun(feed_url=None):
@@ -140,7 +145,8 @@ def handle_ths_kuaixun(feed_url=None):
             'guid': f"ths_{item.get('seq', '')}"
         })
     return generate_rss('同花顺快讯', 'https://news.10jqka.com.cn/',
-                        '同花顺7x24快讯', items, feed_url=feed_url)
+                        '同花顺7x24快讯', items,
+                        feed_url=feed_url, ttl=_feed_ttl_minutes())
 
 
 def handle_ths_longhu():
@@ -242,7 +248,8 @@ def handle_jin10_flash(feed_url=None):
     url = 'https://flash-api.jin10.com/get_flash_list?channel=-8200&limit=50'
     data = json.loads(fetch_json(url, get_jin10_public_headers(), ttl=cache_policy('news_url')['ttl']))
     return generate_rss('金十快讯', 'https://www.jin10.com/',
-                        '金十数据7x24快讯', parse_jin10_items(data), feed_url=feed_url)
+                        '金十数据7x24快讯', parse_jin10_items(data),
+                        feed_url=feed_url, ttl=_feed_ttl_minutes())
 
 
 def handle_wallstreetcn_live(feed_url=None):
@@ -255,7 +262,8 @@ def handle_wallstreetcn_live(feed_url=None):
     }
     data = json.loads(fetch_json(url, headers, ttl=cache_policy('news_url')['ttl']))
     return generate_rss('华尔街见闻快讯', 'https://wallstreetcn.com/live',
-                        '华尔街见闻7x24快讯', parse_wallstreetcn_items(data), feed_url=feed_url)
+                        '华尔街见闻7x24快讯', parse_wallstreetcn_items(data),
+                        feed_url=feed_url, ttl=_feed_ttl_minutes())
 
 
 # ── CDP-based JSON handlers ────────────────────────────────────────────────
@@ -537,6 +545,17 @@ _HOST_RE = re.compile(r'^[A-Za-z0-9](?:[A-Za-z0-9.\-]{0,253}[A-Za-z0-9])?'
 _HOST_IPV6_RE = re.compile(r'^\[[0-9A-Fa-f:.]{2,45}\](?::\d{1,5})?$')
 _BASE_URL_VARY = 'Host, X-Forwarded-Host, X-Forwarded-Proto'
 
+# ETag canonicalisation (BR-SRV-37): blank the *content* of the derived,
+# non-content metadata before hashing.  <lastBuildDate> and <ttl> appear once
+# (channel); <pubDate> appears once per item, so its substitution is full-body
+# (count=0) — eastmoney/ths/jin10 fall back to the current time when the
+# upstream timestamp is unparseable, and that fallback sits inside the hashed
+# region, so it must be removed too.
+_LASTBUILDDATE_RE = re.compile(r'<lastBuildDate>[^<]*</lastBuildDate>')
+_RSS_TTL_RE = re.compile(r'<ttl>[^<]*</ttl>')
+_PUBDATE_RE = re.compile(r'<pubDate>[^<]*</pubDate>')
+_ETAG_PREFIX = 'W/'                 # weak validator (ETag derived from a normalised body)
+
 
 def _accepts_gzip(header):
     """True when ``Accept-Encoding`` explicitly accepts gzip (RFC 9110 §12.5.3).
@@ -619,10 +638,13 @@ def _guard(fn, *, shape, requested=None, dropped=0, rss_info=None, feed_url=None
             return build_batch_response(codes, {}, errors, dropped=dropped)
         if shape == 'rss':
             info = rss_info or {}
-            return generate_error_rss(info.get('title', 'feed'),
-                                      info.get('link', ''),
-                                      info.get('description', ''),
-                                      exc, feed_url=feed_url)
+            # ★ rss shape contract: success and failure both return a 2-tuple.
+            # A degrade body has no real cache entry ⇒ last_modified=None, which
+            # disables If-Modified-Since (BR-SRV-38) — never a stale entry's time.
+            return (generate_error_rss(info.get('title', 'feed'),
+                                       info.get('link', ''),
+                                       info.get('description', ''),
+                                       exc, feed_url=feed_url), None)
         return {'error': str(exc)}
 
 
@@ -760,6 +782,93 @@ def _plate_ttls():
     """Return (base_ttl, stagger); stagger = max(3, base//4) (BR-SRV-10)."""
     base = cache_policy('plate')['ttl']
     return base, max(3, base // 4)
+
+
+# ── RSS conditional requests (ETag / Last-Modified / 304) ───────────────────
+
+def _feed_ttl_minutes():
+    """RSS 2.0 <ttl> in whole minutes, derived from the feed cache policy.
+
+    BR-SRV-43: 30s → 1, 180s → 3; never below 1 (RSS 2.0 wants a positive
+    integer, and rounding the 30s intraday TTL down to 0 would be wrong).
+    """
+    ttl = cache_policy('feed')['ttl']
+    return max(1, (ttl + 59) // 60)
+
+
+def _feed_etag(xml):
+    """Weak ETag `W/"<sha256>"` over the canonicalised feed XML (BR-SRV-37).
+
+    The *content* of three derived, non-content elements is blanked before
+    hashing: <lastBuildDate> and <ttl> (one each) and <pubDate> (all of them —
+    one per item).  Hashing the raw body would change the ETag on every
+    regeneration (<lastBuildDate> is "now"), so a content-identical feed would
+    answer 200 forever and the feature would fail silently.  <pubDate> matters
+    for the same reason: eastmoney/ths/jin10 fall back to the current time when
+    the upstream timestamp is unparseable, and that fallback sits inside the
+    hashed region.  Item identity is carried by <guid>; <pubDate> is upstream
+    metadata.  Pure function: no clock, no cache access.
+    """
+    normalized = _LASTBUILDDATE_RE.sub('<lastBuildDate/>', xml, count=1)
+    normalized = _RSS_TTL_RE.sub('<ttl/>', normalized, count=1)
+    normalized = _PUBDATE_RE.sub('<pubDate/>', normalized)   # count=0: all items
+    digest = hashlib.sha256(normalized.encode('utf-8')).hexdigest()
+    return _ETAG_PREFIX + '"' + digest + '"'
+
+
+def _if_none_match_matches(header, etag):
+    """If-None-Match weak comparison (RFC 9110 §13.1.2); `header` is not None.
+
+    Supports `*`, a comma-separated list and the literal `W/` prefix (weak
+    comparison — the prefix is case-sensitive, so a lower-case `w/` is compared
+    as an opaque tag and does not match).
+    """
+    current = etag[len(_ETAG_PREFIX):] if etag.startswith(_ETAG_PREFIX) else etag
+    for raw in header.split(','):
+        candidate = raw.strip()
+        if not candidate:
+            continue
+        if candidate == '*':                 # matches any current representation
+            return True
+        if candidate.startswith(_ETAG_PREFIX):
+            candidate = candidate[len(_ETAG_PREFIX):]   # weak comparison
+        if candidate == current:
+            return True
+    return False
+
+
+def _if_modified_since_not_modified(header, last_modified):
+    """If-Modified-Since at second resolution (BR-SRV-40).
+
+    A malformed header, an unparseable date, `last_modified is None` or an
+    out-of-range date all return False — the header is ignored and the request
+    degrades to 200, never 400/500.  Parsing, the naive→UTC default and
+    `dt.timestamp()` all live inside one `try`: `timestamp()` can raise
+    OverflowError/OSError on extreme years, and letting that escape would break
+    the connection instead of ignoring the header.
+    """
+    if last_modified is None:
+        return False
+    try:
+        dt = parsedate_to_datetime(header)
+        if dt is None:
+            return False
+        if dt.tzinfo is None:                # HTTP-date without a zone ⇒ GMT
+            dt = dt.replace(tzinfo=timezone.utc)
+        return int(last_modified) <= int(dt.timestamp())
+    except (TypeError, ValueError, OverflowError, OSError):
+        return False
+
+
+def _not_modified(headers, etag, last_modified):
+    """Condition decision (RFC 9110 §13.1.3): If-None-Match wins over IMS."""
+    inm = headers.get('If-None-Match')
+    if inm is not None:                      # INM present ⇒ IMS fully ignored
+        return _if_none_match_matches(inm, etag)
+    ims = headers.get('If-Modified-Since')
+    if ims is not None:
+        return _if_modified_since_not_modified(ims, last_modified)
+    return False                             # no condition ⇒ 200 full body
 
 
 # ── Health payload (bounded admission + budgets + snapshot) ─────────────────
@@ -1186,36 +1295,49 @@ class RSSHandler(BaseHTTPRequestHandler):
         self._send_json(payload, write_body=write_body, cache=cache)
 
     def _get_or_fetch_feed(self, path, fetch_func):
-        """BR-SRV-6: stampede protection + double-checked cache lookup.
+        """BR-SRV-6/38: stampede protection + double-checked cache lookup.
 
         LRU / TTL / sweeping are owned by cache.py; this only sequences
         miss → per-path lock → second get → fetch → put.
+
+        Returns ``(xml, last_modified)``; ``last_modified`` is the feed cache
+        entry's write time (epoch seconds), or ``None`` when there is no entry
+        — never a stale timestamp borrowed for a degraded body.
         """
-        xml = feed_cache_get(path)                      # ① hit path: no policy read
-        if xml is not None:
-            return xml
+        entry = feed_cache_get_entry(path)              # ① hit path: no policy read
+        if entry is not None:
+            return entry['xml'], entry['time']
         with _feed_fetch_locks_lock:                    # ② build lock, release at once
             lock = _feed_fetch_locks.setdefault(path, threading.Lock())
         with lock:                                      # ③
-            xml = feed_cache_get(path)                  # ★ double-check
-            if xml is not None:
-                return xml
+            entry = feed_cache_get_entry(path)          # ★ double-check
+            if entry is not None:
+                return entry['xml'], entry['time']
             ttl = cache_policy('feed')['ttl']           # ★ P2-1: only after 2nd miss
             xml = fetch_func()                          # fetch only on a real miss
             feed_cache_put(path, xml, ttl)              # failure ⇒ raises, no cache write
-        return xml
+            entry = feed_cache_get_entry(path)          # authoritative time just written
+        return xml, (entry['time'] if entry is not None else None)
 
     def _serve_feed(self, path, base_url, write_body=True):
         info = ROUTES[path]
         feed_url = base_url + path
-        xml = _guard(lambda: self._get_or_fetch_feed(
-            path, lambda: info['handler'](feed_url=feed_url)),
+        xml, last_modified = _guard(                    # ★ rss shape: 2-tuple
+            lambda: self._get_or_fetch_feed(
+                path, lambda: info['handler'](feed_url=feed_url)),
             shape='rss', rss_info=info, feed_url=feed_url)
+        etag = _feed_etag(xml)
         # S2-3: the feed body embeds feed_url (derived from the request Host when
         # PUBLIC_BASE_URL is unset) ⇒ never `public` without Vary in that case.
+        varies_on_host = not PUBLIC_BASE_URL
+        if _not_modified(self.headers, etag, last_modified):
+            self._send_not_modified(etag, last_modified,
+                                    varies_on_host=varies_on_host)
+            return
         self._send_text(200, 'application/rss+xml; charset=utf-8',
-                        xml, varies_on_host=not PUBLIC_BASE_URL,
-                        write_body=write_body)
+                        xml, varies_on_host=varies_on_host,
+                        write_body=write_body,
+                        etag=etag, last_modified=last_modified)
 
     def _base_url(self):
         """Public base URL for published links: config first, else validated Host.
@@ -1247,7 +1369,8 @@ class RSSHandler(BaseHTTPRequestHandler):
         return cache_policy(domain)['ttl']
 
     def _send_text(self, status_code, content_type, body, cache=True,
-                   varies_on_host=False, write_body=True):
+                   varies_on_host=False, write_body=True,
+                   etag=None, last_modified=None):
         # Perf: gzip large bodies when the client advertises it (compression
         # shrinks 334KB JSON quotes ~10x → network time dominates).  Raw body
         # for clients without Accept-Encoding — wire contract unchanged.
@@ -1260,6 +1383,13 @@ class RSSHandler(BaseHTTPRequestHandler):
         self.send_response(status_code)
         self.send_header('Content-Type', content_type)
         self.send_header('Content-Length', str(len(body_bytes)))
+        # ★ RSS 200 validators (BR-SRV-42): only the feed path passes these, so
+        # every other caller's headers are byte-identical to before.
+        if etag is not None:
+            self.send_header('ETag', etag)
+        if last_modified is not None:
+            self.send_header('Last-Modified',
+                             formatdate(last_modified, localtime=False, usegmt=True))
         vary_parts = []
         if gzipped:
             self.send_header('Content-Encoding', 'gzip')
@@ -1281,6 +1411,32 @@ class RSSHandler(BaseHTTPRequestHandler):
         self.end_headers()
         if write_body:
             self.wfile.write(body_bytes)
+
+    def _send_not_modified(self, etag, last_modified, varies_on_host=False):
+        """Send a 304 (BR-SRV-41): no body, no Content-Encoding, no
+        Content-Length, no Content-Type.
+
+        Deliberately separate from `_send_text`, which always computes gzip and
+        writes Content-Length/Content-Type — one branch slip there would attach
+        a body or `Content-Encoding` to the 304.  Cache-Control and Vary must
+        match the 200 exactly, otherwise a shared cache could key its stored
+        metadata off a different policy than the representation.  Nothing is
+        written to the feed cache here; the read path already refreshed the LRU.
+        """
+        self.send_response(304)
+        self.send_header('ETag', etag)                  # same weak tag as the 200
+        if last_modified is not None:
+            self.send_header('Last-Modified',
+                             formatdate(last_modified, localtime=False, usegmt=True))
+        scope = 'private' if varies_on_host else 'public'   # same source as 200
+        self.send_header('Cache-Control', f'{scope}, max-age={self._cache_age()}')
+        vary_parts = []
+        if varies_on_host:
+            vary_parts.append(_BASE_URL_VARY)
+        vary_parts.append('Accept-Encoding')            # 200 (cache=True) always has it
+        self.send_header('Vary', ', '.join(vary_parts))
+        self.end_headers()
+        # no wfile write, no Content-*, no gzip, no feed-cache write
 
     def _serve_index(self, write_body=True):
         """Serve a simple index page listing available feeds in a table."""

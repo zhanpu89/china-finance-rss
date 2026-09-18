@@ -142,8 +142,15 @@ def warm_jin10_headers():
 
 # ── RSS / OPML generation ──────────────────────────────────────────────────
 
-def generate_rss(title, link, description, items, feed_url=None):
-    """Generate standard RSS 2.0 XML."""
+def generate_rss(title, link, description, items, feed_url=None, ttl=None):
+    """Generate standard RSS 2.0 XML.
+
+    ``ttl`` is the RSS 2.0 ``<ttl>`` polling hint in whole minutes (BR-SRV-43),
+    placed between ``</lastBuildDate>`` and ``<atom:link>``.  ``None`` — the
+    default — omits the element, so every existing caller is unchanged.  RSS
+    2.0 requires a positive integer: a non-positive value is omitted rather
+    than emitted as ``<ttl>0</ttl>``.
+    """
     xml = f'''<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">
 <channel>
@@ -152,6 +159,8 @@ def generate_rss(title, link, description, items, feed_url=None):
 <description>{escape_xml(description)}</description>
 <lastBuildDate>{formatdate(timeval=None, localtime=False, usegmt=True)}</lastBuildDate>
 '''
+    if ttl is not None and int(ttl) > 0:
+        xml += f'<ttl>{int(ttl)}</ttl>\n'
     if feed_url:
         xml += (f'<atom:link href="{escape_xml(feed_url)}" rel="self" '
                 'type="application/rss+xml"/>\n')

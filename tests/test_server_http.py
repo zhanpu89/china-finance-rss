@@ -12,18 +12,23 @@ stock_api `cached_batch`/`_prefetch_slice`/`BATCH_MAX_WORKERS`). Until those
 land, importing `china_finance_rss.server` raises ImportError.
 """
 
+import gzip
 import http.client
 import json
+import re
 import threading
 import time
 import unittest
 from collections import OrderedDict
+from email.utils import formatdate, parsedate_to_datetime
 from unittest.mock import patch
 from urllib.parse import urlparse
 from xml.etree import ElementTree as ET
 
+from china_finance_rss import cache as cache_mod
 from china_finance_rss import config
 from china_finance_rss import server as srv
+from china_finance_rss import utils as utils_mod
 from china_finance_rss import stock_api
 from china_finance_rss import stream
 from china_finance_rss.cache import FetchError, build_batch_response
@@ -73,11 +78,13 @@ class GuardTests(unittest.TestCase):
                           'sz000001': 'upstream_error'})
 
     def test_rss_degrade_is_valid_feed(self):
-        xml = srv._guard(self._boom, shape='rss',
-                         rss_info={'title': 'T', 'link': 'L', 'description': 'D'},
-                         feed_url='http://x/f')
+        xml, last_modified = srv._guard(
+            self._boom, shape='rss',
+            rss_info={'title': 'T', 'link': 'L', 'description': 'D'},
+            feed_url='http://x/f')
         root = ET.fromstring(xml)
         self.assertIsNotNone(root.find('./channel/item'))
+        self.assertIsNone(last_modified)     # degrade ⇒ IMS not evaluable
 
     def test_invalid_shape_raises(self):
         with self.assertRaises(ValueError):
@@ -309,11 +316,17 @@ class LonghuSeatPairingTests(unittest.TestCase):
 class FeedDoubleCheckTests(unittest.TestCase):
     """BR-SRV-6: concurrent misses on the same path cause exactly one fetch."""
 
+    TIME = 1234.0
+
     def _handler(self):
         return RSSHandler.__new__(RSSHandler)
 
+    @staticmethod
+    def _entry(xml):
+        return {'xml': xml, 'time': FeedDoubleCheckTests.TIME}
+
     def test_double_check_single_fetch_single_thread(self):
-        state = {'xml': None}
+        state = {'entry': None}
         calls = {'n': 0}
 
         def fetch():
@@ -321,15 +334,19 @@ class FeedDoubleCheckTests(unittest.TestCase):
             return '<rss/>'
 
         h = self._handler()
-        with patch.object(srv, 'feed_cache_get', side_effect=lambda p: state['xml']), \
+        with patch.object(srv, 'feed_cache_get_entry',
+                          side_effect=lambda p: state['entry']), \
              patch.object(srv, 'feed_cache_put',
-                          side_effect=lambda p, xml, ttl: state.__setitem__('xml', xml)):
-            self.assertEqual(h._get_or_fetch_feed('/cls/telegraph', fetch), '<rss/>')
-            self.assertEqual(h._get_or_fetch_feed('/cls/telegraph', fetch), '<rss/>')
+                          side_effect=lambda p, xml, ttl:
+                          state.__setitem__('entry', self._entry(xml))):
+            self.assertEqual(h._get_or_fetch_feed('/cls/telegraph', fetch),
+                             ('<rss/>', self.TIME))
+            self.assertEqual(h._get_or_fetch_feed('/cls/telegraph', fetch),
+                             ('<rss/>', self.TIME))
         self.assertEqual(calls['n'], 1)
 
     def test_double_check_single_fetch_concurrent(self):
-        state = {'xml': None}
+        state = {'entry': None}
         calls = {'n': 0}
         lock = threading.Lock()
 
@@ -347,9 +364,11 @@ class FeedDoubleCheckTests(unittest.TestCase):
             except Exception as exc:      # pragma: no cover
                 errors.append(exc)
 
-        with patch.object(srv, 'feed_cache_get', side_effect=lambda p: state['xml']), \
+        with patch.object(srv, 'feed_cache_get_entry',
+                          side_effect=lambda p: state['entry']), \
              patch.object(srv, 'feed_cache_put',
-                          side_effect=lambda p, xml, ttl: state.__setitem__('xml', xml)):
+                          side_effect=lambda p, xml, ttl:
+                          state.__setitem__('entry', self._entry(xml))):
             threads = [threading.Thread(target=worker) for _ in range(8)]
             for t in threads:
                 t.start()
@@ -439,20 +458,22 @@ class BaseUrlHardeningTests(unittest.TestCase):
 
     def test_serve_feed_marks_host_derived_url_non_public(self):
         h = RSSHandler.__new__(RSSHandler)
+        h.headers = {}
         captured = {}
         h._send_text = lambda *a, **k: captured.update(k)
         with patch.object(srv.RSSHandler, '_get_or_fetch_feed',
-                          return_value='<rss/>'), \
+                          return_value=('<rss/>', None)), \
              patch.object(srv, 'PUBLIC_BASE_URL', ''):
             h._serve_feed('/cls/telegraph', 'http://feeds.example.com')
         self.assertTrue(captured.get('varies_on_host'))
 
     def test_serve_feed_is_public_with_configured_base_url(self):
         h = RSSHandler.__new__(RSSHandler)
+        h.headers = {}
         captured = {}
         h._send_text = lambda *a, **k: captured.update(k)
         with patch.object(srv.RSSHandler, '_get_or_fetch_feed',
-                          return_value='<rss/>'), \
+                          return_value=('<rss/>', None)), \
              patch.object(srv, 'PUBLIC_BASE_URL', 'https://feeds.example.com'):
             h._serve_feed('/cls/telegraph', 'https://feeds.example.com')
         self.assertFalse(captured.get('varies_on_host'))
@@ -981,6 +1002,492 @@ class GzipResponseTests(unittest.TestCase):
         self.assertEqual(cenc, 'gzip')
         self.assertIn('Accept-Encoding', vary or '',
                       'gzip 响应即使不可缓存也须 Vary: Accept-Encoding')
+
+
+class _StepClock:
+    """Deterministic clock for SRV-T52b: every fallback draw advances 1s.
+
+    An explicit ``timeval`` is formatted verbatim (no counter advance), so
+    ``_send_text``'s Last-Modified is unaffected by the patch.
+    """
+
+    def __init__(self, start=1_700_000_000):
+        self.start = start
+        self._n = 0
+
+    def next_epoch(self):
+        value = self.start + self._n
+        self._n += 1
+        return value
+
+    def time(self):
+        return self.next_epoch()
+
+    def formatdate(self, timeval=None, localtime=False, usegmt=True):
+        if timeval is None:
+            timeval = self.next_epoch()
+        return formatdate(timeval, localtime=localtime, usegmt=usegmt)
+
+
+class RssConditionalGetTests(unittest.TestCase):
+    """SRV-T46..T62: RSS conditional requests (ETag / Last-Modified / 304).
+
+    A real HTTP server (the HttpSemanticsTests pattern) with the feed route's
+    handler patched, so no upstream is contacted and the 200/304 composition,
+    the ETag canonical projection and condition-header priority are the objects
+    under test.
+    """
+
+    PATH = '/cls/telegraph'
+    ITEM = {'title': 't1', 'link': 'http://x/1', 'description': 'd1',
+            'pubDate': 'Thu, 01 Jan 2026 00:00:00 GMT', 'guid': 'g1'}
+
+    @classmethod
+    def setUpClass(cls):
+        cls.srv = BoundedThreadPoolServer(('127.0.0.1', 0), RSSHandler,
+                                          max_workers=2)
+        cls.srv.daemon_threads = True
+        threading.Thread(target=cls.srv.serve_forever, daemon=True).start()
+        cls.port = cls.srv.server_port
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.srv.shutdown()
+        cls.srv.server_close()
+
+    def setUp(self):
+        cache_mod.feed_cache.clear()
+        self.addCleanup(cache_mod.feed_cache.clear)
+
+    # ---- helpers --------------------------------------------------------
+
+    def _fake_handler(self, items=None, title='CLS'):
+        entries = [dict(self.ITEM)] if items is None else items
+
+        def handler(feed_url=None):
+            return utils_mod.generate_rss(
+                title, 'https://www.cls.cn/telegraph', 'D', entries,
+                feed_url=feed_url, ttl=1)
+        return handler
+
+    def _patch_handler(self, handler):
+        return patch.dict(srv.ROUTES[self.PATH], {'handler': handler})
+
+    def _req(self, method='GET', path=None, headers=None):
+        conn = http.client.HTTPConnection('127.0.0.1', self.port)
+        try:
+            conn.request(method, path or self.PATH, headers=headers or {})
+            resp = conn.getresponse()
+            body = resp.read()
+            hdrs = {k.lower(): v for k, v in resp.getheaders()}
+            return resp.status, hdrs, body
+        finally:
+            conn.close()
+
+    def _assert_pubdate_differs_but_etag_same(self, x1, x2):
+        p1 = [e.text for e in ET.fromstring(x1).findall(
+            './channel/item/pubDate')]
+        p2 = [e.text for e in ET.fromstring(x2).findall(
+            './channel/item/pubDate')]
+        self.assertNotEqual(p1, p2)             # the fallback clock advanced
+        self.assertEqual(srv._feed_etag(x1), srv._feed_etag(x2))
+        # Red/green direction: with the C1 projection disabled the two feeds
+        # MUST hash differently — this is exactly what a "pubDate back in the
+        # hash region" regression would trip.
+        with patch.object(srv, '_PUBDATE_RE', re.compile(r'(?!)')):
+            self.assertNotEqual(srv._feed_etag(x1), srv._feed_etag(x2))
+
+    def test_t46_first_200_has_etag_and_last_modified(self):
+        calls = {'put': 0}
+        real_put = cache_mod.feed_cache_put
+
+        def counting_put(path, xml, ttl):
+            calls['put'] += 1
+            return real_put(path, xml, ttl)
+
+        with self._patch_handler(self._fake_handler()), \
+             patch.object(srv, 'feed_cache_put', side_effect=counting_put):
+            status, hdrs, body = self._req()
+        self.assertEqual(status, 200)
+        self.assertRegex(hdrs['etag'], r'^W/"[0-9a-f]{64}"$')
+        lm = parsedate_to_datetime(hdrs['last-modified'])
+        self.assertIsNotNone(lm)
+        self.assertIsNotNone(lm.tzinfo)
+        self.assertEqual(len(ET.fromstring(body).findall('./channel/item')), 1)
+        self.assertEqual(calls['put'], 1)
+
+    def test_t47_same_etag_replay_304_and_idempotent(self):
+        calls = {'put': 0}
+        real_put = cache_mod.feed_cache_put
+
+        def counting_put(path, xml, ttl):
+            calls['put'] += 1
+            return real_put(path, xml, ttl)
+
+        with self._patch_handler(self._fake_handler()), \
+             patch.object(srv, 'feed_cache_put', side_effect=counting_put):
+            status0, h0, _ = self._req()
+            etag = h0['etag']
+            first = self._req(headers={'If-None-Match': etag})
+            second = self._req(headers={'If-None-Match': etag})
+        self.assertEqual(status0, 200)
+        for status, hdrs, body in (first, second):
+            self.assertEqual(status, 304)
+            self.assertEqual(body, b'')
+            self.assertNotIn('content-encoding', hdrs)
+            self.assertNotIn('content-length', hdrs)
+            self.assertNotIn('content-type', hdrs)
+            self.assertEqual(hdrs['etag'], etag)
+            self.assertIn('cache-control', hdrs)
+            self.assertIn('vary', hdrs)
+            self.assertEqual(hdrs['last-modified'], h0['last-modified'])
+        self.assertEqual(calls['put'], 1)
+
+    def test_t48_inm_star_304_and_nonmatching_200(self):
+        with self._patch_handler(self._fake_handler()):
+            _, h0, _ = self._req()
+            st_star, _, body_star = self._req(headers={'If-None-Match': '*'})
+            st_none, h_none, body_none = self._req(
+                headers={'If-None-Match': '"nope"'})
+        self.assertEqual(st_star, 304)
+        self.assertEqual(body_star, b'')
+        self.assertEqual(st_none, 200)
+        self.assertEqual(
+            len(ET.fromstring(body_none).findall('./channel/item')), 1)
+        self.assertEqual(h_none['etag'], h0['etag'])
+
+    def test_t49_multi_value_list_and_nonmatching_list_200(self):
+        with self._patch_handler(self._fake_handler()):
+            _, h0, _ = self._req()
+            opaque = h0['etag'][len('W/'):]
+            st_hit, _, body_hit = self._req(headers={
+                'If-None-Match': f'"a", W/"b", {opaque}'})
+            st_miss, _, body_miss = self._req(
+                headers={'If-None-Match': '"a","b"'})
+        self.assertEqual(st_hit, 304)
+        self.assertEqual(body_hit, b'')
+        self.assertEqual(st_miss, 200)
+        self.assertEqual(
+            len(ET.fromstring(body_miss).findall('./channel/item')), 1)
+
+    def test_t50_weak_strong_and_lowercase_w(self):
+        with self._patch_handler(self._fake_handler()):
+            _, h0, _ = self._req()
+            etag = h0['etag']
+            opaque = etag[len('W/'):]
+            st_strong = self._req(headers={'If-None-Match': opaque})[0]
+            st_weak = self._req(headers={'If-None-Match': etag})[0]
+            st_lower, _, body_lower = self._req(
+                headers={'If-None-Match': 'w/' + opaque})
+        self.assertTrue(etag.startswith('W/'))
+        self.assertEqual(st_strong, 304)      # weak comparison, strong label
+        self.assertEqual(st_weak, 304)
+        self.assertEqual(st_lower, 200)       # literal W/ is case-sensitive
+        self.assertTrue(body_lower)
+
+    def test_t51_ims_future_past_and_equal_boundary(self):
+        future = formatdate(time.time() + 3600, usegmt=True)
+        past = formatdate(time.time() - 3600, usegmt=True)
+        with self._patch_handler(self._fake_handler()):
+            _, h0, _ = self._req()
+            st_future, _, b_future = self._req(
+                headers={'If-Modified-Since': future})
+            st_past, _, b_past = self._req(
+                headers={'If-Modified-Since': past})
+            st_equal, _, b_equal = self._req(
+                headers={'If-Modified-Since': h0['last-modified']})
+        self.assertEqual(st_future, 304)
+        self.assertEqual(b_future, b'')
+        self.assertEqual(st_past, 200)
+        self.assertEqual(
+            len(ET.fromstring(b_past).findall('./channel/item')), 1)
+        self.assertEqual(st_equal, 304)          # client echo, same second
+        self.assertEqual(b_equal, b'')
+
+    def test_t52_channel_content_unchanged_across_ttl_same_etag(self):
+        items = [dict(self.ITEM)]
+        clock = _StepClock()
+        with patch.object(utils_mod, 'formatdate', clock.formatdate):
+            x1 = utils_mod.generate_rss('T', 'L', 'D', items,
+                                        feed_url='u', ttl=1)
+            x2 = utils_mod.generate_rss('T', 'L', 'D', items,
+                                        feed_url='u', ttl=1)
+            x3 = utils_mod.generate_rss('T', 'L', 'D', items,
+                                        feed_url='u', ttl=3)
+        self.assertNotEqual(x1, x2)             # lastBuildDate differs
+        self.assertEqual(srv._feed_etag(x1), srv._feed_etag(x2))
+        self.assertEqual(srv._feed_etag(x1), srv._feed_etag(x3))  # ttl out
+        with self._patch_handler(self._fake_handler()):
+            _, h0, _ = self._req()
+            cache_mod.feed_cache.clear()        # force a TTL-expiry re-gen
+            st, _, body = self._req(headers={'If-None-Match': h0['etag']})
+        self.assertEqual(st, 304)
+        self.assertEqual(body, b'')
+
+    def test_t52b_pure_function_only_pubdate_differs_same_etag(self):
+        base = utils_mod.generate_rss(
+            'T', 'L', 'D',
+            [{'title': 't1', 'link': 'l1', 'description': 'd1',
+              'pubDate': 'PD_A', 'guid': 'g1'},
+             {'title': 't2', 'link': 'l2', 'description': 'd2',
+              'pubDate': 'PD_B', 'guid': 'g2'}],
+            feed_url='http://feeds.example.com/cls/telegraph', ttl=1)
+        x1 = base.replace('PD_A', 'Thu, 01 Jan 2026 00:00:00 GMT') \
+                 .replace('PD_B', 'Fri, 02 Jan 2026 00:00:00 GMT')
+        x2 = base.replace('PD_A', 'Sat, 03 Jan 2026 11:22:33 GMT') \
+                 .replace('PD_B', 'Sun, 04 Jan 2026 22:33:44 GMT')
+        # only the two <pubDate> values differ; every other byte is identical
+        self.assertNotEqual(x1, x2)
+        self.assertEqual(srv._feed_etag(x1), srv._feed_etag(x2))
+        # Removing the pubDate projection makes the two diverge — proof this
+        # assertion really catches a "pubDate back in the hash" regression.
+        with patch.object(srv, '_PUBDATE_RE', re.compile(r'(?!)')):
+            self.assertNotEqual(srv._feed_etag(x1), srv._feed_etag(x2))
+
+    def test_t52b_handler_eastmoney_missing_showtime_clocked(self):
+        payload = ('var ajaxResult={"LivesList":[{"title":"T1",'
+                   '"newsid":"1","digest":"D1"}]}')
+        clock = _StepClock()
+        with patch.object(srv, 'fetch_json', return_value=payload), \
+             patch.object(srv, 'formatdate', clock.formatdate):
+            x1 = srv.handle_eastmoney_kuaixun(feed_url='http://x/f')
+            x2 = srv.handle_eastmoney_kuaixun(feed_url='http://x/f')
+        self._assert_pubdate_differs_but_etag_same(x1, x2)
+
+    def test_t52b_handler_ths_invalid_ctime_clocked(self):
+        payload = json.dumps({'data': {'list': [
+            {'title': 'T1', 'seq': '1', 'digest': 'D1',
+             'ctime': 'not-a-number'}]}})
+        clock = _StepClock()
+        with patch.object(srv, 'fetch_json', return_value=payload), \
+             patch.object(srv, 'time', clock):
+            x1 = srv.handle_ths_kuaixun(feed_url='http://x/f')
+            x2 = srv.handle_ths_kuaixun(feed_url='http://x/f')
+        self._assert_pubdate_differs_but_etag_same(x1, x2)
+
+    def test_t52b_handler_jin10_missing_time_clocked(self):
+        payload = json.dumps({'data': [
+            {'id': '1', 'data': {'title': 'T1', 'content': 'C1'}}]})
+        clock = _StepClock()
+        with patch.object(srv, 'fetch_json', return_value=payload), \
+             patch.object(srv, 'get_jin10_public_headers', return_value={}), \
+             patch.object(utils_mod, 'formatdate', clock.formatdate):
+            x1 = srv.handle_jin10_flash(feed_url='http://x/f')
+            x2 = srv.handle_jin10_flash(feed_url='http://x/f')
+        self._assert_pubdate_differs_but_etag_same(x1, x2)
+
+    def test_t52b_end_to_end_cross_ttl_304(self):
+        payload = ('var ajaxResult={"LivesList":[{"title":"T1",'
+                   '"newsid":"1","digest":"D1"}]}')
+        clock = _StepClock()
+        path = '/eastmoney/kuaixun'
+        with patch.object(srv, 'fetch_json', return_value=payload), \
+             patch.object(srv, 'formatdate', clock.formatdate):
+            st1, h1, _ = self._req(path=path)
+            cache_mod.feed_cache.clear()        # simulate TTL expiry
+            st2, _, body = self._req(path=path,
+                                     headers={'If-None-Match': h1['etag']})
+        self.assertEqual(st1, 200)
+        self.assertEqual(st2, 304)
+        self.assertEqual(body, b'')
+
+    def test_t53_content_change_changes_etag_and_200(self):
+        xa = utils_mod.generate_rss('T', 'L', 'D', [dict(self.ITEM)],
+                                    feed_url='u', ttl=1)
+        xb = utils_mod.generate_rss('T', 'L', 'D',
+                                    [dict(self.ITEM, title='CHANGED')],
+                                    feed_url='u', ttl=1)
+        self.assertNotEqual(srv._feed_etag(xa), srv._feed_etag(xb))
+        holder = {'items': [dict(self.ITEM)]}
+
+        def handler(feed_url=None):
+            return utils_mod.generate_rss('T', 'L', 'D', holder['items'],
+                                          feed_url=feed_url, ttl=1)
+
+        with self._patch_handler(handler):
+            _, h_std, _ = self._req()
+            cache_mod.feed_cache.clear()
+            _, h_alt, _ = self._req(headers={'Host': 'other.example.com'})
+            self.assertNotEqual(h_std['etag'], h_alt['etag'])   # atom:link
+            cache_mod.feed_cache.clear()
+            holder['items'] = [dict(self.ITEM, title='NEW')]
+            st, h1, body = self._req(
+                headers={'If-None-Match': h_std['etag']})
+        self.assertEqual(st, 200)
+        self.assertIn(b'NEW', body)
+        self.assertNotEqual(h1['etag'], h_std['etag'])
+
+    def test_t54_head_304_and_head_200(self):
+        future = formatdate(time.time() + 3600, usegmt=True)
+        with self._patch_handler(self._fake_handler()):
+            _, h0, _ = self._req()
+            st_inm, h_inm, b_inm = self._req(
+                'HEAD', headers={'If-None-Match': h0['etag']})
+            st_ims, h_ims, b_ims = self._req(
+                'HEAD', headers={'If-Modified-Since': future})
+            st_none, h_none, b_none = self._req('HEAD')
+            _, h_get, _ = self._req(headers={'If-None-Match': h0['etag']})
+        self.assertEqual((st_inm, st_ims, st_none), (304, 304, 200))
+        for hdrs, body in ((h_inm, b_inm), (h_ims, b_ims)):
+            self.assertEqual(body, b'')
+            self.assertEqual(hdrs['etag'], h0['etag'])
+            self.assertIn('cache-control', hdrs)
+            self.assertIn('vary', hdrs)
+        self.assertEqual(h_inm['etag'], h_get['etag'])
+        self.assertEqual(h_inm['cache-control'], h_get['cache-control'])
+        self.assertEqual(h_inm['vary'], h_get['vary'])
+        self.assertEqual(b_none, b'')
+        self.assertIn('content-length', h_none)
+
+    def test_t55_public_base_url_unset_304_private_vary_host(self):
+        with self._patch_handler(self._fake_handler()):
+            _, h0, _ = self._req()
+            etag = h0['etag']
+            with patch.object(srv, 'PUBLIC_BASE_URL', ''):
+                st_priv, h_priv, _ = self._req(
+                    headers={'If-None-Match': etag})
+            with patch.object(srv, 'PUBLIC_BASE_URL',
+                              'https://feeds.example.com'):
+                st_pub, h_pub, _ = self._req(headers={'If-None-Match': etag})
+        self.assertEqual(st_priv, 304)
+        self.assertIn('private', h_priv['cache-control'])
+        for part in ('Host', 'X-Forwarded-Host',
+                     'X-Forwarded-Proto', 'Accept-Encoding'):
+            self.assertIn(part, h_priv['vary'])
+        self.assertEqual(st_pub, 304)
+        self.assertIn('public', h_pub['cache-control'])
+        self.assertNotIn('Host', h_pub['vary'])
+        self.assertIn('Accept-Encoding', h_pub['vary'])
+
+    def test_t56_invalid_date_header_is_200_and_priority(self):
+        with self._patch_handler(self._fake_handler()):
+            _, h0, _ = self._req()
+            for bad in ('not-a-date', '99', ''):
+                st, _, body = self._req(headers={'If-Modified-Since': bad})
+                self.assertEqual(st, 200, repr(bad))
+                self.assertTrue(body, repr(bad))
+            st_hit = self._req(headers={'If-None-Match': h0['etag'],
+                                        'If-Modified-Since': 'bad'})[0]
+            st_miss, _, body_miss = self._req(
+                headers={'If-None-Match': '"nope"',
+                         'If-Modified-Since': 'bad'})
+        self.assertEqual(st_hit, 304)
+        self.assertEqual(st_miss, 200)
+        self.assertTrue(body_miss)
+
+    def test_t56b_inm_miss_with_matching_ims_is_200(self):
+        future = formatdate(time.time() + 3600, usegmt=True)
+        with self._patch_handler(self._fake_handler()):
+            _, h0, _ = self._req()
+            st_ims, _, _ = self._req(headers={'If-Modified-Since': future})
+            st, _, body = self._req(headers={'If-None-Match': '"nope"',
+                                             'If-Modified-Since': future})
+        self.assertEqual(st_ims, 304)            # IMS alone would have hit
+        self.assertEqual(st, 200)                # INM mismatch fully ignores it
+        self.assertTrue(body)
+        self.assertEqual(
+            len(ET.fromstring(body).findall('./channel/item')), 1)
+
+    def test_t57_gzip_304_no_content_encoding_and_etag_independent(self):
+        big = [dict(self.ITEM, title=f't{i}', guid=f'g{i}',
+                    description='x' * 120) for i in range(40)]
+        fixed = 'Thu, 01 Jan 2026 00:00:00 GMT'
+        self.assertTrue(srv._accepts_gzip('gzip'))
+        with self._patch_handler(self._fake_handler(big)), \
+             patch.object(utils_mod, 'formatdate', return_value=fixed):
+            st_id, h_id, body_id = self._req()
+            self.assertGreaterEqual(len(body_id), config.GZIP_MIN_BYTES)
+            self.assertNotIn('content-encoding', h_id)
+            etag = h_id['etag']
+            cache_mod.feed_cache.clear()
+            st_gz, h_gz, body_gz = self._req(
+                headers={'Accept-Encoding': 'gzip'})
+            st_304, h_304, body_304 = self._req(
+                headers={'Accept-Encoding': 'gzip',
+                         'If-None-Match': etag})
+        self.assertEqual((st_id, st_gz), (200, 200))
+        self.assertEqual(h_gz['etag'], etag)     # encoding-independent label
+        self.assertEqual(gzip.decompress(body_gz), body_id)
+        self.assertEqual(st_304, 304)
+        self.assertEqual(body_304, b'')
+        self.assertNotIn('content-encoding', h_304)
+
+    def test_t58_ttl_output_position_boundaries_and_guard(self):
+        xml = utils_mod.generate_rss('T', 'L', 'D', [], feed_url='u', ttl=1)
+        self.assertIn('<ttl>1</ttl>', xml)
+        self.assertLess(xml.index('</lastBuildDate>'),
+                        xml.index('<ttl>1</ttl>'))
+        self.assertLess(xml.index('<ttl>1</ttl>'), xml.index('<atom:link'))
+        self.assertNotIn('<ttl>', utils_mod.generate_rss(
+            'T', 'L', 'D', [], feed_url='u'))
+        for bad in (0, -1, -5):
+            self.assertNotIn('<ttl', utils_mod.generate_rss(
+                'T', 'L', 'D', [], feed_url='u', ttl=bad))
+        expected = {0: 1, -1: 1, 59: 1, 60: 1, 61: 2, 180: 3, 181: 4}
+        for raw, minutes in expected.items():
+            with patch.object(srv, 'cache_policy', return_value={'ttl': raw}):
+                self.assertEqual(srv._feed_ttl_minutes(), minutes, raw)
+
+    def test_t59_degraded_feed_no_false_304_and_ims_disabled(self):
+        def boom(feed_url=None):
+            raise FetchError('upstream_error', url='x')
+
+        future = formatdate(time.time() + 3600, usegmt=True)
+        with self._patch_handler(self._fake_handler()):
+            _, h_ok, _ = self._req()
+            ok_etag = h_ok['etag']
+            cache_mod.feed_cache.clear()
+            with self._patch_handler(boom):
+                st, h_err, _ = self._req(
+                    headers={'If-None-Match': ok_etag})
+                err_etag = h_err['etag']
+                st_replay, _, replay_body = self._req(
+                    headers={'If-None-Match': err_etag})
+                st_ims, h_ims, body_ims = self._req(
+                    headers={'If-Modified-Since': future})
+        self.assertEqual(st, 200)                # distinct representation
+        self.assertNotEqual(err_etag, ok_etag)
+        self.assertNotIn('last-modified', h_err)
+        self.assertEqual(st_replay, 304)         # same error repr replays 304
+        self.assertEqual(replay_body, b'')
+        self.assertEqual(st_ims, 200)
+        self.assertNotIn('last-modified', h_ims)
+        self.assertTrue(body_ims)
+
+    def test_t61_scope_negative_static_and_json_never_304(self):
+        future = formatdate(time.time() + 3600, usegmt=True)
+        cond = {'If-None-Match': '"whatever"', 'If-Modified-Since': future}
+        with patch.object(srv, 'PUBLIC_BASE_URL', ''), \
+             patch.object(srv, 'handle_margin', return_value={}), \
+             patch.object(srv, 'build_health_payload',
+                          return_value={'status': 'ok'}):
+            for path in ('/opml.xml', '/', '/market/margin?market=99',
+                         '/healthz'):
+                base_status, _, base_body = self._req(path=path)
+                st, hdrs, body = self._req(path=path, headers=cond)
+                self.assertEqual(base_status, 200, path)
+                self.assertEqual(st, 200, path)          # never a 304
+                self.assertNotIn('etag', hdrs, path)     # BR-SRV-36/44
+                if path in ('/opml.xml', '/'):
+                    self.assertEqual(base_body, body, path)
+
+    def test_t62_200_and_304_headers_diff_verbatim(self):
+        for base_url in ('', 'https://feeds.example.com'):
+            cache_mod.feed_cache.clear()
+            with self._patch_handler(self._fake_handler()), \
+                 patch.object(srv, 'PUBLIC_BASE_URL', base_url):
+                st200, h200, body200 = self._req()
+                st304, h304, body304 = self._req(
+                    headers={'If-None-Match': h200['etag']})
+            self.assertEqual(st200, 200, base_url)
+            self.assertEqual(st304, 304, base_url)
+            for name in ('etag', 'last-modified', 'cache-control', 'vary'):
+                self.assertEqual(h200[name], h304[name], (base_url, name))
+            self.assertEqual(body304, b'', base_url)
+            for absent in ('content-type', 'content-length',
+                           'content-encoding'):
+                self.assertNotIn(absent, h304, (base_url, absent))
+            self.assertTrue(body200, base_url)
 
 
 if __name__ == '__main__':

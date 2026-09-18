@@ -250,6 +250,39 @@ class FeedCacheTests(_CacheTestCase):
         self.assertEqual(list(cache_mod.feed_cache), ['/feed/b', '/feed/a'])
 
 
+class FeedEntryAccessorTests(_CacheTestCase):
+    """SRV-T60 / T-CACHE-32: `feed_cache_get_entry` contract (BR-CACHE-32) and
+    the shallow-copy isolation the RSS Last-Modified time source relies on."""
+
+    def test_srv_t60_feed_cache_get_entry_contract(self):
+        self.assertIsNone(cache_mod.feed_cache_get_entry('/p'))       # cold
+        cache_mod.feed_cache_put('/p', '<x/>', 30)
+        entry = cache_mod.feed_cache_get_entry('/p')
+        self.assertEqual(set(entry),
+                         {'xml', 'time', 'last_access', 'expires_at'})
+        self.assertEqual(entry['xml'], '<x/>')
+        self.assertIsInstance(entry['time'], float)      # Last-Modified source
+        entry['xml'] = 'z'                               # value-side copy
+        self.assertEqual(cache_mod.feed_cache_get_entry('/p')['xml'], '<x/>')
+        cache_mod.feed_cache_put('/p2', '<y/>', 0)       # ttl=0 ⇒ expired
+        self.assertIsNone(cache_mod.feed_cache_get_entry('/p2'))
+        self.assertEqual(cache_mod.feed_cache_get('/p'), '<x/>')      # compat
+
+    def test_t_cache_32_shallow_copy_isolates_the_container(self):
+        cache_mod.feed_cache_put('/p', '<x/>', 30)
+        entry = cache_mod.feed_cache_get_entry('/p')
+        stored_before = dict(cache_mod.feed_cache['/p'])
+        entry['xml'] = 'z'
+        entry['time'] = 0
+        entry['last_access'] = 0
+        entry['expires_at'] = 0
+        self.assertEqual(cache_mod.feed_cache['/p'], stored_before)
+        again = cache_mod.feed_cache_get_entry('/p')
+        self.assertEqual(again['xml'], '<x/>')
+        self.assertEqual(again['time'], stored_before['time'])
+        self.assertEqual(again['expires_at'], stored_before['expires_at'])
+
+
 # ── negative cache / half-open probe ───────────────────────────────────────
 
 class NegativeCacheTests(_CacheTestCase):

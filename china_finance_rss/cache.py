@@ -903,15 +903,35 @@ _feed_fetch_locks_lock = threading.Lock()
 _last_feed_sweep = 0.0
 
 
-def feed_cache_get(path):
-    """Return the cached feed XML (refreshing LRU), or None on miss/expiry."""
+def feed_cache_get_entry(path):
+    """Return a shallow copy of the fresh feed entry, or None on miss/expiry.
+
+    BR-CACHE-32: same source as `feed_cache_get` — same `_feed_cache_lock`,
+    same `now < expires_at` rule and same LRU side effects (`move_to_end` +
+    `last_access`, exactly once).  The copy keeps the caller from mutating the
+    stored entry outside the lock.  `entry['time']` is the `feed_cache_put`
+    write time and is the authoritative Last-Modified source (server.md
+    BR-SRV-38).
+    """
     with _feed_cache_lock:
         entry = feed_cache.get(path)
         if not entry or time.time() >= entry.get('expires_at', 0):
             return None
         feed_cache.move_to_end(path)
         entry['last_access'] = time.time()
-        return entry['xml']
+        return {'xml': entry['xml'], 'time': entry['time'],
+                'last_access': entry['last_access'],
+                'expires_at': entry['expires_at']}
+
+
+def feed_cache_get(path):
+    """Return the cached feed XML (refreshing LRU), or None on miss/expiry.
+
+    Thin wrapper over `feed_cache_get_entry` (BR-CACHE-32): the public
+    signature and semantics are unchanged.
+    """
+    entry = feed_cache_get_entry(path)
+    return entry['xml'] if entry is not None else None
 
 
 def feed_cache_put(path, xml, ttl):
