@@ -34,7 +34,7 @@ description: 全流程软件工程编排器。五级强度自适配：🐛轻量
 
 ## 角色边界（不可协商，先于一切 Phase）
 
-**这是编排器的第一性纪律：编排 = 分派 + 验收，不是自己动手。** 你的价值在判断与调度。亲自编辑产物会绕开评审、丢失调用日志，让 pipeline 退化成"一个人闷头干"。
+**这是编排器的第一性纪律：编排 = 分派 + 验收，不是自己动手。** 你的价值在判断与调度。亲自编辑 **subagent 产出物**会绕开评审、丢失调用日志，让 pipeline 退化成"一个人闷头干"。
 
 **【主 agent 只能做这些，穷尽】** 以下之外的一切写操作都不属于主 agent：
 
@@ -45,24 +45,39 @@ description: 全流程软件工程编排器。五级强度自适配：🐛轻量
 - **收集 subagent 的 `>>标记`**（`>>SCOPE:` / `>>DOC_SYNC:` / `>>SIDE-EFFECT:` / `>>PROJECT:` / `>>FIXED:`）
 - **运行 `mirror-log.sh`**（镜像回写，编排器专属动作）
 - **git 查看**（status / log / diff / show 等只读命令）
+- **编辑编排层自有资产**（契约与运维 / 编排资产，见下方专节；可直改，但每次必留痕）
 
-> **判据：凡产出"要留给下游 / 要进仓库"的内容，都不属于这些。** 一旦动作会新增或改写下游要消费、仓库要提交的文件，就超出了主 agent 边界。
+> **判据：凡"留给下游消费"的产物（subagent 产出物），都不属于这些。** 一旦动作会新增或改写 subagent 产出物，就超出了主 agent 边界。**唯一例外是编排层自有资产**——它由编排层自己拥有与维护，可直改，但必须按下方专节留痕。
 
-**【必须 dispatch，无规模豁免】** 任何对仓库产出文件的 write/edit，都必须 dispatch 对应 subagent：
+**【必须 dispatch：仅限 subagent 产出物，无规模豁免】** 只有下列 **subagent 产出物**的 write/edit 才必须 dispatch 对应 subagent：
 
-- 代码、测试、文档、脚本、`Dockerfile`、`docker-compose.yml`、`.github/**`、`requirements.txt`、`README`/deploy 文档
-- **"就一行修复""顺手补个 README""改个 Dockerfile"一律不豁免**——规模小不是理由，**小改动恰恰最容易被跳过评审与日志**。
-- `explore` / `general` 仅限**只读探查**，不是写产出文件的通道。
+- 业务代码 `china_finance_rss/**`、测试 `tests/**` → `code-developer` / `tester`
+- 详设 `doc/detailed/**` → `task-decomposer`；评审报告 `doc/review/**` → `review-expert` / `code-reviewer`
+- 测试文档 `doc/tester/**` → `tester`；需求 `doc/prd/**` → `prd-writer`
+- 架构建档 `doc/arch/**` + `tech-stack.json` → `system-architect`
+- **"就一行修复""顺手补个测试""顺手改段业务代码注释"一律不豁免**——规模小不是理由，**小改动恰恰最容易被跳过评审与日志**。
+- `explore` / `general` 恒为**只读**，不得承担实现 / 修复 / 验证，不是写产出文件的通道。
+
+**【编排层自有资产 → 可直改，但须留痕】** 以下文件由**编排层拥有与维护**（归属权威来源：`.opencode/project/profile.md` 的「资产归属」节），**不必**派 subagent，编排层可自己编辑：
+
+- **编排资产**：`_MEMORY_CACHE.md`、`.opencode/project/**`、`.opencode/scripts/**`
+- **契约与运维**：`API.md`、`README.md`、`AGENTS.md`、`Dockerfile`、`docker-compose.yml`、`doc/deploy/**`、`scripts/**`、`.github/**`、`requirements.txt`、`.gitignore`
+
+两条约束（缺一不可）：
+
+- **a) 留痕：** 对上述文件的**每次实际编辑**，必须在 `_MEMORY_CACHE.md` 的【决策记录】追加一行，说明"本项为何由编排层直改而非 dispatch"（一句话即可）。
+- **b) 不得借此绕开 subagent 产出物：** 若改动**含义上属于**某 subagent 的产出（例如顺手"改进"业务代码注释、补测试、改详设），**仍必须 dispatch**——**"文件在谁的白名单里"永远不能改变"这是谁的产出"。**
+- **`opencode.json` 是治理档，任何 agent（含编排层）都不得修改，仅用户可改**（防止 agent 自我提权）。
 
 **【进入任何编辑动作前的前置检查】** 动手前先答三问：
 
-1. 我要动的文件是**产出物**吗？（下游要消费 / 仓库要提交）
+1. 这是 **subagent 产出物**，还是 **编排层自有资产**？（前者 → **必须 dispatch**；后者 → **可直改但须留痕**）
 2. 本 Phase 有对应的 **dispatch 记录**吗？
 3. 我在做**"验证 / 门禁"**，还是在做**"实现 / 修复 / 补文档"**？
 
-**答不清 → 停，先 dispatch。** 宁可多派一次 subagent，也不要亲手改产物。
+**答不清 / 归属可疑 → 停，按 subagent 产出物处理（先 dispatch）。** 宁可多派一次 subagent，也不要亲手改 subagent 产出物。
 
-**【与权限配置的关系】** 本仓 `opencode.json` 中 `pipeline-orchestrator` 的 edit/write 白名单**实际包含** `API.md`、`README.md`、`AGENTS.md`、`Dockerfile`、`docker-compose.yml`、`doc/deploy/**`、`scripts/**`、`.github/**`、`requirements.txt`、`.gitignore`、`_MEMORY_CACHE.md`、`.opencode/project/**`、`.opencode/scripts/**`。因此**契约/运维文件的编辑权限虽在编排层，但仍应遵循"产出物必须 dispatch"的纪律；白名单是兜底而非许可**——它只保证编排器能维护自身资产（`_MEMORY_CACHE.md`、`.opencode/**`），不是主 agent 直接改产出物的通行证。
+**【与权限配置的关系】** 本仓 `opencode.json` 中 `pipeline-orchestrator` 的 edit/write 白名单**恰好覆盖编排层自有资产**（`_MEMORY_CACHE.md`、`.opencode/project/**`、`.opencode/scripts/**`、`API.md`、`README.md`、`AGENTS.md`、`Dockerfile`、`docker-compose.yml`、`doc/deploy/**`、`scripts/**`、`.github/**`、`requirements.txt`、`.gitignore`）——**白名单即"可直改"授权在配置层的落地，两者一一对应**。白名单**不含任何 subagent 产出物**（`china_finance_rss/**`、`tests/**`、`doc/**` 等），所以技术上也就无法直改 subagent 产出物。若未来白名单与 `profile.md` 的资产归属不一致，**以 `profile.md` 为准**，并按上节 b) 约束处理。
 
 ## 1. 分析输入
 
@@ -82,7 +97,7 @@ description: 全流程软件工程编排器。五级强度自适配：🐛轻量
 | 全新项目/跨模块重构 | 🔴 **全量** | **P1a** → **P1b** → **P1c** → **P2a** → **P2b** → **P3a** → **P3b** → **P5a** → **P5b**(含P7a) → **P6a** → **P6b** → **P6c** → P6d → P7b → **P8** |
 | 纯信息查询 | — | 直接回答，不触发 pipeline |
 
-> **粗体 = subagent 执行，普通 = 主 agent 执行。** 产出文件的修改一律走 dispatch（边界见上「角色边界」节）；主 agent 的白名单仅用于 `_MEMORY_CACHE.md`、`.opencode/**` 等自身资产——**白名单是兜底而非许可**，不是直接编辑产出物的通行证。P6d curl/docker 验证属验收环节，主 agent 直接执行。
+> **粗体 = subagent 执行，普通 = 主 agent 执行。** 修改 **subagent 产出物**一律走 dispatch；**编排层自有资产**（契约与运维 / 编排资产，边界见上「角色边界」节中的专节）可由主 agent 直改，**但每次须在 `_MEMORY_CACHE.md`【决策记录】留痕**——主 agent 白名单只覆盖后者，不覆盖任何 subagent 产出物。P6d curl/docker 验证属验收环节，主 agent 直接执行。
 
 ## 2. 按照分析编排任务
 
@@ -348,7 +363,7 @@ modules: ... | endpoints: ...
 ## 最终清理
 
 1. **P8 对抗性盲审**（若序列含 P8）→ 通过（无 P0）或按 🅶/🅷 处理
-2a. **边界自审：** `git diff --name-only` 列出的每个产出物文件，都能在 `~/.opencode/history/` 找到对应 `log-skill.sh` 记录吗？主 agent 是否直接编辑过产物文件？不符 → 视为违规，补 dispatch 后重做该 Phase，不得交付。
+2a. **边界自审：** `git diff --name-only` 列出的每个 **subagent 产出物文件**（`china_finance_rss/**`、`tests/**`、`doc/**` 等，清单见「角色边界」节），都能在 `~/.opencode/history/` 找到对应 `log-skill.sh` 记录吗？主 agent 是否直接编辑过 **subagent 产出物**？不符 → 视为违规，补 dispatch 后重做该 Phase，不得交付。**编排层自有资产**（`_MEMORY_CACHE.md`、`.opencode/**`、`API.md`、`README.md`、`Dockerfile`、`docker-compose.yml` 等）**无需** `log-skill.sh` 记录，只核对直改是否已在 `_MEMORY_CACHE.md`【决策记录】留痕——**缺留痕才算违规**，不得把编排层直改误报为越权。
 2. `update_summary(completed)` → `check-audit.sh clean` → 删临时文件 → 输出产出物汇总
 
 若 P8 发现非阻断问题，在摘要中注明：`⚡ P8 对抗性审查发现 {N} 个非阻断问题: {列举}`
