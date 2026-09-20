@@ -1,6 +1,6 @@
 # 短线交易财经数据服务 — 高效/准确/稳定优化专项架构建档（SAD）
 
-> **文档编号** SAD-2026-P6C-01 · **版本** v1.19 · **状态** 待复审
+> **文档编号** SAD-2026-P6C-01 · **版本** v1.20 · **状态** 待复审
 > **日期** 2026-09-20 · **产出** system-architect
 > **上游输入** PRD `doc/prd/perf-stability-optimization.md`（**v0.10，36 AC**（高效 10 / 准确 14 / 稳定 12）/ R1-R20；SAD v1.8 承接的 RSS 条件请求 **AC-A13**、v1.9 承接 **AC-A14**、v1.10 承接 **AC-S12** 由 prd-writer 并行落号，落号对齐见 §8 / §9.11）
 > **版本引用时点约定（v1.13）**：本档「上游输入 / 接口权威 / 文末承接」各栏所列版本 = **本档最后一次同步时点的快照**；被引文档的**权威版本以其自身头部为准**——故该栏**落后一版不属漂移、无需每次追平**；**内容以被引文档为准，此栏仅用于定位**。引用具体条款 / BR / 取值时必须回查被引文档正文，**不得以本栏版本号替代核验**。
@@ -30,6 +30,8 @@
 > **修订依据（v1.18）** **P8-r1 遗留修复轮契约同步（`'env:<NAME>'` 注册同源 · BR-CFG-10 收口 · P1-2 取舍入档）**——本轮以**代码为准**回写 `doc/arch/SAD.md` + `doc/arch/tech-stack.json`，范围严格限定 `doc/arch/**`（**未改代码/测试/其他文档**）。背景：v1.15 引入的 `'env:<NAME>'` 池上限 spec 在 `_resolve_pool_max` 中**每次调用**执行 `int(globals()[name])` ⇒ `cache_policy` 的运行期结果**依赖可变模块全局**，与同批文档自订的 **BR-CFG-10「`DOMAIN_MATRIX` 与 env 常量运行期只读、`cache_policy` 纯函数」正面冲突**（且 env 值本身在导入期冻结，热替换对生产无新增能力）。修复（代码已落地、**518 用例全绿**，517 → 518）：① **`'env:<NAME>'` 改由导入期冻结的注册映射解析**——`config._POOL_MAX_ENVS = {'MAX_QUOTE_POOL': 1000, 'MAX_FUNDFLOW_POOL': 1000, 'MAX_TIMELINE_POOL': 500}`（**键=NAME、值=冻结值，名单与取值同源**；新增 env 只改映射一处），`cache_policy` **只读该映射、不依赖可变模块全局** ⇒ **运行期重绑定 `config.MAX_*_POOL` 不再影响 `cache_policy`**（此前会）；**未注册 NAME 一律 `ValueError`**（此前经 `globals()` 对"白名单内但未定义"的名字可能 `KeyError`——与 `KeyError(domain)` 契约撞型且会被 `_prefetch_loop` 的 `except Exception` 静默吞掉）。② **测试 hermetic 化**：CFG-T19 改**字面量锁定**（不再靠原地重绑定模块全局证明联动）＋新增 frozen / `ValueError` 用例；删除与 `test_cache_true_lru_eviction` 重复的降级用例，新增"**被 LRU 淘汰的码读路径为 miss 而非陈旧值**"用例 ⇒ 计数 **517 → 518**（属工程卫生收口，**无对外契约变更**）。③ **P1-2 设计取舍入档**：**不设 `pool_max ≤ cache_max` 强制护栏**——`pool_max`（prefetch 轮转覆盖码数）与 `cache_max`（内存界）是**两个独立上限**，前者大于后者只导致**回转/回源浪费**、非正确性问题（`depth`/`f10`/`announcement` 现状即 `pool_max`=2000 > `cache_max`=500；3 个 PRF-MEM-01 收缩域当前 `pool_max == cache_max`）。落点：头部 / §2.1（v1.15 更正注就地更正"调用期解析"措辞）/ §2.2（三层缓存表 ① 行 + **新增独立上限注**）/ §3 config.py 行 / §4.3（池上限行 + 解耦结论）/ §6 / §7.2 AR-18（残余补测试 hermetic 化 + env 注册同源）/ §9 引言 / **§9.18（新增块）**；`tech-stack.json` **version: 1.17 → 1.18**（`generatedAt` 2026-09-20 不变）。**无对外契约（API/字段/头项/状态码）变更；只增不删编号；历史块（v1.15 修订依据行 / §9.15）原文保留、其"调用期"措辞在新块标注已更正。**
 
 > **修订依据（v1.19）** **PRF-LAT-02 契约同步（`margin` 终端缓存 · 计数器语义对齐 · 以代码为准）**——本轮以**代码为准**回写 `doc/arch/SAD.md` + `doc/arch/tech-stack.json`，范围严格限定 `doc/arch/**`（**未改代码/测试/其他文档**）。**动机（实测）**：`margin` 原先**无终端缓存**，每次请求对共享 URL 缓存的**文本**重复 `json.loads` + `_transform_margin`（热路径 P50 ≈**8–9ms**，为 AC-E4 聚合 P99 的主要贡献）；且 `upstream_fetch_total{margin}` 在 URL 缓存命中时**仍 +1**，与其它域"**仅终端 miss 才 +1**"的语义不一致、误导回源率判断。**代码已落地（525 用例全绿，519 → 525）**：① **`config.py`** `DOMAIN_MATRIX['margin']` 第 5 格 `cache_max` 由 `'n/a'` → **`8`**，`margin` **移出「URL 缓存独占域」集合**——现行集合 = **`plate` / `news_url` / `longhu`**；② **`market_api.py`** 新增**模块内终端缓存**（`_margin_cache` `OrderedDict` + `_margin_cache_ts` + 独立 `_margin_cache_lock`，上限取 `cache_policy('margin')['cache_max']=8`，**真 LRU** `move_to_end`/`popitem(last=False)`）；`fetch_margin` **命中直接返回**（不 `json.loads`、不 transform、不计数、不触网），**仅 `latest is not None`** 的可用结果才写缓存（失败 / 空数据**不缓存**）；`upstream_fetch_total{margin}` 改为**仅终端 miss 时 +1**（与 `stock` 域口径对齐）。落点：头部 / §2.1（矩阵 `margin` 行 + 示例 + v1.4 更正注补 ★ v1.19 更正）/ §2.2（R-3 补 URL-cache-only 集合及判据）/ §2.6（healthz `policy` 示例补 `margin`）/ §3（config.py 行 + market_api 行）/ §4.3（新增 `margin` 终端缓存行 + 内存分项「可忽略项」）/ §6 / **§9.19（新增块）**；`tech-stack.json` **version: 1.18 → 1.19**（`generatedAt` 2026-09-20 不变）。**无对外契约（API / 字段 / 头项 / 状态码）变更**（`/market/margin` 响应形状与 `_error` 降级语义逐字不变）；**只增不删编号**；历史块（§2.1 v1.4 更正注 / §9.4 D-2）原文保留，其"`margin` = URL 缓存独占"口径在新块标注**已更正**。
+
+> **修订依据（v1.20）** **云上部署配置下发运行时调优登记（PRF-MEM-02 + PRF-LAT-01 落地 · 只改文档）**——编排层已把两项**已 A/B 证实**的运行时调优下发到两份云上部署配置（`doc/deploy/docker-compose.aliyun-2c2g.yml`（阿里云 2C2G 容灾节点，`MAX_WORKERS=20`/`MAX_INFLIGHT=40`/`mem_limit=1.5g`）与 `doc/deploy/docker-compose.ucloud-2c8g.yml`（UCloud 2C8G 主节点，`MAX_WORKERS=30`/`MAX_INFLIGHT=60`/`mem_limit=3g`），两份注释已写明证据与 `SAD §7.2 AR-18 / §9.17`、`_PROGRESS.md B-7` 指针），本轮把该**交付事实**只增不删地登记进本档，范围严格限定 `doc/arch/SAD.md` + `doc/arch/tech-stack.json`。**下发内容（两份相同）**：① **`MALLOC_ARENA_MAX=2`**（PRF-MEM-02，原 `docker-compose.yml` 已含）——A/B 实测（run 20260920-113125，基线 run 20260920-110805）：python `VmRSS` **1.008GiB→0.772GiB（−248MiB）**、`VmSize` **8.96GB→1.15GB**、匿名 `rw-p` 映射 **300→166**、容器稳态 **1.41GiB(93.98%)→1.259GiB(83.95%)**；② **`HTTP_POOL_MAX_PER_HOST=48`**（PRF-LAT-01，原 `docker-compose.yml` 已含）——A/B 实测（run 20260920-142456，基线 run 20260920-140901）：fundflow tier1000 avg **3.00→1.43s（−52%）**、basic_info **4.08→3.08s（−25%）**、ok_rate **100%**，**内存无变化**；**上游在 48 并发下未观测到限流**；**代码默认仍为 24，48 属部署侧 env 覆盖**（`config.md` 契约默认值 **24 不变**）。**取值口径**：两份均取 **48**（=已实证值），满足双约束 ① 池 ≥ `BATCH_MAX_WORKERS`(=20)（**AR-14 硬约束**）② 池 ≥ `MAX_WORKERS`(20 / 30)。**UCloud 的 `MAX_INFLIGHT=60 > 48`**，超出部分按设计走 **ephemeral 短连接**（**BR-CACHE-27**：不排队、不阻塞）；**升到 60（= `MAX_INFLIGHT`）需先核上游 60 并发限流 + 单独 A/B，本轮不取** ⇒ 登记为**未验证候选**（勿当结论）。**本轮无新实验**——全部数字引自上述**既有 run**。① **§9.17 待办行收口**：`docker-compose.yml` 的 `MALLOC_ARENA_MAX=2` 落地核验由「待办」改**已落地**、落地面更正为**三份 compose 全部落地**；② **§7.2 AR-18 缓解 ①** 追加「云上两份配置已同步落地」（**AR-18 状态仍为已定位 + 已缓解，定位/缓解结论不变**）；③ **新增 §9.20 记录块**（本块指针）；④ `tech-stack.json` **version: 1.19 → 1.20**（`generatedAt` 2026-09-20 不变）、`infrastructure.deployment` 追加云上两份配置登记。**无对外契约（API 字段 / 头项 / 状态码）变更；只增不删编号；未改代码 / 测试 / 详设 / PRD / `docker-compose.yml` / `.opencode`（`doc/deploy/**` 由编排层改、本档只登记）。**
 
 > **硬约束** Python 3 标准库零依赖 · 无前端 · 无外部存储 · 不改技术栈
 > **定位** 优化专项架构（非新建系统）：只做**架构级改造与契约收口**，不新增业务功能、不改路由与 API 签名
@@ -1213,7 +1215,7 @@ MAX_CODES_PER_SUB=200 只是**单组**上限，MAX_DEDUP_CODES=2000 才是**活�
 
 > ⚠️ 既有依赖说明：`cdp_engine.execute_js()` 内 `import websocket` 为**函数内延迟导入**，仅 CDP 模式使用；本架构不改该状态，且**不将其提升为硬依赖**。
 
-**tech-stack.json 已更新于 `doc/arch/tech-stack.json`（**v1.19**；★ v1.19 PRF-LAT-02 仅版本号联动——`margin` 终端缓存（`cache_max=8`）属**模块内实现口径**，权威在 `config.py` 与 §2.1/§2.2/§4.3，`tech-stack.json` 无该口径可同步；v1.9–v1.11 的 `backend.cache` / `namingRules` / `architectureRules.metrics` 内容变更见 §9.9–§9.11；**v1.14/v1.15/v1.16/v1.18 仅版本号联动**——PRF-MEM-01 的 `pool_max`/`cache_max` 数值与**来源**权威在 `config.py` 与 SAD §2.1/§2.2/§4.3（v1.18 的 `_POOL_MAX_ENVS` **注册同源（导入期冻结）**与「`pool_max`/`cache_max` 独立上限」取舍同属该口径），`tech-stack.json` 无该口径可同步；**v1.17：`infrastructure.deployment` 新增容器运行时调优登记 `MALLOC_ARENA_MAX=2`（PRF-MEM-02）**，见 §9.14/§9.15/§9.16/§9.17/§9.18/§9.19）**：含 `architectureRules`——`importRestrictions.denylist` 固化"零第三方库"红线；`allowlist` 补入 `websocket`（仅函数内延迟导入，修 P2-7）；`layerIsolation`/`fileStructure` 与 §2.6/§3 的模块划分一致，供 `code-developer` 自验与 `check-arch-compliance.sh` 校验。**帧计费（`_Frame`/refs/`stream_queue_bytes`）归 stream 层，cache.py 不得承载**——由现有 `layerIsolation`（cache.py 禁 import stream/server/stock_api/market_api）覆盖；**feed 缓存机制归 cache 层、`socket` 已在 allowlist**（D-3）；**v1.7：HTTP 连接池/DNS 缓存同属 cache 层**（仍是 stdlib `http.client`/`socket`，不新增依赖）。
+**tech-stack.json 已更新于 `doc/arch/tech-stack.json`（**v1.20**；★ v1.20 云上部署配置下发运行时调优——`infrastructure.deployment` 追加云上两份配置登记（`MALLOC_ARENA_MAX=2` 三配置齐 + `HTTP_POOL_MAX_PER_HOST=48` 部署侧覆盖、**代码默认 24 不变**）；★ v1.19 PRF-LAT-02 仅版本号联动——`margin` 终端缓存（`cache_max=8`）属**模块内实现口径**，权威在 `config.py` 与 §2.1/§2.2/§4.3，`tech-stack.json` 无该口径可同步；v1.9–v1.11 的 `backend.cache` / `namingRules` / `architectureRules.metrics` 内容变更见 §9.9–§9.11；**v1.14/v1.15/v1.16/v1.18 仅版本号联动**——PRF-MEM-01 的 `pool_max`/`cache_max` 数值与**来源**权威在 `config.py` 与 SAD §2.1/§2.2/§4.3（v1.18 的 `_POOL_MAX_ENVS` **注册同源（导入期冻结）**与「`pool_max`/`cache_max` 独立上限」取舍同属该口径），`tech-stack.json` 无该口径可同步；**v1.17：`infrastructure.deployment` 新增容器运行时调优登记 `MALLOC_ARENA_MAX=2`（PRF-MEM-02）**，见 §9.14/§9.15/§9.16/§9.17/§9.18/§9.19）**：含 `architectureRules`——`importRestrictions.denylist` 固化"零第三方库"红线；`allowlist` 补入 `websocket`（仅函数内延迟导入，修 P2-7）；`layerIsolation`/`fileStructure` 与 §2.6/§3 的模块划分一致，供 `code-developer` 自验与 `check-arch-compliance.sh` 校验。**帧计费（`_Frame`/refs/`stream_queue_bytes`）归 stream 层，cache.py 不得承载**——由现有 `layerIsolation`（cache.py 禁 import stream/server/stock_api/market_api）覆盖；**feed 缓存机制归 cache 层、`socket` 已在 allowlist**（D-3）；**v1.7：HTTP 连接池/DNS 缓存同属 cache 层**（仍是 stdlib `http.client`/`socket`，不新增依赖）。
 
 **v1.4 对 tech-stack.json 的两处实质变更（审计实测得到，非版本号联动）**：
 1. **`allowlist` = 实测 import 闭包**。逐模块扫描 `china_finance_rss/*.py` 的模块级 import 后，`allowlist` 遗漏了 **`hashlib` / `html` / `xml`**（三者均来自 `utils.py`：`cls_sign_params` 的 `hashlib`、HTML 实体反转义的 `html.unescape`、RSS/OPML 生成的 `xml.etree.ElementTree`）。它们是**标准库**，缺失会让 `check-arch-compliance.sh` 对 `utils.py` 报假阳性。同时 `itertools` 在包内**无任何引用**（保留无害，已标注为历史项）。`websocket` 仍是唯一"函数内延迟导入"的特例。
@@ -1290,7 +1292,7 @@ MAX_CODES_PER_SUB=200 只是**单组**上限，MAX_DEDUP_CODES=2000 才是**活�
 | **AR-15（v1.7 新）** | **上游"HTTP 200 + 空壳"错误语义**：x-quote 对错误 `secu_code` 拼写返回 `200 + code:200` 的空壳（basic 全 null / volume 空 `data`），若取数只信 `code == 200`，会把空壳**缓存并推流**为"成功但全空"的行情（北交所历史症状） | 中 | ① 关键字段非空校验（`_basic_info_is_valid` 要求 `secu_name`/`last_px` 至少一个非空，否则 `upstream_error`）；② `depth` 空 `data`/全 0 ⇒ `None`（不伪造）；③ 线路拼写经 `upstream_secu_code` 单一权威（ADR-020）；`upstream_fail_total{upstream_error}` 可观测 |
 | **AR-16（v1.8 新；★ v1.9 / F1 修订）** | **RSS 条件请求的已登记语义取舍（v1.9 由 2 项缩小为 1 项）**：① **仅 `<pubDate>` 变化**（上游真实更正 item 发布时间）⇒ ETag 不变 ⇒ 下游最多持旧副本至下一次真内容变化 / TTL 重生成。**② v1.9 修订——原"`Last-Modified` = 缓存写入时刻 ⇒ 仅带 IMS 的客户端跨 TTL 必得 200（完整重取）"的取舍已消除**：`Last-Modified` 现表示**最后一次变更的时刻**（feed 条目承载 `fingerprint`（与 ETag 同源）与 `last_modified`；指纹未变则跨 TTL 重生成**继承**同一 `last_modified`），不变式 **`ETag` 变 ⟺ `Last-Modified` 前进** ⇒ **IMS-only 与 INM-only 客户端跨 TTL 行为等价**（指纹未变 ⇒ 304）。**残留（已登记的可接受降级）**：无上一条目（首次 / LRU 淘汰 / 已 sweep）⇒ `last_modified` 取本次写入时刻（一次性 200 后恢复 304）；降级体 `last_modified=None` ⇒ 不发头、IMS 不可评估 | 低 | ① `pubDate` 在 3/5 feed 上是"解析失败回落"，纳入哈希会使条件请求必然失效；其变化通常伴随 title/description/新 item 等真内容变化（漏报面极小）；item 身份由 `<guid>` 承载。② **`ETag` 变 ⟺ `Last-Modified` 前进**（同源 `fingerprint`）是唯一可依赖的不变式；残留降级仅在条目消失/降级时出现，恢复后自动回到 304。**两条均登记 N4**（v1.9：语义收紧**不新增对外头项**；原"IMS-only 完整重取"表述作废） |
 | **AR-17（v1.8 新）** | **ETag 规范化对 `generate_rss` 输出形状的隐式依赖**：`count=1` 精确命中 channel 首个 `<lastBuildDate>`/`<ttl>` 的前提是——两者在 `generate_rss` 中**结构上先于 items**、其值由 `formatdate` 产出、且 `escape_xml` 使 item 字段不可能注入字面同名元素。该前提**无断言/护栏**：若将来重排 channel 元素、或 item 级出现同名元素、或改为直接产出 canonical 串，投影语义会**静默改变**（可能退化为误 200 或误 304） | 中 | ① `_feed_etag` 保持**纯函数 + 不读时钟/缓存**，单测以"仅 `<pubDate>` 不同 ⇒ ETag 相同"的纯函数断言 + 三 feed handler 层受控时钟断言钉死（`SRV-T52b`）；② 若 `generate_rss` 结构调整，**必须**连带复核 `_LASTBUILDDATE_RE`/`_RSS_TTL_RE`/`_PUBDATE_RE` 三正则；③ 更稳的收敛路径是让 `generate_rss` 直接产出 canonical 串（评审 P1-01 备选②），但那属体改动、须编排层批准 |
-| **AR-18（v1.16 新；★ v1.17 状态推进）** | **「缓存上界 ≠ 进程 RSS」——内存账目缺口 ≈750MB**：SAD §4.3 推导的**已知缓存项**上界 ≈**278MB**，而 PRF-MEM-01 实测 python 进程 RSS **`1.012GiB`**（收缩后），二者相差 **≈750MB**；§4.3 账目**只覆盖已知缓存项、未覆盖分配器（glibc arena）/CDP/运行时开销**（**CR-01 早已预警，现被实测证实**）。由此 **「调小 `cache_max` ⇒ 进程内存线性下降」的推断不成立**（v1.14→v1.16 实测：终端缓存收缩按原始体积反推 ≈92MB，仅兑现 **≈83MiB** 净收益）。**★ v1.17 状态 = 已定位 + 已缓解**：**主因 = glibc per-thread arena 碎片**（A/B 实测 `MALLOC_ARENA_MAX=2`，run 20260920-113125：python `1.012 → 0.772GiB`（−248MiB）、`VmSize` 8.96 → 1.15GB（−87%）、匿名 `rw-p` 300 → 166、容器 `1.41 → 1.259GiB = 83.95%`；机制 = 33 线程 × 默认上限 `8 × ncores`，每 arena 预留 64MB VA 且长期不归还 OS，`RssAnon` 占 98% / `RssFile` 仅 14.5MB 佐证）；**且 v1.16 所列"共享 URL 缓存（解析后 Python 对象）"已被证伪**（`cache.py:851-866` 存**解码后 `str`**、2000 条仅**几十 MB**） | **高** | ① **已缓解 = 容器 env `MALLOC_ARENA_MAX=2`（PRF-MEM-02）**，见 `docker-compose.yml` / `tech-stack.json` `infrastructure.deployment`（−248MiB；**不改代码**）；② **残余** ≈ **终端缓存解析对象（~200MB）** ＋ 运行时/分配器残余，**仍未达 ~0.65GiB ⇒ 残余度量待后续**（按进程 cgroup 实测 RSS/PSS 分列）；**★ v1.18 附带收口**：PRF-MEM-01 修复轮的 `'env:<NAME>'` 来源已**注册同源（导入期冻结）** ＋ 测试 **hermetic 化**（不再靠原地重绑定 `config.MAX_*_POOL` 证明联动，BR-CFG-10）——属该专项的**工程卫生收口**，**AR-18 状态仍为「已定位 + 已缓解」**、定位/缓解结论不变；③ ~~共享 URL 缓存调优~~（上限/TTL/按域分区/紧凑表示）**本项已证伪、不再作为方向**；④ **内存账目口径更正**：§4.3 明确标注为「**已知缓存项上界**」，**禁止**当作进程总内存上界（§2.2 R-4 / §4.3 / §8 S9 同步）；⑤ 需按**进程 cgroup 实测**（RSS/PSS 分列）建立总账，**不得**再用 `Σ(cache_max × 单条体积)` 外推进程内存；⑥ AC-S9 24h 采样 + 重建部署后复测 |
+| **AR-18（v1.16 新；★ v1.17 状态推进）** | **「缓存上界 ≠ 进程 RSS」——内存账目缺口 ≈750MB**：SAD §4.3 推导的**已知缓存项**上界 ≈**278MB**，而 PRF-MEM-01 实测 python 进程 RSS **`1.012GiB`**（收缩后），二者相差 **≈750MB**；§4.3 账目**只覆盖已知缓存项、未覆盖分配器（glibc arena）/CDP/运行时开销**（**CR-01 早已预警，现被实测证实**）。由此 **「调小 `cache_max` ⇒ 进程内存线性下降」的推断不成立**（v1.14→v1.16 实测：终端缓存收缩按原始体积反推 ≈92MB，仅兑现 **≈83MiB** 净收益）。**★ v1.17 状态 = 已定位 + 已缓解**：**主因 = glibc per-thread arena 碎片**（A/B 实测 `MALLOC_ARENA_MAX=2`，run 20260920-113125：python `1.012 → 0.772GiB`（−248MiB）、`VmSize` 8.96 → 1.15GB（−87%）、匿名 `rw-p` 300 → 166、容器 `1.41 → 1.259GiB = 83.95%`；机制 = 33 线程 × 默认上限 `8 × ncores`，每 arena 预留 64MB VA 且长期不归还 OS，`RssAnon` 占 98% / `RssFile` 仅 14.5MB 佐证）；**且 v1.16 所列"共享 URL 缓存（解析后 Python 对象）"已被证伪**（`cache.py:851-866` 存**解码后 `str`**、2000 条仅**几十 MB**） | **高** | ① **已缓解 = 容器 env `MALLOC_ARENA_MAX=2`（PRF-MEM-02）**，见 `docker-compose.yml` / `tech-stack.json` `infrastructure.deployment`（−248MiB；**不改代码**）；**★ v1.20：云上两份部署配置已同步落地**——`doc/deploy/docker-compose.aliyun-2c2g.yml`（阿里云 2C2G，`MAX_WORKERS=20`/`MAX_INFLIGHT=40`）＋ `doc/deploy/docker-compose.ucloud-2c8g.yml`（UCloud 2C8G，`MAX_WORKERS=30`/`MAX_INFLIGHT=60`），即**三份 compose 全部落地**（落地事实、A/B 证据与取值口径见 **§9.20**）；**AR-18 状态仍为「已定位 + 已缓解」、定位/缓解结论不变**；② **残余** ≈ **终端缓存解析对象（~200MB）** ＋ 运行时/分配器残余，**仍未达 ~0.65GiB ⇒ 残余度量待后续**（按进程 cgroup 实测 RSS/PSS 分列）；**★ v1.18 附带收口**：PRF-MEM-01 修复轮的 `'env:<NAME>'` 来源已**注册同源（导入期冻结）** ＋ 测试 **hermetic 化**（不再靠原地重绑定 `config.MAX_*_POOL` 证明联动，BR-CFG-10）——属该专项的**工程卫生收口**，**AR-18 状态仍为「已定位 + 已缓解」**、定位/缓解结论不变；③ ~~共享 URL 缓存调优~~（上限/TTL/按域分区/紧凑表示）**本项已证伪、不再作为方向**；④ **内存账目口径更正**：§4.3 明确标注为「**已知缓存项上界**」，**禁止**当作进程总内存上界（§2.2 R-4 / §4.3 / §8 S9 同步）；⑤ 需按**进程 cgroup 实测**（RSS/PSS 分列）建立总账，**不得**再用 `Σ(cache_max × 单条体积)` 外推进程内存；⑥ AC-S9 24h 采样 + 重建部署后复测 |
 
 ### 7.3 设计假设（变更即需重评架构）
 
@@ -1411,6 +1413,8 @@ MAX_CODES_PER_SUB=200 只是**单组**上限，MAX_DEDUP_CODES=2000 才是**活�
 > **★ v1.18 更新**：**§9.18（v1.18，P8-r1 遗留修复轮契约同步）为最新口径**——把 v1.15 的 `'env:<NAME>'` 解析由"**调用期** `globals()`（每次 `cache_policy` 读可变模块全局）"更正为「**导入期冻结的注册映射 `_POOL_MAX_ENVS`**（键=NAME、值=冻结值，名单与取值同源）」：`cache_policy` **只读该映射、不依赖可变模块全局**（**BR-CFG-10**）、未注册 NAME 一律 `ValueError`（不再可能 `KeyError`）、**运行期重绑定 `config.MAX_*_POOL` 不再影响 `cache_policy`**；并登记 **P1-2 取舍**：**不设 `pool_max ≤ cache_max` 护栏**（两者为独立上限，`depth`/`f10`/`announcement` 现状即反例；超出仅致回转/回源浪费，非正确性问题）；**无设计变更、无对外契约变更**；冲突时以 **§9.18** 为准。历史 §9.1–§9.17 记录块**原文保留**（含 v1.15 修订依据行 / §9.15 的"调用期"措辞，已在新块标注更正）。
 
 > **★ v1.19 更新**：**§9.19（v1.19，PRF-LAT-02 契约同步）为最新口径**——`margin` 由「URL 缓存独占（`cache_max='n/a'`）」改为**模块内终端缓存 8 条**（`market_api._margin_cache`，真 LRU；命中免 `json.loads` + `_transform_margin`、**不计数**，仅 `latest is not None` 才写），`upstream_fetch_total{margin}` 收敛为**仅终端 miss +1**（与 `stock` 域口径对齐）；**URL-cache-only 域现行 = `plate`/`news_url`/`longhu`**；**无对外契约变更**（`/market/margin` 响应形状与 `_error` 降级语义不变）；冲突时以 **§9.19** 为准。历史 §9.1–§9.18 记录块**原文保留**（含 §2.1 v1.4 更正注 / §9.4 D-2 的"`margin` = URL 缓存独占"当时快照，已在新块标注更正）。
+
+> **★ v1.20 更新**：**§9.20（v1.20，云上部署配置下发运行时调优）为最新口径**——编排层把两项**已 A/B 证实**的运行时调优下发到两份云 compose（`doc/deploy/docker-compose.aliyun-2c2g.yml` / `doc/deploy/docker-compose.ucloud-2c8g.yml`）：**`MALLOC_ARENA_MAX=2`**（PRF-MEM-02，python `VmRSS` −248MiB，三份 compose 全部落地）与 **`HTTP_POOL_MAX_PER_HOST=48`**（PRF-LAT-01，fundflow avg −52%，**部署侧 env 覆盖、代码默认仍 24**）；§9.17 待办行已收口（落地面更正为**三份 compose 全部落地**）；**AR-18 状态仍为「已定位 + 已缓解」、定位/缓解结论不变**；UCloud 的 **60 为未验证候选**（勿当结论）；**仅登记交付事实、无设计变更、无对外契约变更**；冲突时以 **§9.20** 为准。历史 §9.1–§9.19 记录块**原文保留**。
 
 ### 9.1 v1.1（依据 REV-ARCH-20260915-001）
 
@@ -2196,7 +2200,7 @@ AR-6 校正后（供 P6c 校准）：`fundflow max(25,8)=25→8（×3.1）` · `
 | 1 | 变更日志登记「SAD PRF-MEM-02 归因纠偏 + arena 治理（AR-18 已定位 + 已缓解）」 | 契约同步（编排层） |
 | 2 | 残余内存（终端缓存解析对象 ~200MB + 运行时残余）**度量与后续专项**；内存目标仍未达 ~0.65GiB | 实测 + 后续架构（编排层） |
 | 3 | tier1000 `ok_rate` 89.6%→100% / `upstream_timeout` 123→317 **复测归因**（**单次观测、勿作结论**） | 实测（编排层） |
-| 4 | `docker-compose.yml` 的 `MALLOC_ARENA_MAX=2` 落地核验（本档无写权限） | 部署（编排层） |
+| 4 | `docker-compose.yml` 的 `MALLOC_ARENA_MAX=2` 落地核验（本档无写权限） | 部署（编排层）——**★ v1.20 收口：已落地**（2026-09-20）；落地面由「仅 `docker-compose.yml`」**更正为「三份 compose 全部落地」**：`docker-compose.yml`（本地/测试）+ `doc/deploy/docker-compose.aliyun-2c2g.yml` + `doc/deploy/docker-compose.ucloud-2c8g.yml`（详见 **§9.20**） |
 
 **本轮版本**：SAD v1.16 → **v1.17**；`doc/arch/tech-stack.json` 同步 `version: 1.17`。**约束保持**：Python 3 标准库零依赖、`layerIsolation`、文件结构（扁平包 + 唯一新增 `metrics.py`）均未放宽。**未改代码、未改测试、未改详设、未改 PRD、未改 `API.md`/`README.md`/`.opencode/**`/`opencode.json`。**
 
@@ -2312,5 +2316,80 @@ D-2（§9.4）判定 `plate`/`margin` 的 per-domain `cache_max` 是**死配置*
 
 ---
 
-*SAD v1.19 完 · 供 review-expert 复审（**复核 §9.19 PRF-LAT-02 契约同步**——`margin` 由「URL 缓存独占、`cache_max='n/a'`」改为**模块内终端缓存 8 条**（`market_api._margin_cache`，真 LRU，命中免 `json.loads` + `_transform_margin` 且不计数，仅 `latest is not None` 才写），`upstream_fetch_total{margin}` 收敛为**仅终端 miss +1**（与 stock 域对齐）；URL-cache-only 域现行 = `plate`/`news_url`/`longhu`；内存分项 +「可忽略项」、总账 ≈278MB 不变；`tech-stack.json` `version → 1.19`；**无对外契约变更**）与 §9.18 P8-r1 遗留修复轮契约同步**——`'env:<NAME>'` 由"调用期 `globals()`"更正为**导入期冻结的注册映射 `_POOL_MAX_ENVS`**（键=NAME、值=冻结值，名单与取值同源），`cache_policy` **只读该映射、不依赖可变模块全局**（BR-CFG-10）、未注册 NAME 一律 `ValueError`、运行期重绑定 `config.MAX_*_POOL` 不再影响策略；**P1-2 取舍入档：不设 `pool_max ≤ cache_max` 护栏**（两者为独立上限，`depth`/`f10`/`announcement` 现状即反例；超出仅致回转/回源浪费）；测试 hermetic 化（517→518）；`tech-stack.json` `version → 1.18`）与 §9.17 PRF-MEM-02 归因纠偏 + arena 治理（**证伪** v1.16 的「共享 URL 缓存（解析后对象）」归因——URL 缓存存**解码后 `str`**、仅几十 MB、非缺口主因；确立 **AR-18 主因 = glibc per-thread arena 碎片**，A/B 实测（run 20260920-113125）`MALLOC_ARENA_MAX=2` ⇒ python `1.012 → 0.772GiB`（−248MiB）、容器 `1.41 → 1.259GiB = 83.95%`、`VmSize` 8.96 → 1.15GB；**AR-18 由「待解」推进为「已定位 + 已缓解」**，残余 ≈ 终端缓存解析对象 ~200MB + 运行时残余、**仍未达 ~0.65GiB**；`tech-stack.json` `infrastructure.deployment` 登记 `MALLOC_ARENA_MAX=2`）与 §9.16 PRF-MEM-01 实测更正（未达成内存目标：python RSS 1.095→1.012GiB、容器 1.449→1.41GiB=93.98%，净收益仅 ≈83MiB；新增架构事实「缓存上界 ≠ 进程 RSS」，缺口 ≈750MB；新增待解架构项 **AR-18**「共享 URL 缓存调优」；归因更正为共享 URL 缓存 + glibc arena 碎片）与 §9.15 PRF-MEM-01 修复轮契约同步（CR-02 `pool_max` 恢复 env 可调（`'env:<NAME>'`，默认值不变）/ CR-04 终端缓存不变式更正 / CR-05 prefetch 间隔口径更正 / CR-06 `depth` 池上限理由；`cache_max` 数值未变）与 §9.14 PRF-MEM-01 内存口径同步（`DOMAIN_MATRIX` quote/fundflow=1000、timeline=500；内存分项 268→278MB 与实测 RSS 1.095GiB→≈0.65GiB 口径声明）与 §9.13 溯源收口（PRD v0.10 / 文末详设清单 / 引用时点约定）、§9.12 台账收口（Q2/S4 契约同步闭环、D-6「已确认」措辞、面板 `max-age` 域 4/120）及 §8 覆盖声明 ⚠️ 5→4；历史承接见 §9.11 AC 落号对齐（F2→AC-A14 / F8→AC-S12 / AC 总数 34→36）、§9.10 F8 回填、§9.9/§9.8/§9.7 记录块）与 task-decomposer 承接（**现行**详设 `server.md` v1.17 / `cache.md` v1.15 / `metrics.md` v1.9 / `config.md` v1.7 / `stock_api.md` v1.4 / `market_api.md` v1.7 / `cdp_engine.md` v1.4 / `stream.md` v1.6——**内容以各文档头部为准（此栏为快照，落后不属漂移）**；`config.md` 承接 `DOMAIN_MATRIX` 三域收缩与 `'env:<NAME>'` 池上限来源（v1.15）；`cache.md` 承接 `pool_max`/`cache_max` 消费口径；`API.md` 的 N4 其余同步项仍待编排层处理）*
+### 9.20 v1.20（云上部署配置下发运行时调优（PRF-MEM-02 + PRF-LAT-01 落地）· 2026-09-20 · 只改文档）
+
+> **性质**：本轮为**交付事实登记（只改文档）**——编排层已把两项**已 A/B 证实**的运行时调优下发到两份云上部署配置，本档把该事实**只增不删**地登记进 `doc/arch/SAD.md` + `doc/arch/tech-stack.json`。范围严格限定 `doc/arch/**`；**未改代码、未改测试、未改详设、未改 PRD、未改 `docker-compose.yml`、未改 `.opencode/**`**（`doc/deploy/**` 由编排层改完，本档只**登记**）。**无对外契约（API 字段 / 头项 / 状态码）变更**；**只增不删编号**。**本轮无新实验**——下列数字**全部引自既有 run**（run 20260920-113125 / 基 20260920-110805；run 20260920-142456 / 基 20260920-140901）。
+
+**一、下发的两份云上部署配置（编排层已落地）**
+
+| 配置 | 角色 | 准入 | `mem_limit` |
+|------|------|------|-------------|
+| `doc/deploy/docker-compose.aliyun-2c2g.yml` | 阿里云 2C2G 容灾节点 | `MAX_WORKERS=20` / `MAX_INFLIGHT=40` | `1.5g` |
+| `doc/deploy/docker-compose.ucloud-2c8g.yml` | UCloud 2C8G 主节点 | `MAX_WORKERS=30` / `MAX_INFLIGHT=60` | `3g` |
+
+（本地/测试档 `docker-compose.yml` 原已含这两项；本轮**未改**它。两份云配置的注释已写明上述证据与 `SAD §7.2 AR-18 / §9.17`、`_PROGRESS.md B-7` 的指针。）
+
+**二、变更项（两份云 compose 相同）**
+
+| # | 项 | 取值 | 证据（既有 run，本轮无新实验） | 落点 |
+|---|----|------|------------------------------|------|
+| ① | `MALLOC_ARENA_MAX=2`（PRF-MEM-02） | `2` | A/B（run **20260920-113125**，基线 run **20260920-110805**）：python `VmRSS` **1.008GiB → 0.772GiB（−248MiB）**、`VmSize` **8.96GB → 1.15GB**、匿名 `rw-p` 映射 **300 → 166**、容器稳态 **1.41GiB(93.98%) → 1.259GiB(83.95%)** | 两份云 compose `environment` + `tech-stack.json` `infrastructure.deployment` |
+| ② | `HTTP_POOL_MAX_PER_HOST=48`（PRF-LAT-01） | `48`（**部署侧 env 覆盖**） | A/B（run **20260920-142456**，基线 run **20260920-140901**）：fundflow tier1000 avg **3.00 → 1.43s（−52%）**、basic_info **4.08 → 3.08s（−25%）**、ok_rate **100%**，**内存无变化**；**上游在 48 并发下未观测到限流** | 两份云 compose `environment` + `tech-stack.json` `infrastructure.deployment` |
+| ③ | 取值口径与双约束 | 两份均取 **48**（=已实证值） | 满足 ① 池 ≥ `BATCH_MAX_WORKERS`(=**20**)（**AR-14 硬约束**：改其一须连带核另一）② 池 ≥ `MAX_WORKERS`（**20** / **30**） | §7.2 **AR-14** |
+| ④ | UCloud 未取的 **60** 候选 | **不取**（本轮） | UCloud `MAX_INFLIGHT=60 > 48`，超出部分按设计走 **ephemeral 短连接**（**BR-CACHE-27**：不排队、不阻塞，仅多一次握手）；**升到 60（= `MAX_INFLIGHT`）需先核上游在 60 并发下是否限流 + 单独 A/B** | 见下「四、未验证候选」 |
+| ⑤ | 头部摘要行 | 版本 `v1.19 → v1.20` + 本块指针 | — | 头部修订依据 / §9 引言 |
+
+**三、`HTTP_POOL_MAX_PER_HOST=48` 的契约口径（重要）**
+
+- **48 是部署侧 env 覆盖，不是代码默认值**：`config.HTTP_POOL_MAX_PER_HOST` 默认仍为 **24**（`config.md` 契约默认值 **24 不变**）；本档**不改代码默认值口径**，`tech-stack.json` `backend.cache` 的 `HTTP_POOL_MAX_PER_HOST=24` 描述**一字不动**。
+- **AR-14 耦合在代码默认层面仍成立**：默认 `24 ≥ BATCH_MAX_WORKERS=20`；**48 亦满足该约束**（且 48 ≥ 两份配置的 `MAX_WORKERS` 20/30），故不违反 AR-14。
+- 48 是**已实证值**，非新推测——数字引自 run 20260920-142456（见 §二 ②）。
+
+**四、未验证候选（勿当结论）**
+
+| # | 候选 | 状态 | 前置条件 |
+|---|------|------|---------|
+| 1 | UCloud 节点 `HTTP_POOL_MAX_PER_HOST` 升到 **60**（= `MAX_INFLIGHT`），使在飞快照全部有专属连接、消除 ephemeral 握手 | **未验证候选**（**本轮不取**，**不得写成结论或已决**） | **需先核实上游在 60 并发下是否限流** + **单独 A/B**；未完成前维持 **48** |
+
+**五、§9.17 待办行收口（只增不删）**
+
+| 原行（§9.17 六、本轮遗留 #4） | 收口 |
+|-------------------------------|------|
+| `docker-compose.yml` 的 `MALLOC_ARENA_MAX=2` 落地核验（本档无写权限） → 部署（编排层） | **★ v1.20：已落地**（2026-09-20）；落地面由「仅 `docker-compose.yml`」**更正为「三份 compose 全部落地」**：`docker-compose.yml`（本地/测试）+ `doc/deploy/docker-compose.aliyun-2c2g.yml` + `doc/deploy/docker-compose.ucloud-2c8g.yml`（§9.17 原行原文保留、就地追加） |
+
+**六、范围声明（未改清单）**
+
+| # | 未改 | 说明 |
+|---|------|------|
+| 1 | **代码 / 测试 / 详设 / PRD** | 本轮**只改文档**，范围严格限定 `doc/arch/**` |
+| 2 | **`docker-compose.yml`**（本地/测试档） | 原已含这两项 env，本轮**未改** |
+| 3 | **`.opencode/**` / `opencode.json`** | 未改 |
+| 4 | `doc/deploy/docker-compose.aliyun-2c2g.yml` / `doc/deploy/docker-compose.ucloud-2c8g.yml` | **由编排层改完**；本档**只登记**、不重写 |
+| 5 | **对外契约（API 字段 / 头项 / 状态码）** | **无变更**（运行时 env 调优不改变任何响应形状） |
+| 6 | `BR / AR / ADR / N` 编号 | **只增不删、无新增编号**（§9.17 待办行就地追加收口；不新开 AR/ADR） |
+
+**七、改动条目（逐处：旧 → 新）**
+
+| # | 项 | 旧 → 新 | 落点 |
+|---|----|---------|------|
+| 1 | 头部版本 + 修订依据行 | `v1.19` → **`v1.20`**；新增「修订依据（v1.20）」行 | 头部 |
+| 2 | §9.17 六、本轮遗留 #4 | 「`docker-compose.yml` 的 `MALLOC_ARENA_MAX=2` 落地核验（本档无写权限）」→ **★ v1.20 已落地**、落地面**更正为三份 compose**（原行保留、追加） | §9.17 |
+| 3 | §7.2 **AR-18** 缓解 ① | 追加「**云上两份配置已同步落地**」；**状态仍为已定位 + 已缓解**（结论不变） | §7.2 |
+| 4 | §9 引言 | 追加「★ v1.20 更新」指针（§9.20 为最新口径） | §9 引言 |
+| 5 | §6 tech-stack 版本引用 | `v1.19` → **`v1.20`**（补 `infrastructure.deployment` 云上两份登记） | §6 |
+| 6 | `tech-stack.json` | `version: 1.19 → **1.20**`；`infrastructure.deployment` 追加云上两份登记；`generatedAt` = `2026-09-20`（不变）；`backend.cache` 的 `HTTP_POOL_MAX_PER_HOST=24` **不动** | `doc/arch/tech-stack.json` |
+
+**八、本轮遗留（交编排层）**
+
+| # | 事项 | 性质 |
+|---|------|------|
+| 1 | 变更日志登记「云上部署配置下发运行时调优登记（PRF-MEM-02 + PRF-LAT-01 落地）」 | 契约同步（编排层） |
+| 2 | UCloud 的 `HTTP_POOL_MAX_PER_HOST` **60 候选**：核上游 60 并发限流 + 单独 A/B（**未验证，勿当结论**） | 实测 + 后续（编排层） |
+| 3 | `_PROGRESS.md B-7`（timeline 尾延迟属上游/CPU 容量边界）与本块的指针一致性 | 台账（编排层） |
+
+**本轮版本**：SAD v1.19 → **v1.20**；`doc/arch/tech-stack.json` 同步 `version: 1.20`。**约束保持**：Python 3 标准库零依赖、`layerIsolation`、文件结构（扁平包 + 唯一新增 `metrics.py`）均未放宽。**未改代码、未改测试、未改详设、未改 PRD、未改 `docker-compose.yml`、未改 `.opencode/**`/`opencode.json`。**
+
+---
+
+*SAD v1.20 完 · 供 review-expert 复审（**复核 §9.20 云上部署配置下发运行时调优**——编排层把两项已 A/B 证实的运行时调优下发到两份云 compose（`docker-compose.aliyun-2c2g.yml` / `docker-compose.ucloud-2c8g.yml`）：`MALLOC_ARENA_MAX=2`（PRF-MEM-02，python `VmRSS` 1.008→0.772GiB = −248MiB、`VmSize` 8.96→1.15GB）与 `HTTP_POOL_MAX_PER_HOST=48`（PRF-LAT-01，fundflow avg 3.00→1.43s = −52%，**部署侧 env 覆盖、代码默认仍 24**）；取 48 满足 AR-14 双约束（≥ `BATCH_MAX_WORKERS` 20、≥ `MAX_WORKERS` 20/30）；UCloud 的 **60 为未验证候选**（`MAX_INFLIGHT=60 > 48` 超出走 ephemeral 短连接，升 60 需先核上游限流 + 单独 A/B，**勿当结论**）；§9.17 待办行已收口（落地面更正为**三份 compose 全部落地**）；**AR-18 状态仍为「已定位 + 已缓解」、结论不变**；`tech-stack.json` `version → 1.20`、`infrastructure.deployment` 追加登记（`backend.cache` 的 24 不动）；**无对外契约变更、未改代码/测试/详设/PRD/`docker-compose.yml`/`.opencode`**）与 §9.19 PRF-LAT-02 契约同步**——`margin` 由「URL 缓存独占、`cache_max='n/a'`」改为**模块内终端缓存 8 条**（`market_api._margin_cache`，真 LRU，命中免 `json.loads` + `_transform_margin` 且不计数，仅 `latest is not None` 才写），`upstream_fetch_total{margin}` 收敛为**仅终端 miss +1**（与 stock 域对齐）；URL-cache-only 域现行 = `plate`/`news_url`/`longhu`；内存分项 +「可忽略项」、总账 ≈278MB 不变；`tech-stack.json` `version → 1.19`；**无对外契约变更**）与 §9.18 P8-r1 遗留修复轮契约同步**——`'env:<NAME>'` 由"调用期 `globals()`"更正为**导入期冻结的注册映射 `_POOL_MAX_ENVS`**（键=NAME、值=冻结值，名单与取值同源），`cache_policy` **只读该映射、不依赖可变模块全局**（BR-CFG-10）、未注册 NAME 一律 `ValueError`、运行期重绑定 `config.MAX_*_POOL` 不再影响策略；**P1-2 取舍入档：不设 `pool_max ≤ cache_max` 护栏**（两者为独立上限，`depth`/`f10`/`announcement` 现状即反例；超出仅致回转/回源浪费）；测试 hermetic 化（517→518）；`tech-stack.json` `version → 1.18`）与 §9.17 PRF-MEM-02 归因纠偏 + arena 治理（**证伪** v1.16 的「共享 URL 缓存（解析后对象）」归因——URL 缓存存**解码后 `str`**、仅几十 MB、非缺口主因；确立 **AR-18 主因 = glibc per-thread arena 碎片**，A/B 实测（run 20260920-113125）`MALLOC_ARENA_MAX=2` ⇒ python `1.012 → 0.772GiB`（−248MiB）、容器 `1.41 → 1.259GiB = 83.95%`、`VmSize` 8.96 → 1.15GB；**AR-18 由「待解」推进为「已定位 + 已缓解」**，残余 ≈ 终端缓存解析对象 ~200MB + 运行时残余、**仍未达 ~0.65GiB**；`tech-stack.json` `infrastructure.deployment` 登记 `MALLOC_ARENA_MAX=2`）与 §9.16 PRF-MEM-01 实测更正（未达成内存目标：python RSS 1.095→1.012GiB、容器 1.449→1.41GiB=93.98%，净收益仅 ≈83MiB；新增架构事实「缓存上界 ≠ 进程 RSS」，缺口 ≈750MB；新增待解架构项 **AR-18**「共享 URL 缓存调优」；归因更正为共享 URL 缓存 + glibc arena 碎片）与 §9.15 PRF-MEM-01 修复轮契约同步（CR-02 `pool_max` 恢复 env 可调（`'env:<NAME>'`，默认值不变）/ CR-04 终端缓存不变式更正 / CR-05 prefetch 间隔口径更正 / CR-06 `depth` 池上限理由；`cache_max` 数值未变）与 §9.14 PRF-MEM-01 内存口径同步（`DOMAIN_MATRIX` quote/fundflow=1000、timeline=500；内存分项 268→278MB 与实测 RSS 1.095GiB→≈0.65GiB 口径声明）与 §9.13 溯源收口（PRD v0.10 / 文末详设清单 / 引用时点约定）、§9.12 台账收口（Q2/S4 契约同步闭环、D-6「已确认」措辞、面板 `max-age` 域 4/120）及 §8 覆盖声明 ⚠️ 5→4；历史承接见 §9.11 AC 落号对齐（F2→AC-A14 / F8→AC-S12 / AC 总数 34→36）、§9.10 F8 回填、§9.9/§9.8/§9.7 记录块）与 task-decomposer 承接（**现行**详设 `server.md` v1.17 / `cache.md` v1.15 / `metrics.md` v1.9 / `config.md` v1.7 / `stock_api.md` v1.4 / `market_api.md` v1.7 / `cdp_engine.md` v1.4 / `stream.md` v1.6——**内容以各文档头部为准（此栏为快照，落后不属漂移）**；`config.md` 承接 `DOMAIN_MATRIX` 三域收缩与 `'env:<NAME>'` 池上限来源（v1.15）；`cache.md` 承接 `pool_max`/`cache_max` 消费口径；`API.md` 的 N4 其余同步项仍待编排层处理）*
 
