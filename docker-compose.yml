@@ -20,6 +20,13 @@ services:
       - GZIP_COMPRESSLEVEL=1
       - LOG_DIR=/app/logs
       - LOG_BACKUP_DAYS=30
+      # ── 内存（PRF-MEM-02，A/B 已证实）──────────────────────
+      # glibc per-thread arena 上限。33 线程下默认最多 8×ncores 个 64MB arena，
+      # 分配后长期不归还 → 碎片。A/B 实测（压测 run 20260920-113125）：
+      # python VmRSS 1.008GiB→0.772GiB（−248MiB）、VmSize 8.96GB→1.15GB、
+      # 匿名 rw-p 映射 300→166、容器稳态 1.41GiB(93.98%)→1.259GiB(83.95%)。
+      # 见 SAD §7.2 AR-18 / §9.17。
+      - MALLOC_ARENA_MAX=2
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs

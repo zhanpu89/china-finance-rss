@@ -20,6 +20,7 @@
 - 门禁：每份含 9 节（职责/契约/数据结构/业务规则/伪代码/错误处理/并发安全/测试要点/AC 追溯）+ 偏差标注 + 自检；§3 为 yaml 代码块
 - **本次（全量溯源收口 + 引用时点约定 · 2026-09-18 · 最后一批）**：把 `doc/detailed/` **全部跨文档版本引用**一次性收口——`stock_api.md` → **v1.4**（上游 **SAD v1.3 → v1.12 / PRD v0.3 → v0.10**；基础层接口权威 **config v1.1 → v1.6 / cache v1.1 → v1.14 / metrics v1.1 → v1.8**）、`cdp_engine.md` → **v1.4**（上游 **SAD v1.3 → v1.12 / PRD v0.3 → v0.10**；接口权威 **config v1.1 → v1.6 / metrics v1.1 → v1.8**）、`market_api.md` → **v1.7**（接口权威 config v1.5 → v1.6 / cache v1.13 → v1.14 / metrics v1.7 → v1.8）、`stream.md` → **v1.6**（上游 **PRD v0.9 → v0.10**；接口权威 config v1.5 → v1.6 / metrics v1.7 → v1.8）、`server.md` → **v1.17**（上游 **PRD v0.9 → v0.10**；接口权威 config v1.6 / cache v1.14 / metrics v1.8 / stock_api v1.3 / market_api v1.6 / **cdp_engine v1.3**）、`config.md` → **v1.7** / `cache.md` → **v1.15** / `metrics.md` → **v1.9**（上游 SAD v1.12 / PRD v0.10 复核确认）。**新增「引用时点约定」**（含接口权威栏的文件头部 + 本文件 §2）：接口权威栏 = **本文最后同步时点快照**、**落后一版不属漂移**，内容以被引文档头部为准、该栏仅用于定位。**均「溯源收口 + 引用时点约定」，无 BR 语义变更、无对外契约变更**；**未改代码 / `doc/arch/` / `doc/prd/` / `API.md` / `README.md` / `.opencode`。** 详见下方「★ 全量溯源收口 + 引用时点约定」。
 - **本次（台账收口：`REV-DES-21` 裁定关闭 · 2026-09-18）**：`stock_api.md` → **v1.5**（§10#10 加裁定注 + §12 变更行）；本文件同步。**用户裁定：`/stock/f10` 极少/几乎无调用 ⇒ `REV-DES-21` 缓解项「✅ 已裁定：不实现」——不再设「仅单码 / 少量码」上限，不再是待办**（「当前未强制」**保留为事实陈述 = 知情接受，非遗漏**）。**只改文档；未改代码 / `doc/arch/` / `doc/prd/` / `API.md` / `README.md` / `.opencode`。** 详见下方「★ 台账收口：REV-DES-21 裁定关闭」。
+- **本次（归因纠偏 + PRF-MEM-02 arena 治理实测 · 2026-09-20 · 只改文档）**：`config.md` → **v1.11** / `stock_api.md` → **v1.9**（+ 本文件）。**纠偏**：上一轮「共享 URL 缓存存解析后 Python 对象、体积数倍于原始 JSON、是 1GB 大头」**已被证伪**——实测缓存存的是**解码后的原始响应文本（`str`）**（`cache.py:851-852` `resp.read().decode(...)` → `cache.py:862` `_cache_put(cache, url, data)`；`json.loads` 在调用方命中后解析），按条数与体积估算总量仅**几十 MB**、**非内存大头**。**真因 + A/B 实测**（run **20260920-113125**，基线 **20260920-110805**）：`MALLOC_ARENA_MAX=2` ⇒ python VmRSS **1,057,324kB(1.008GiB) → 809,328kB(0.772GiB)**、RssAnon **1,042,748kB → 794,776kB**、VmSize **8.96GB → 1.15GB**、匿名 rw-p **300 → 166**、容器 **1.41GiB(93.98%) → 1.259GiB(83.95%)**；机制 = 33 线程 × 默认最多 `8×ncores` 个 64MB glibc arena ⇒ 碎片/不归还（`VmLib`/`RssFile` 仅 14.5MB、`RssAnon` 占 98%）。**累计链路**：python RSS **1.095GiB（收缩前）→ 1.012GiB（3 域缓存收缩 −83MiB）→ 0.772GiB（+arena −248MiB）**；容器 **1.449 → 1.41 → 1.259GiB**；仍未达 ~0.65GiB 级，剩余 = 终端缓存解析对象（~200MB）+ 运行时/分配器残余。tier1000 `timeline` `ok_rate` 89.6% → **100%** 为**单次观测、可能含上游波动，勿写成结论**。落点：`config.md` 头部/§3.2 注/§10#24/§10.1（重写）/§11；`stock_api.md` 头部/§4.3(BR-SA-13)/§10#27/§11/§12；本文件。**只改 `doc/detailed/`；未改代码 / 测试 / `doc/arch/` / `doc/prd/` / `API.md` / `README.md` / `.opencode`。** 详见下方「★ 归因纠偏 + PRF-MEM-02 arena 治理实测」。
 - **本次（内存调优 PRF-MEM-01 **实测回填与结论更正** · 2026-09-20 · 只改文档）**：`config.md` → **v1.10** / `stock_api.md` → **v1.8**（+ 本文件）。背景：PRF-MEM-01 已**重建部署 + 五档压测实测**（run **20260920-110805**），**证伪**此前乐观预测——收缩前容器稳态 **1.449GiB/1.5GiB（96.57%）**、python RSS **1.095GiB**；收缩后容器 **1.41GiB/1.5GiB（93.98%）**、python RSS **1.012GiB** ⇒ **净收益仅 ~83MiB，本次收缩未达成内存目标**。**归因更正**：实测反推（`timeline` 1350→500 省 ~82MB + `quote`/`fundflow` 各 −1000 条省 ~10MB ≈ 92MB，与 −83MiB 吻合）⇒ **终端缓存只是小头**；**真正大头 = 未收缩的共享 URL 缓存**（`cache.py:35 MAX_CACHE_SIZE=2000`；实测 `cache_entries.url=2000` 顶满；条目 `{'data': 解析后 Python 对象}` 体积数倍于原始 JSON），其次为线程池 glibc arena 碎片。**旁证**：3 域缓存精确生效（healthz `/healthz?check=0`：`quote`/`fundflow` `pool_max`/`cache_max` = 1000/1000、`timeline` = 500/500、`depth` = 500）；`cache_hit_ratio` **0.1585 → 0.1796**；tier1000 `timeline` `ok_rate` 100% → **89.6%**、`upstream_timeout` 123 → **317**（⚠️ **待复测归因，尚非结论**，不写成结论）。**后续方向**：调优**共享 URL 缓存**（`cache.MAX_CACHE_SIZE` / 条目表示），而非继续收缩终端缓存。落点：`config.md` 头部/§3.2 注/§10#24 + 新增 **§10.1「实测结论」**/§11；`stock_api.md` 头部/§4.3(BR-SA-13)/§10#27/§11/§12；本文件。**只改 `doc/detailed/`；未改代码 / 测试 / `doc/arch/` / `doc/prd/` / `API.md` / `README.md` / `.opencode`。** 详见下方「★ PRF-MEM-01 实测回填与结论更正」。
 - **本次（内存调优 PRF-MEM-01 · **修复轮**契约同步 · 2026-09-20 · 只改文档）**：`config.md` → **v1.9** / `stock_api.md` → **v1.7**（+ 本文件）。修复首轮 3 个问题（代码已落地、**517 用例全绿**）：**CR-02（关键）**——3 域 `pool_max` 由矩阵字面量 `'fixed:1000'`/`'fixed:1000'`/`'fixed:500'` 改为 **env 可调**：新增 spec 形 **`'env:<NAME>'`**（`_resolve_pool_max` 经白名单 `_POOL_MAX_ENVS = frozenset({'MAX_QUOTE_POOL','MAX_FUNDFLOW_POOL','MAX_TIMELINE_POOL'})` 在**调用期**解析为模块常量；未知 `NAME` ⇒ `ValueError('bad pool_max env name: ...')`）+ 新增 3 个 env 注册常量 **`MAX_QUOTE_POOL=1000` / `MAX_FUNDFLOW_POOL=1000` / `MAX_TIMELINE_POOL=500`**（`config.py` 顶层，紧邻 `MAX_DEDUP_CODES` 区域；**默认值 = 收缩值 ⇒ 行为不变、部署可免改码调参**）；矩阵三行改 `'env:MAX_QUOTE_POOL'`/`'env:MAX_FUNDFLOW_POOL'`/`'env:MAX_TIMELINE_POOL'`；**`cache_max`（1000/1000/500）仍为矩阵内整数字面量**（内存硬界，与其余 9 域一致）；`depth` 保持 `'dedup'`/500。**CR-03**——新增 `test_prf_mem_01_pool_cache_contract`（CFG-T19）+ `test_prf_mem_01_pool_cap_follows_env`（CR-02，热替换 `MAX_TIMELINE_POOL=400`）；**CR-04**——新增 `test_prf_mem_01_cache_degrade_is_lru_bounded`（锁 `cache_max` < 活跃码上界 2000 的**优雅 LRU 有界降级**）⇒ 用例总数 **514 → 517**。**CR-05**——更正 prefetch 间隔事实（= `pool_refresh` = `ttl × refresh_factor`：quote/depth 盘中 **4s**、fundflow/timeline **8s**、非盘 **120s**；原"120s 轮询"为误）+ `~0.65GiB` 标注**估算待实测**。**CR-06**——`depth` 池保持 `'dedup'` 的理由写入文档（**无 prefetch 循环**、池仅 `code→ts` 账本、`cache_max` 才是内存界）。落点：`config.md` 头部/§1.1#5/§2.4/§2.7/§3.1/§3.2/§3.3/§5/§6/§8(CFG-T19)/§10#24/§11；`stock_api.md` 头部/§3.3/§3.5/§4.3(BR-SA-13)/§9/§10#27/§11/§12；本文件。**只改文档；未改代码 / `doc/arch/`（SAD 已由 system-architect 于 **v1.15** 承接本修复轮）/ `doc/prd/` / `API.md` / `README.md` / `.opencode`。** 详见下方「★ PRF-MEM-01 修复轮契约同步」。
 - **本次（内存调优 PRF-MEM-01 **首轮**契约同步 · 2026-09-20 · 只改文档）**：`config.md` → **v1.8** / `stock_api.md` → **v1.6**（+ 本文件）。`DOMAIN_MATRIX` **3 域** 的 `pool_max`/`cache_max` **同源收缩**——`quote` `'dedup',2000 → 'fixed:1000',1000`、`fundflow` `'dedup',2000 → 'fixed:1000',1000`、`timeline` `'dedup',2000 → 'fixed:500',500`（`depth`/`announcement`/`f10` 仍 `'dedup'`=`MAX_DEDUP_CODES`=2000；`plate`/`feed`/`margin`/`sector` 不变）。**背景（PRF-MEM-01）**：压测显示容器内存 **96.57%** 高水位；归因 = 终端缓存被灌满至 `cache_max` + `timeline` 单条 ~96KB（内存大户）+ prefetch（`pool_refresh` 120s 轮询）保活使 LRU 不淘汰 ⇒ **同源收缩**使保活范围收敛，预期 python 稳态 **RSS ~1.1GiB→~0.65GiB**。落点：`config.md` §3.1/§3.2/§2.4/§8(CFG-T19)/§9/§10#24；`stock_api.md` §3.3/§3.5/BR-SA-13/§9/§10#27/§12；**顺带更正 `stock_api.md §3.5` 的 `quote.ttl` 遗留值 `8|120`→`4|120`**（`quote` 于 v1.4 升 L0）。**只改文档；未改代码 / `doc/arch/`（SAD §2.1/§4.3/AR-8 数值由 system-architect 回填）/ `doc/prd/` / `API.md` / `README.md` / `.opencode`。** 详见下方「★ 内存调优 PRF-MEM-01 契约同步」。
@@ -1087,3 +1088,60 @@
 - **共享 URL 缓存调优**（`cache.MAX_CACHE_SIZE` / 条目表示）：属 `cache.py` 改动，须**另立 change-set**（本轮不改代码）；`cache.md` 契约同步届时由 task-decomposer 执行。
 - **tier1000 `timeline` 退化**：⚠️ **待复测归因，尚非结论**——复测后再定是否立修复项。
 - **残留 `~0.65GiB` 表述**：仅存于**历史变更块**（`config.md §11 v1.9 自检行`、`stock_api.md §11 v1.7 / §12 v1.6·v1.7`、本文件「★ 内存调优 PRF-MEM-01 契约同步」§2 与「★ PRF-MEM-01 修复轮契约同步」§CR-05）——按「不回改历史变更块」约定**原样保留**，其状态由本节取代。
+
+## ★ 归因纠偏 + PRF-MEM-02 arena 治理实测（2026-09-20 · 只改文档）
+
+> 范围：**只改** `doc/detailed/{config,stock_api,_PROGRESS}.md`。**未改代码 / 测试 / `doc/arch/`（SAD）/ `doc/prd/` / `API.md` / `README.md` / `.opencode/`**；**只增不删编号**；未回改任何历史变更块（旧归因以「已被证伪」标注，保留原文）。
+> 承接：上一轮「★ PRF-MEM-01 实测回填与结论更正」的**归因部分被本轮证伪**；本节为**现行有效**口径。
+
+### 1. 纠偏（上一轮归因已被证伪）
+
+- ❌ **旧归因（作废）**：共享 URL 缓存条目为 `{'data': 解析后 Python 对象}`，体积数倍于原始 JSON，是 1GB 级内存大头。
+- ✅ **实际**：共享 URL 缓存存的是**解码后的原始响应文本（`str`）**——`cache.py:851-852` `data = resp.read().decode(encoding, errors='replace')`、`cache.py:862` `_cache_put(cache, url, data, ttl=ttl)`；**`json.loads` 由调用方在命中后解析**，缓存内**没有**解析对象。
+- ⇒ 按条数（`MAX_CACHE_SIZE=2000`）与体积估算，URL 缓存总量仅**几十 MB**，**不是内存大头**。
+- 终端缓存（解析对象）绝对量级仅约 **~200MB**（见 §3 剩余项），亦非 GiB 级主体。
+
+### 2. 真因 + A/B 实测（run 20260920-113125，基线 run 20260920-110805）
+
+| 指标 | 基线（默认 arena） | `MALLOC_ARENA_MAX=2` |
+|------|--------------------|----------------------|
+| python VmRSS | 1,057,324 kB (1.008GiB) | **809,328 kB (0.772GiB)** |
+| RssAnon | 1,042,748 kB | 794,776 kB |
+| VmSize | 8.96 GB | **1.15 GB** |
+| 匿名 rw-p 映射 | 300 | **166** |
+| 容器稳态 | 1.41GiB (93.98%) | **1.259GiB (83.95%)** |
+| tier1000 `timeline` `ok_rate` | 89.6% | **100%**（⚠️ **单次观测，可能含上游波动，勿写成结论**） |
+
+- **机制**：33 线程 × 默认最多 `8×ncores` 个 **64MB glibc arena** → 碎片 / 分配后不归还（`VmLib`/`RssFile` 仅 **14.5MB**，`RssAnon` 占 **98%**）。
+- **结论**：`MALLOC_ARENA_MAX=2` 是当前最有效的单项治理（python VmRSS −248MiB）；属**部署侧 env 注入**，非代码改动。
+
+### 3. 累计链路
+
+| 阶段 | python RSS | 容器稳态 |
+|------|-----------|---------|
+| 收缩前 | 1.095GiB | 1.449GiB |
+| 3 域缓存收缩（PRF-MEM-01） | 1.012GiB（−83MiB） | 1.41GiB |
+| + `MALLOC_ARENA_MAX=2`（PRF-MEM-02） | **0.772GiB**（−248MiB） | **1.259GiB** |
+
+- **仍未达 ~0.65GiB 级**：剩余 = 终端缓存解析对象（**~200MB**）+ 运行时/分配器残余。
+
+### 4. 逐处落点（`旧 → 新`）
+
+| 文件 | 位置 | 旧 → 新 |
+|------|------|---------|
+| `config.md` | 头部 / 版本 | v1.10 → **v1.11**；新增 **v1.11 变更块**（归因纠偏 + PRF-MEM-02） |
+| `config.md` | §3.2 注 | 「真正大头 = 共享 URL 缓存（解析后 Python 对象）」→ **URL 缓存存文本、仅几十 MB、非大头；真因 = arena + A/B 数据** |
+| `config.md` | §10#24 | 同上更正 + 编号列补 **★ v1.11** |
+| `config.md` | §10.1 | 标题扩为 **PRF-MEM-01 / PRF-MEM-02**；**归因段重写为「纠偏」**；新增 **A/B 表 + 累计链路表 + 剩余项**；单次观测标注 |
+| `config.md` | §11 | 新增 v1.11 自检行 |
+| `stock_api.md` | 头部 / 版本 | v1.8 → **v1.9**；新增 **v1.9 变更块**（归因纠偏 + PRF-MEM-02） |
+| `stock_api.md` | §4.3 **BR-SA-13** | 「真正大头 = 共享 URL 缓存（解析后 Python 对象）」→ 纠偏 + arena A/B |
+| `stock_api.md` | §10#27 | 同上更正 + 编号列补 **★ v1.9** |
+| `stock_api.md` | §11 / §12 | 新增 v1.9 自检行 + 变更记录行 |
+| `_PROGRESS.md` | 「当前状态」+ 本节 | 新增登记 |
+
+### 5. 交编排层 / 其他 agent（不在本 agent 范围）
+
+- **部署侧 `MALLOC_ARENA_MAX=2`**（env 注入）：属部署配置，非代码改动；如需写入 `README.md` / 部署脚本，**由编排层另批**。
+- **终端缓存解析对象治理（~200MB）**：属 `stock_api`/`cache` 代码改动，须**另立 change-set**。
+- **残留旧归因表述**：仅存于**历史变更块**（`config.md` v1.10 块与头部 ★ v1.10 片段、`stock_api.md` v1.8 块与头部 ★ v1.8 片段、本文件「★ PRF-MEM-01 实测回填与结论更正」）——按「不回改历史变更块」约定**原样保留**，其状态由本节取代（各处已由本节/新块显式标注「已被证伪」）。

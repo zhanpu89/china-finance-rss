@@ -347,16 +347,17 @@ _POOL_MAX_ENVS = frozenset({'MAX_QUOTE_POOL', 'MAX_FUNDFLOW_POOL', 'MAX_TIMELINE
 # int there would be a dead setting an operator could not act on (P2-9).
 # 'n/a' literals are kept in the matrix for 1:1 SAD reading; cache_policy
 # normalises them to None (BR-CFG-11).
-# 2026-09-20 PRF-MEM-01（内存调优，实测更正）：3 域 pool/cache 同源收缩（pool 经
-# env 注册可调；cache_max 1000/1000/500 为内存硬界）。五档压测
-# run 20260920-110805 实测：python RSS 1.095→1.012GiB（−83MiB）、容器
-# 1.449→1.41GiB（93.98%），终端缓存按 1000/1000/500/500 精确生效，但**未达成
-# 内存目标**。归因更正：按单条体积反推（timeline 1350→500 省 ~82MB + quote/
-# fundflow 各 −1000 条 ≈10MB，与 −83MiB 吻合）⇒ 终端缓存只是小头；大头是未收缩的
-# 共享 URL 缓存（cache.py:35 MAX_CACHE_SIZE=2000，实测 cache_entries.url 顶满
-# 2000，条目存解析后 Python 对象），其次为线程池分配器碎片。后续调优对象＝
-# 共享 URL 缓存（timeline ok_rate 100%→89.6%、upstream_timeout 123→317 待
-# 复测归因，勿写成结论）。
+# 2026-09-20 PRF-MEM-01 / PRF-MEM-02（内存调优，A/B 实测更正）：3 域 pool/cache
+# 同源收缩（pool 经 env 注册可调；cache_max 1000/1000/500 为内存硬界）。实测 run
+# 20260920-110805：python RSS 1.095→1.012GiB（−83MiB）、容器 1.449→1.41GiB
+# ⇒ 终端缓存只是小头。纠偏：共享 URL 缓存存**解码文本**（cache.py:851-866，
+# json.loads 在调用方命中后才做），仅约几十 MB，非大头（上一轮"条目存解析后
+# Python 对象 / 真大头"归因已证伪）。真因＝glibc per-thread arena 碎片：33 线程
+# × 默认最多 8×ncores 个 64MB arena、VmSize 8.96GB、300 个匿名 rw-p 映射；设
+# MALLOC_ARENA_MAX=2（docker-compose env）后 python RSS −248MiB 至 0.772GiB、
+# 容器 1.259GiB（83.95%）、VmSize 1.15GB、匿名映射 166；tier1000 timeline
+# ok_rate 89.6%→100%（单次观测，或含上游波动，勿写成结论）。累计 python RSS
+# 1.095→0.772GiB；仍未到 0.65GiB 级，剩余＝缓存解析对象＋运行时/分配器残余。
 DOMAIN_MATRIX = {
     'quote':        ('L0', 1.0, 1.0, 'env:MAX_QUOTE_POOL', 1000),    # stock/data, basic_info, 实时价
     'depth':        ('L0', 1.0, 1.0, 'dedup', 500),                   # 五档盘口 (与 quote 同拍)
