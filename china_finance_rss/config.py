@@ -323,12 +323,22 @@ def stock_nav_page_names():
     return tuple(names)
 
 
+# PRF-MEM-01（2026-09-20）每域池上限 —— env 注册（BR-CFG-16 / §1.1#5）。
+# 池是 code→最近触碰时刻 的廉价账本，上限决定该域 prefetch 轮转覆盖多少码；
+# 在此注册使部署可免改码调参。终端缓存 cache_max 才是真实内存界，按既有模式
+# 保持为矩阵内的整数字面量（与其余 9 域一致）。
+MAX_QUOTE_POOL = int(os.getenv('MAX_QUOTE_POOL', '1000'))
+MAX_FUNDFLOW_POOL = int(os.getenv('MAX_FUNDFLOW_POOL', '1000'))
+MAX_TIMELINE_POOL = int(os.getenv('MAX_TIMELINE_POOL', '500'))
+_POOL_MAX_ENVS = frozenset({'MAX_QUOTE_POOL', 'MAX_FUNDFLOW_POOL', 'MAX_TIMELINE_POOL'})
+
+
 # Domain cache matrix — the single authority for TTL / pool refresh / pool max /
 # endpoint cache max / upstream encoding (SAD §2.1, BR-CFG-*).
 #   domain -> (tier, ttl_factor, pool_refresh_factor, pool_max, cache_max)
 #     ttl_factor            : float | 'override:<seconds>'
 #     pool_refresh_factor   : float | 'n/a'
-#     pool_max              : 'dedup' (=MAX_DEDUP_CODES) | 'fixed:<n>' | 'n/a'
+#     pool_max              : 'dedup' (=MAX_DEDUP_CODES) | 'fixed:<n>' | 'n/a' | 'env:<NAME>'(env 注册常量)
 #     cache_max             : int | 'n/a'
 # `cache_max` bounds a domain's *terminal* cache (stock_api._cache_store) or its
 # feed cache (cache.feed_cache_put).  Domains served only through the shared URL
@@ -337,11 +347,21 @@ def stock_nav_page_names():
 # int there would be a dead setting an operator could not act on (P2-9).
 # 'n/a' literals are kept in the matrix for 1:1 SAD reading; cache_policy
 # normalises them to None (BR-CFG-11).
+# 2026-09-20 PRF-MEM-01（内存调优，实测更正）：3 域 pool/cache 同源收缩（pool 经
+# env 注册可调；cache_max 1000/1000/500 为内存硬界）。五档压测
+# run 20260920-110805 实测：python RSS 1.095→1.012GiB（−83MiB）、容器
+# 1.449→1.41GiB（93.98%），终端缓存按 1000/1000/500/500 精确生效，但**未达成
+# 内存目标**。归因更正：按单条体积反推（timeline 1350→500 省 ~82MB + quote/
+# fundflow 各 −1000 条 ≈10MB，与 −83MiB 吻合）⇒ 终端缓存只是小头；大头是未收缩的
+# 共享 URL 缓存（cache.py:35 MAX_CACHE_SIZE=2000，实测 cache_entries.url 顶满
+# 2000，条目存解析后 Python 对象），其次为线程池分配器碎片。后续调优对象＝
+# 共享 URL 缓存（timeline ok_rate 100%→89.6%、upstream_timeout 123→317 待
+# 复测归因，勿写成结论）。
 DOMAIN_MATRIX = {
-    'quote':        ('L0', 1.0, 1.0, 'dedup', 2000),                  # stock/data, basic_info, 实时价
+    'quote':        ('L0', 1.0, 1.0, 'env:MAX_QUOTE_POOL', 1000),    # stock/data, basic_info, 实时价
     'depth':        ('L0', 1.0, 1.0, 'dedup', 500),                   # 五档盘口 (与 quote 同拍)
-    'fundflow':     ('L1', 1.0, 1.0, 'dedup', 2000),
-    'timeline':     ('L1', 1.0, 1.0, 'dedup', 2000),
+    'fundflow':     ('L1', 1.0, 1.0, 'env:MAX_FUNDFLOW_POOL', 1000),
+    'timeline':     ('L1', 1.0, 1.0, 'env:MAX_TIMELINE_POOL', 500),
     'plate':        ('L2', 1.0, 1.0, 'fixed:200', 'n/a'),             # cls/hotplate, cls/plate (URL cache)
     'news_url':     ('L3', 1.0, 1.0, 'n/a', 'n/a'),                   # 5 源 RSS URL (share cache{})
     'feed':         ('L3', 1.0, 1.0, 'fixed:100', 100),
@@ -440,13 +460,19 @@ def _resolve_int_factor(spec, base):
 
 
 def _resolve_pool_max(spec):
-    """'n/a' -> None; 'dedup' -> MAX_DEDUP_CODES; 'fixed:<n>' -> int(n)."""
+    """'n/a' -> None; 'dedup' -> MAX_DEDUP_CODES; 'fixed:<n>' -> int(n);
+    'env:<NAME>' -> 该 env 注册常量（未知 NAME 立即 ValueError）。"""
     if spec == 'n/a':
         return None
     if spec == 'dedup':
         return MAX_DEDUP_CODES
     if isinstance(spec, str) and spec.startswith('fixed:'):
         return int(spec.split(':', 1)[1])
+    if isinstance(spec, str) and spec.startswith('env:'):
+        name = spec.split(':', 1)[1]
+        if name not in _POOL_MAX_ENVS:
+            raise ValueError(f'bad pool_max env name: {name!r}')
+        return int(globals()[name])
     raise ValueError(f'bad pool_max spec: {spec!r}')
 
 

@@ -27,6 +27,7 @@
 - 缓存防击穿: 双重检查 + 按 path 独立锁 + TTL 分层（`_trading_tiers()`：盘中/盘后不同 TTL）
 
 ## 配置管理
+- 需要部署可调的每域资源上限统一以 env 注册常量（config 模块顶层）承载，矩阵以 'env:<NAME>' spec 引用，_resolve_pool_max 调用期经 globals() 白名单解析；新增 spec 分支必须对未知名 fail-fast ValueError
 - 配置项统一在 `config.py`（读取环境变量 + 默认值），代码不硬编码端口/主机/TTL
 - 敏感信息（cookie/token）走环境变量，**绝不入库/入 git**（.env、HAR、Chrome profile 均不提交）
 - 运行时开关（如 CDP 可用否）在 config/engine 状态判断，不散落判断逻辑

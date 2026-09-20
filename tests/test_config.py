@@ -69,7 +69,27 @@ class CachePolicyTests(unittest.TestCase):
                          config.MAX_DEDUP_CODES)
         self.assertEqual(config.cache_policy('announcement', now=TRADING)['cache_max'], 500)
         self.assertEqual(config.cache_policy('plate', now=TRADING)['pool_max'], 200)
-        self.assertEqual(config.cache_policy('quote', now=TRADING)['cache_max'], 2000)
+        self.assertEqual(config.cache_policy('quote', now=TRADING)['cache_max'], 1000)
+
+    def test_prf_mem_01_pool_cache_contract(self):        # CFG-T19（PRF-MEM-01）
+        """3 域 pool/cache 同源收缩；depth 不变（池仅账本，cache_max 才是内存界）。"""
+        q = config.cache_policy('quote', now=TRADING)
+        f = config.cache_policy('fundflow', now=TRADING)
+        t = config.cache_policy('timeline', now=TRADING)
+        d = config.cache_policy('depth', now=TRADING)
+        self.assertEqual((q['pool_max'], q['cache_max']), (config.MAX_QUOTE_POOL, 1000))
+        self.assertEqual((f['pool_max'], f['cache_max']), (config.MAX_FUNDFLOW_POOL, 1000))
+        self.assertEqual((t['pool_max'], t['cache_max']), (config.MAX_TIMELINE_POOL, 500))
+        self.assertEqual((d['pool_max'], d['cache_max']), (config.MAX_DEDUP_CODES, 500))
+
+    def test_prf_mem_01_pool_cap_follows_env(self):       # CR-02
+        """收缩后的池上限仍由 env 注册常量支配（不是写死的字面量）。"""
+        original = config.MAX_TIMELINE_POOL
+        config.MAX_TIMELINE_POOL = 400
+        try:
+            self.assertEqual(config.cache_policy('timeline', now=TRADING)['pool_max'], 400)
+        finally:
+            config.MAX_TIMELINE_POOL = original
 
     def test_sector_override_ignores_tier_and_time(self):     # BR-CFG-2
         self.assertEqual(config.cache_policy('sector', now=TRADING)['ttl'], 604800)

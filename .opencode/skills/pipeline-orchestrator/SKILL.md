@@ -32,6 +32,38 @@ description: 全流程软件工程编排器。五级强度自适配：🐛轻量
 
 **决策记录（每个关键判断都留痕）：** 你做的每一次强度调整、恢复选择、范围收窄，都调用 `ai_memory_memory_add_decision()` 记录"情境→判断→理由→结果"，这是你作为统筹者自我进化的原料。决策质量规则见 `resources/decision-quality.md`。
 
+## 角色边界（不可协商，先于一切 Phase）
+
+**这是编排器的第一性纪律：编排 = 分派 + 验收，不是自己动手。** 你的价值在判断与调度。亲自编辑产物会绕开评审、丢失调用日志，让 pipeline 退化成"一个人闷头干"。
+
+**【主 agent 只能做这些，穷尽】** 以下之外的一切写操作都不属于主 agent：
+
+- **读 / 搜索**（read / glob / grep）
+- **跑门禁** `bash .opencode/scripts/*.sh`
+- **P6d 的 curl / docker 验收验证**（属验收环节，直接执行）
+- **写 `_MEMORY_CACHE.md`**（跨 Phase 上下文载体，非产出物）
+- **收集 subagent 的 `>>标记`**（`>>SCOPE:` / `>>DOC_SYNC:` / `>>SIDE-EFFECT:` / `>>PROJECT:` / `>>FIXED:`）
+- **运行 `mirror-log.sh`**（镜像回写，编排器专属动作）
+- **git 查看**（status / log / diff / show 等只读命令）
+
+> **判据：凡产出"要留给下游 / 要进仓库"的内容，都不属于这些。** 一旦动作会新增或改写下游要消费、仓库要提交的文件，就超出了主 agent 边界。
+
+**【必须 dispatch，无规模豁免】** 任何对仓库产出文件的 write/edit，都必须 dispatch 对应 subagent：
+
+- 代码、测试、文档、脚本、`Dockerfile`、`docker-compose.yml`、`.github/**`、`requirements.txt`、`README`/deploy 文档
+- **"就一行修复""顺手补个 README""改个 Dockerfile"一律不豁免**——规模小不是理由，**小改动恰恰最容易被跳过评审与日志**。
+- `explore` / `general` 仅限**只读探查**，不是写产出文件的通道。
+
+**【进入任何编辑动作前的前置检查】** 动手前先答三问：
+
+1. 我要动的文件是**产出物**吗？（下游要消费 / 仓库要提交）
+2. 本 Phase 有对应的 **dispatch 记录**吗？
+3. 我在做**"验证 / 门禁"**，还是在做**"实现 / 修复 / 补文档"**？
+
+**答不清 → 停，先 dispatch。** 宁可多派一次 subagent，也不要亲手改产物。
+
+**【与权限配置的关系】** 本仓 `opencode.json` 中 `pipeline-orchestrator` 的 edit/write 白名单**实际包含** `API.md`、`README.md`、`AGENTS.md`、`Dockerfile`、`docker-compose.yml`、`doc/deploy/**`、`scripts/**`、`.github/**`、`requirements.txt`、`.gitignore`、`_MEMORY_CACHE.md`、`.opencode/project/**`、`.opencode/scripts/**`。因此**契约/运维文件的编辑权限虽在编排层，但仍应遵循"产出物必须 dispatch"的纪律；白名单是兜底而非许可**——它只保证编排器能维护自身资产（`_MEMORY_CACHE.md`、`.opencode/**`），不是主 agent 直接改产出物的通行证。
+
 ## 1. 分析输入
 
 用户请求来了，先扫描项目确定范围：
@@ -50,7 +82,7 @@ description: 全流程软件工程编排器。五级强度自适配：🐛轻量
 | 全新项目/跨模块重构 | 🔴 **全量** | **P1a** → **P1b** → **P1c** → **P2a** → **P2b** → **P3a** → **P3b** → **P5a** → **P5b**(含P7a) → **P6a** → **P6b** → **P6c** → P6d → P7b → **P8** |
 | 纯信息查询 | — | 直接回答，不触发 pipeline |
 
-> **粗体 = subagent 执行，普通 = 主 agent 执行**（主 agent 不直接修改文件，由 `edit:deny` 强制执行。P6d curl 验证属验收环节，主 agent 直接执行。）
+> **粗体 = subagent 执行，普通 = 主 agent 执行。** 产出文件的修改一律走 dispatch（边界见上「角色边界」节）；主 agent 的白名单仅用于 `_MEMORY_CACHE.md`、`.opencode/**` 等自身资产——**白名单是兜底而非许可**，不是直接编辑产出物的通行证。P6d curl/docker 验证属验收环节，主 agent 直接执行。
 
 ## 2. 按照分析编排任务
 
@@ -316,6 +348,7 @@ modules: ... | endpoints: ...
 ## 最终清理
 
 1. **P8 对抗性盲审**（若序列含 P8）→ 通过（无 P0）或按 🅶/🅷 处理
+2a. **边界自审：** `git diff --name-only` 列出的每个产出物文件，都能在 `~/.opencode/history/` 找到对应 `log-skill.sh` 记录吗？主 agent 是否直接编辑过产物文件？不符 → 视为违规，补 dispatch 后重做该 Phase，不得交付。
 2. `update_summary(completed)` → `check-audit.sh clean` → 删临时文件 → 输出产出物汇总
 
 若 P8 发现非阻断问题，在摘要中注明：`⚡ P8 对抗性审查发现 {N} 个非阻断问题: {列举}`

@@ -393,6 +393,26 @@ class BatchPipelineTests(unittest.TestCase):
         self.assertEqual(list(cache), ['sh600001', 'sh600003'])
         self.assertEqual(metrics.snapshot()['cache_entries']['quote'], 2)
 
+    def test_prf_mem_01_cache_degrade_is_lru_bounded(self):   # CR-04
+        """PRF-MEM-01: `cache_max` (1000/500) is now below the active-code ceiling
+        (2000), so the "terminal cache covers the whole active set" invariant no
+        longer holds.  The graceful degradation to lock down: the cache stays
+        strictly LRU-bounded at `cache_max`, evicts the oldest, keeps the newest
+        value byte-identical, and never raises on the write path."""
+        cache, cache_ts = OrderedDict(), {}
+        lock = threading.Lock()
+        cache_max = 3
+        codes = [f'sh{600000 + i}' for i in range(cache_max + 1)]
+        for i, code in enumerate(codes):
+            stock_api._cache_store(cache, cache_ts, lock, code, {'n': i},
+                                   cache_max, 'quote')
+        self.assertEqual(len(cache), cache_max)               # bounded
+        self.assertNotIn(codes[0], cache)                     # oldest evicted
+        with lock:
+            self.assertNotIn(codes[0], cache_ts)              # ts evicted with it
+        self.assertEqual(cache[codes[-1]], {'n': cache_max})  # newest kept intact
+        self.assertEqual(metrics.snapshot()['cache_entries']['quote'], cache_max)
+
     def test_cached_batch_reads_without_network(self):
         codes = ['sh600001', 'sh600002']
         with stock_api._basic_info_cache_lock:
