@@ -16,6 +16,11 @@ services:
     build:
       context: ../..          # 从 doc/deploy/ 指向 repo 根目录
       dockerfile: Dockerfile
+      # 阿里云 ECS：apt 源走 VPC 内网域名，不占公网流量。
+      # 公网镜像站实测 chromium 依赖层 1519s（≈2Mbps 带宽）；内网预计 <2min。
+      # UCloud/本地构建勿传此参数（内网域名仅在阿里云 ECS 可达）。
+      args:
+        APT_MIRROR: mirrors.cloud.aliyuncs.com
     container_name: china-finance-rss
     restart: unless-stopped
     ports:

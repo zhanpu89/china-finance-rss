@@ -4,8 +4,14 @@ WORKDIR /app
 
 ENV TZ=Asia/Shanghai
 
-RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list 2>/dev/null; \
-    sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources 2>/dev/null; \
+# apt 源域名开关：默认阿里云公网镜像站，各云通用；仅阿里云 ECS 构建时由
+# doc/deploy/docker-compose.aliyun-2c2g.yml 的 build.args 注入内网域名
+# mirrors.cloud.aliyuncs.com（不占公网流量；公网 5Mbps 实测 1519s，内网 <2min）。
+# ARG 须位于引用它的 RUN 之前。
+ARG APT_MIRROR=mirrors.aliyun.com
+
+RUN sed -i "s|deb.debian.org|${APT_MIRROR}|g" /etc/apt/sources.list 2>/dev/null; \
+    sed -i "s|deb.debian.org|${APT_MIRROR}|g" /etc/apt/sources.list.d/debian.sources 2>/dev/null; \
     apt-get update && apt-get install -y chromium --no-install-recommends && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         tzdata \
