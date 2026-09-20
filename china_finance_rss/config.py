@@ -10,6 +10,7 @@ module (layerIsolation).
 import os
 import re
 from datetime import datetime, timezone, timedelta
+from types import MappingProxyType
 from urllib.parse import urlsplit
 
 # Env-based configuration
@@ -330,7 +331,17 @@ def stock_nav_page_names():
 MAX_QUOTE_POOL = int(os.getenv('MAX_QUOTE_POOL', '1000'))
 MAX_FUNDFLOW_POOL = int(os.getenv('MAX_FUNDFLOW_POOL', '1000'))
 MAX_TIMELINE_POOL = int(os.getenv('MAX_TIMELINE_POOL', '500'))
-_POOL_MAX_ENVS = frozenset({'MAX_QUOTE_POOL', 'MAX_FUNDFLOW_POOL', 'MAX_TIMELINE_POOL'})
+# 名单与取值同源：键即唯一合法 NAME，值即冻结的池上限（新增 env 只改这里一处）。
+# 池上限的注册映射在导入期建成并冻结（MappingProxyType）⇒ 运行期改写键/值都抛
+# TypeError，池上限结构性不可被改写（BR-CFG-10）；`'dedup'` 分支仍取导入期常量
+# MAX_DEDUP_CODES。未注册 NAME 一律 ValueError，与 `cache_policy` 的
+# KeyError(domain) 契约解耦（不再像 globals() 那样对"白名单内但未定义"的名字抛
+# KeyError——那会与 KeyError(domain) 契约撞型）。
+_POOL_MAX_ENVS = MappingProxyType({
+    'MAX_QUOTE_POOL': MAX_QUOTE_POOL,
+    'MAX_FUNDFLOW_POOL': MAX_FUNDFLOW_POOL,
+    'MAX_TIMELINE_POOL': MAX_TIMELINE_POOL,
+})
 
 
 # Domain cache matrix — the single authority for TTL / pool refresh / pool max /
@@ -462,7 +473,7 @@ def _resolve_int_factor(spec, base):
 
 def _resolve_pool_max(spec):
     """'n/a' -> None; 'dedup' -> MAX_DEDUP_CODES; 'fixed:<n>' -> int(n);
-    'env:<NAME>' -> 该 env 注册常量（未知 NAME 立即 ValueError）。"""
+    'env:<NAME>' -> 导入期冻结的注册表取值（未知 NAME 立即 ValueError）。"""
     if spec == 'n/a':
         return None
     if spec == 'dedup':
@@ -471,9 +482,10 @@ def _resolve_pool_max(spec):
         return int(spec.split(':', 1)[1])
     if isinstance(spec, str) and spec.startswith('env:'):
         name = spec.split(':', 1)[1]
-        if name not in _POOL_MAX_ENVS:
-            raise ValueError(f'bad pool_max env name: {name!r}')
-        return int(globals()[name])
+        try:
+            return int(_POOL_MAX_ENVS[name])           # 名单与值同源 + 类型归一（BR-CFG-4）
+        except KeyError:
+            raise ValueError(f'bad pool_max env name: {name!r}') from None
     raise ValueError(f'bad pool_max spec: {spec!r}')
 
 

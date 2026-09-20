@@ -393,25 +393,46 @@ class BatchPipelineTests(unittest.TestCase):
         self.assertEqual(list(cache), ['sh600001', 'sh600003'])
         self.assertEqual(metrics.snapshot()['cache_entries']['quote'], 2)
 
-    def test_prf_mem_01_cache_degrade_is_lru_bounded(self):   # CR-04
-        """PRF-MEM-01: `cache_max` (1000/500) is now below the active-code ceiling
-        (2000), so the "terminal cache covers the whole active set" invariant no
-        longer holds.  The graceful degradation to lock down: the cache stays
-        strictly LRU-bounded at `cache_max`, evicts the oldest, keeps the newest
-        value byte-identical, and never raises on the write path."""
+    def test_prf_mem_01_evicted_code_reads_as_miss_not_stale(self):   # PRF-MEM-01
+        """PRF-MEM-01: `cache_max` (1000/500) is now below the active-code
+        ceiling (2000), so a code can be LRU-evicted from the terminal cache
+        while the pool ledger still tracks it.  The read path must then report a
+        miss and refetch — never serve the evicted (stale) value.
+
+        The pure `_cache_store` bound is already locked by
+        `test_cache_true_lru_eviction`; this locks the *read* consequence of the
+        smaller `cache_max` (the degraded path PRF-MEM-01 introduced).
+
+        The policy is taken from the REAL `config.cache_policy('quote')` (not a
+        hand-built literal), so reverting the matrix's `cache_max` fails here:
+        the synthetic cache pays only the small `min(2, cache_max)` boundary
+        while the production `cache_max < MAX_DEDUP_CODES` fact stays pinned."""
+        policy = config.cache_policy('quote')         # real matrix policy
+        # PRF-MEM-01 fact: the terminal-cache bound is below the active-code
+        # ceiling, and never above the pool ledger's own cap.
+        self.assertLess(policy['cache_max'], config.MAX_DEDUP_CODES)
+        self.assertLessEqual(policy['cache_max'], policy['pool_max'])
+        boundary = min(2, policy['cache_max'])        # small, no 1000-entry fill
+        codes = [f'sh{600000 + i}' for i in range(boundary + 1)]
         cache, cache_ts = OrderedDict(), {}
         lock = threading.Lock()
-        cache_max = 3
-        codes = [f'sh{600000 + i}' for i in range(cache_max + 1)]
         for i, code in enumerate(codes):
-            stock_api._cache_store(cache, cache_ts, lock, code, {'n': i},
-                                   cache_max, 'quote')
-        self.assertEqual(len(cache), cache_max)               # bounded
-        self.assertNotIn(codes[0], cache)                     # oldest evicted
-        with lock:
-            self.assertNotIn(codes[0], cache_ts)              # ts evicted with it
-        self.assertEqual(cache[codes[-1]], {'n': cache_max})  # newest kept intact
-        self.assertEqual(metrics.snapshot()['cache_entries']['quote'], cache_max)
+            stock_api._cache_store(cache, cache_ts, lock, code,
+                                   {'v': f'stale-{i}'}, boundary, 'quote')
+        self.assertEqual(len(cache), boundary)        # eviction boundary honoured
+        self.assertNotIn(codes[0], cache)             # oldest LRU-evicted
+        calls = []
+
+        def _fetch(code, deadline=None, ttl=None):
+            calls.append(code)
+            return None                               # upstream has nothing now
+
+        results, errors = stock_api._process_chunk(
+            [codes[0]], 'quote', policy, _fetch,
+            pool=None, cache=cache, cache_ts=cache_ts, lock=lock)
+        self.assertEqual(calls, [codes[0]])           # evicted -> refetched
+        self.assertIsNone(results[codes[0]])          # miss, not 'stale-0'
+        self.assertEqual(errors, {})
 
     def test_cached_batch_reads_without_network(self):
         codes = ['sh600001', 'sh600002']

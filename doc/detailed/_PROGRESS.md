@@ -25,6 +25,10 @@
 - **本次（内存调优 PRF-MEM-01 · **修复轮**契约同步 · 2026-09-20 · 只改文档）**：`config.md` → **v1.9** / `stock_api.md` → **v1.7**（+ 本文件）。修复首轮 3 个问题（代码已落地、**517 用例全绿**）：**CR-02（关键）**——3 域 `pool_max` 由矩阵字面量 `'fixed:1000'`/`'fixed:1000'`/`'fixed:500'` 改为 **env 可调**：新增 spec 形 **`'env:<NAME>'`**（`_resolve_pool_max` 经白名单 `_POOL_MAX_ENVS = frozenset({'MAX_QUOTE_POOL','MAX_FUNDFLOW_POOL','MAX_TIMELINE_POOL'})` 在**调用期**解析为模块常量；未知 `NAME` ⇒ `ValueError('bad pool_max env name: ...')`）+ 新增 3 个 env 注册常量 **`MAX_QUOTE_POOL=1000` / `MAX_FUNDFLOW_POOL=1000` / `MAX_TIMELINE_POOL=500`**（`config.py` 顶层，紧邻 `MAX_DEDUP_CODES` 区域；**默认值 = 收缩值 ⇒ 行为不变、部署可免改码调参**）；矩阵三行改 `'env:MAX_QUOTE_POOL'`/`'env:MAX_FUNDFLOW_POOL'`/`'env:MAX_TIMELINE_POOL'`；**`cache_max`（1000/1000/500）仍为矩阵内整数字面量**（内存硬界，与其余 9 域一致）；`depth` 保持 `'dedup'`/500。**CR-03**——新增 `test_prf_mem_01_pool_cache_contract`（CFG-T19）+ `test_prf_mem_01_pool_cap_follows_env`（CR-02，热替换 `MAX_TIMELINE_POOL=400`）；**CR-04**——新增 `test_prf_mem_01_cache_degrade_is_lru_bounded`（锁 `cache_max` < 活跃码上界 2000 的**优雅 LRU 有界降级**）⇒ 用例总数 **514 → 517**。**CR-05**——更正 prefetch 间隔事实（= `pool_refresh` = `ttl × refresh_factor`：quote/depth 盘中 **4s**、fundflow/timeline **8s**、非盘 **120s**；原"120s 轮询"为误）+ `~0.65GiB` 标注**估算待实测**。**CR-06**——`depth` 池保持 `'dedup'` 的理由写入文档（**无 prefetch 循环**、池仅 `code→ts` 账本、`cache_max` 才是内存界）。落点：`config.md` 头部/§1.1#5/§2.4/§2.7/§3.1/§3.2/§3.3/§5/§6/§8(CFG-T19)/§10#24/§11；`stock_api.md` 头部/§3.3/§3.5/§4.3(BR-SA-13)/§9/§10#27/§11/§12；本文件。**只改文档；未改代码 / `doc/arch/`（SAD 已由 system-architect 于 **v1.15** 承接本修复轮）/ `doc/prd/` / `API.md` / `README.md` / `.opencode`。** 详见下方「★ PRF-MEM-01 修复轮契约同步」。
 - **本次（内存调优 PRF-MEM-01 **首轮**契约同步 · 2026-09-20 · 只改文档）**：`config.md` → **v1.8** / `stock_api.md` → **v1.6**（+ 本文件）。`DOMAIN_MATRIX` **3 域** 的 `pool_max`/`cache_max` **同源收缩**——`quote` `'dedup',2000 → 'fixed:1000',1000`、`fundflow` `'dedup',2000 → 'fixed:1000',1000`、`timeline` `'dedup',2000 → 'fixed:500',500`（`depth`/`announcement`/`f10` 仍 `'dedup'`=`MAX_DEDUP_CODES`=2000；`plate`/`feed`/`margin`/`sector` 不变）。**背景（PRF-MEM-01）**：压测显示容器内存 **96.57%** 高水位；归因 = 终端缓存被灌满至 `cache_max` + `timeline` 单条 ~96KB（内存大户）+ prefetch（`pool_refresh` 120s 轮询）保活使 LRU 不淘汰 ⇒ **同源收缩**使保活范围收敛，预期 python 稳态 **RSS ~1.1GiB→~0.65GiB**。落点：`config.md` §3.1/§3.2/§2.4/§8(CFG-T19)/§9/§10#24；`stock_api.md` §3.3/§3.5/BR-SA-13/§9/§10#27/§12；**顺带更正 `stock_api.md §3.5` 的 `quote.ttl` 遗留值 `8|120`→`4|120`**（`quote` 于 v1.4 升 L0）。**只改文档；未改代码 / `doc/arch/`（SAD §2.1/§4.3/AR-8 数值由 system-architect 回填）/ `doc/prd/` / `API.md` / `README.md` / `.opencode`。** 详见下方「★ 内存调优 PRF-MEM-01 契约同步」。
 
+- **本次（P8-r1 P1/P2 收尾 · 2026-09-20 · 只改文档）**：`config.md` → **v1.12** / `stock_api.md` → **v1.10**（+ 本文件）。**`'env:<NAME>'` 语义由"调用期 `globals()`（可热替换）"更正为导入期冻结的注册映射 `_POOL_MAX_ENVS`**（**键=唯一合法 NAME、值=冻结池上限、名单与取值同源**）；`cache_policy` **不读可变模块全局**（BR-CFG-10），运行期重绑定 `config.MAX_*_POOL` 不再改变 `['pool_max']`；未注册/未定义 NAME **一律 `ValueError`**（不再 `KeyError`）。**测试 hermetic 化 + 重复用例去重（代码/测试已落地、518 用例全绿）**：`test_prf_mem_01_pool_cache_contract` 改字面量锁定 + 结构性 spec 断言、删热替换用例，新增 `_pool_caps_are_frozen_at_import`（BR-CFG-10）/ `_bad_env_spec_fails_fast`（P2-1）；`tests/test_data_layer.py` 删除与 `test_cache_true_lru_eviction` 重复的用例、新增 `test_prf_mem_01_evicted_code_reads_as_miss_not_stale`（被 LRU 淘汰码**读为 miss 并回源**）⇒ 用例 **517 → 518**。**pool 与 cache 独立上限（P1-2）**：不设 `pool_max ≤ cache_max` 护栏（`depth`/`f10`/`announcement` 现状即 2000 > 500，只造成回源轮转浪费、非正确性问题）。落点：`config.md` 头部/§1.1#5/§2.3/§2.7/§3.1/§3.2/§3.3/§5/§6/BR-CFG-4/§8(CFG-T9/CFG-T19)/§10#24/§10.1/§11；`stock_api.md` 头部/§3.3/§4.3(BR-SA-13)/§10#27/§11/§12；本文件。**只改 `doc/detailed/`；未改代码 / 测试（修复已落地）/ `doc/arch/` / `doc/prd/` / `API.md` / `README.md` / `.opencode`。** 详见下方「★ P8-r1 P1/P2 收尾」。
+
+- **本次（P8-r2 收尾（注册表不可变 + int 归一 + 措辞如实） · 2026-09-20 · 只改文档）**：`config.md` → **v1.13**（+ 本文件；`stock_api.md` 仅 §10#27 补一行、**版本保持 v1.10**）。**① 注册表不可变（P1-1）**——`_POOL_MAX_ENVS` 由普通可变 `dict` 改为 **`MappingProxyType({...})`**（`from types import MappingProxyType`）⇒ **改键 / 改值 / 新增键一律 `TypeError`**（v1.12 的"导入期冻结"此前只冻结值，映射本身仍可被就地改）。**② `int()` 归一恢复（P1-3）**——`_resolve_pool_max` 的 `'env:'` 分支恢复 `return int(_POOL_MAX_ENVS[name])`（防注册值类型漂移；当前合法 int 输出逐字不变）。**③ 措辞如实收窄（P1-4）**——删去"`cache_policy` 完全不依赖可变模块全局"的**过宽**断言（`'dedup'` 分支**仍取**导入期常量 `MAX_DEDUP_CODES`）与"避免被 `_prefetch_loop` 的 `except` 静默吞掉"这一**不成立**陈述（`_prefetch_loop` **不调用** `_resolve_pool_max`）；**真实收益 = 与 `cache_policy` 的 `KeyError(domain)` 契约解耦**。**④ 测试（518 → 519 · 代码/测试已落地）**——`test_env_defaults`（CFG-T9）补 3 个 `MAX_*_POOL` 默认值；新增 `test_prf_mem_01_env_registry_is_immutable`（CFG-T19，改写值 / 新增键均 `TypeError`）；`test_prf_mem_01_evicted_code_reads_as_miss_not_stale` 改从**真实** `config.cache_policy('quote')` 派生并断言 `policy['cache_max'] < config.MAX_DEDUP_CODES`（**回退 `cache_max` 即红**）。**⑤ 保留不改（已登记为设计取舍）**——**不设** `pool_max ≤ cache_max` 护栏；**不在 unittest 中断言进程 RSS**（内存属实测/运维口径）。落点：`config.md` 头部/§1.1#5/§2.3/§2.7/§3.1/§3.3/§5/§6/BR-CFG-4/§8(CFG-T9/CFG-T19；**518 → 519**)/§10#24/§10.1(新增第 8 节)/§11；`stock_api.md` §10#27 补记一行（**版本保持 v1.10**）；本文件。**只改 `doc/detailed/`；未改代码 / 测试（修复已落地）/ `doc/arch/` / `doc/prd/` / `API.md` / `README.md` / `.opencode`。**
+
 ## ★ 未决项（后续处理 · 单点入口）
 
 > **本清单是"仍开放项"的唯一入口**；各详设 §10 / SAD / PRD 内的登记为该条的**详细上下文**，两者冲突时**以本清单的"状态"为准**。
@@ -1145,3 +1149,47 @@
 - **部署侧 `MALLOC_ARENA_MAX=2`**（env 注入）：属部署配置，非代码改动；如需写入 `README.md` / 部署脚本，**由编排层另批**。
 - **终端缓存解析对象治理（~200MB）**：属 `stock_api`/`cache` 代码改动，须**另立 change-set**。
 - **残留旧归因表述**：仅存于**历史变更块**（`config.md` v1.10 块与头部 ★ v1.10 片段、`stock_api.md` v1.8 块与头部 ★ v1.8 片段、本文件「★ PRF-MEM-01 实测回填与结论更正」）——按「不回改历史变更块」约定**原样保留**，其状态由本节取代（各处已由本节/新块显式标注「已被证伪」）。
+
+## ★ P8-r1 P1/P2 收尾（导入期冻结 + 测试 hermetic 化 + 重复用例去重 · 2026-09-20 · 只改文档）
+
+> 范围：**只改** `doc/detailed/{config,stock_api,_PROGRESS}.md`。背景：P8-r1 修复已落地（**518 用例全绿**），本轮把**契约文档**与实现对齐。**未改代码 / 测试（修复已落地）/ `doc/arch/`（SAD）/ `doc/prd/` / `API.md` / `README.md` / `.opencode/`**；**只增不删编号**；未回改任何历史变更块（旧措辞以「已更正」标注，保留原文）。
+
+### 1. 变更事实（代码，已落地）
+
+- **`'env:<NAME>'` 语义由"调用期解析"改为"导入期冻结的注册映射"**：`_POOL_MAX_ENVS` 由 `frozenset({'MAX_QUOTE_POOL','MAX_FUNDFLOW_POOL','MAX_TIMELINE_POOL'})` 改为**映射** `{'MAX_QUOTE_POOL': MAX_QUOTE_POOL, 'MAX_FUNDFLOW_POOL': MAX_FUNDFLOW_POOL, 'MAX_TIMELINE_POOL': MAX_TIMELINE_POOL}`（**键=唯一合法 NAME、值=导入期冻结的池上限；名单与取值同源，新增 env 只改一处**）。
+- **`_resolve_pool_max`** 的 `'env:'` 分支改为 `try: return _POOL_MAX_ENVS[name] except KeyError: raise ValueError(...) from None`（**不再 `globals()`**）。
+- **后果**：运行期重绑定 `config.MAX_*_POOL` **不再影响** `cache_policy(...)['pool_max']`（此前会生效）⇒ `cache_policy` 的运行期结果**不依赖可变模块全局**（符合 **BR-CFG-10**「运行期只读」）。
+- **错误类型**：未注册/未定义 NAME **一律 `ValueError('bad pool_max env name: ...')`**（此前可能 `KeyError`）。
+
+### 2. 测试侧（代码，已落地）
+
+- `tests/test_config.py::test_prf_mem_01_pool_cache_contract` 改为**字面量锁定**默认值（1000/1000/500）+ 断言 `DOMAIN_MATRIX[i][3] == 'env:MAX_*_POOL'`；**删除热替换用例** `test_prf_mem_01_pool_cap_follows_env`；新增 `test_prf_mem_01_pool_caps_are_frozen_at_import`（BR-CFG-10）与 `test_prf_mem_01_bad_env_spec_fails_fast`（P2-1）。
+- `tests/test_data_layer.py`：删除与 `test_cache_true_lru_eviction` 重复的用例；新增 `test_prf_mem_01_evicted_code_reads_as_miss_not_stale`（锁 `cache_max < 工作集` 时被 LRU 淘汰的码**读路径为 miss 并回源、绝不返回陈旧值**）。
+- **用例总数 517 → 518**。
+
+### 3. 逐处落点（`旧 → 新`）
+
+| 文件 | 位置 | 旧 → 新 |
+|------|------|---------|
+| `config.md` | 头部 / 版本 | v1.11 → **v1.12**；新增 **v1.12 变更块**（P8-r1 P1/P2 收尾） |
+| `config.md` | §1.1#5 / §2.7 yaml 注释 / §3.1 注释 | "在**调用期**绑定 / 白名单 _POOL_MAX_ENVS / 调用期解析" → **导入期冻结的注册映射取值（键=NAME、值=冻结值、名单与取值同源）** |
+| `config.md` | §2.3 env 表 | 补 `MAX_QUOTE_POOL`(1000) / `MAX_FUNDFLOW_POOL`(1000) / `MAX_TIMELINE_POOL`(500) 三行（**默认值 = PRF-MEM-01 收缩值**）+ 实现要点补注 |
+| `config.md` | §2.7 注 | "调用期 `globals()[NAME]`、热替换常量即生效" → **导入期建成并冻结、不读可变模块全局、运行期重绑定不生效** |
+| `config.md` | §3.3 边界澄清 | 同上更正（v1.12 更正 v1.9） |
+| `config.md` | **BR-CFG-4** | 改写为"`'env:<NAME>'` → **导入期冻结的注册映射**取值；未注册/未定义 NAME ⇒ `ValueError`"；删去"调用期 `globals()` / 可热替换" |
+| `config.md` | §5 伪代码 | `_POOL_MAX_ENVS` 映射（键=NAME、值=冻结值）+ `_resolve_pool_max` 改 `try/except KeyError` |
+| `config.md` | §6 错误处理 | "NAME 不在白名单（调用期）" → "**未注册/未定义 ⇒ `ValueError`（读导入期冻结映射未命中）**" |
+| `config.md` | §3.2 | 新增 **pool 与 cache 是两个独立上限（P1-2）** 设计取舍（不设 `pool_max ≤ cache_max` 护栏） |
+| `config.md` | §8 | **CFG-T9** 补 3 个 `MAX_*_POOL` 默认值断言；**CFG-T19** 更新为 **4 个落地用例**（含读路径 miss 锁）**517 → 518** |
+| `config.md` | §10#24 / §10.1 / §11 | 补 **P8-r1 P1/P2 收尾** 登记（导入期冻结、名单同源、`ValueError`、测试 hermetic 化） |
+| `stock_api.md` | 头部 / 版本 | v1.9 → **v1.10**；新增 **v1.10 变更块**（P8-r1 P1/P2 收尾） |
+| `stock_api.md` | §4.3 **BR-SA-13** | "调用期解析" → **导入期冻结映射 + 名单同源 + `ValueError`**；补 **pool/cache 独立上限（P1-2）** 设计取舍 |
+| `stock_api.md` | §3.3（v1.7 注） | "（白名单 `_POOL_MAX_ENVS`，调用期解析）" → "（经**导入期冻结**的注册映射取值）" |
+| `stock_api.md` | §10#27 | "白名单 `_POOL_MAX_ENVS` + **调用期**解析" → **导入期冻结映射取值**；编号列补 **★ v1.10** |
+| `stock_api.md` | §11 / §12 | 新增 v1.10 自检行 + 变更记录行 |
+| `_PROGRESS.md` | 「当前状态」+ 本节 | 新增登记 |
+
+### 4. 残留（**历史变更块，不回改**）
+
+- **现行有效正文**已无"调用期解析 / 可热替换"表述（见本轮 grep 自查：`config.md` 仅剩**历史 ★ v1.9 片段/块/自检行**，`stock_api.md` 仅剩**历史 v1.7/v1.8/v1.9 块与 §12 历史行**）。
+- 本文件下方「★ PRF-MEM-01 修复轮契约同步」§1/§2 及 `CR-02`/`CR-03` 行仍记旧措辞（`int(globals()[NAME])`、"热替换常量 ⇒ 值跟随"）——**为该轮历史快照，按约定原样保留**，其状态由本节取代。

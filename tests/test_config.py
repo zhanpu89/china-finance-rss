@@ -72,24 +72,46 @@ class CachePolicyTests(unittest.TestCase):
         self.assertEqual(config.cache_policy('quote', now=TRADING)['cache_max'], 1000)
 
     def test_prf_mem_01_pool_cache_contract(self):        # CFG-T19（PRF-MEM-01）
-        """3 域 pool/cache 同源收缩；depth 不变（池仅账本，cache_max 才是内存界）。"""
+        """3 域 pool/cache 同源收缩；depth 不变。默认值以字面量锁定，防静默回退。"""
+        self.assertEqual(config.MAX_QUOTE_POOL, 1000)
+        self.assertEqual(config.MAX_FUNDFLOW_POOL, 1000)
+        self.assertEqual(config.MAX_TIMELINE_POOL, 500)
         q = config.cache_policy('quote', now=TRADING)
         f = config.cache_policy('fundflow', now=TRADING)
         t = config.cache_policy('timeline', now=TRADING)
         d = config.cache_policy('depth', now=TRADING)
-        self.assertEqual((q['pool_max'], q['cache_max']), (config.MAX_QUOTE_POOL, 1000))
-        self.assertEqual((f['pool_max'], f['cache_max']), (config.MAX_FUNDFLOW_POOL, 1000))
-        self.assertEqual((t['pool_max'], t['cache_max']), (config.MAX_TIMELINE_POOL, 500))
+        self.assertEqual((q['pool_max'], q['cache_max']), (1000, 1000))
+        self.assertEqual((f['pool_max'], f['cache_max']), (1000, 1000))
+        self.assertEqual((t['pool_max'], t['cache_max']), (500, 500))
         self.assertEqual((d['pool_max'], d['cache_max']), (config.MAX_DEDUP_CODES, 500))
+        # spec 与 env 注册名单的链接（结构性断言，不做运行期热替换）
+        self.assertEqual(config.DOMAIN_MATRIX['quote'][3], 'env:MAX_QUOTE_POOL')
+        self.assertEqual(config.DOMAIN_MATRIX['fundflow'][3], 'env:MAX_FUNDFLOW_POOL')
+        self.assertEqual(config.DOMAIN_MATRIX['timeline'][3], 'env:MAX_TIMELINE_POOL')
 
-    def test_prf_mem_01_pool_cap_follows_env(self):       # CR-02
-        """收缩后的池上限仍由 env 注册常量支配（不是写死的字面量）。"""
+    def test_prf_mem_01_pool_caps_are_frozen_at_import(self):   # BR-CFG-10
+        """cache_policy 不依赖可变模块全局：运行期重绑定常量不改变策略输出。"""
         original = config.MAX_TIMELINE_POOL
         config.MAX_TIMELINE_POOL = 400
         try:
-            self.assertEqual(config.cache_policy('timeline', now=TRADING)['pool_max'], 400)
+            self.assertEqual(config.cache_policy('timeline', now=TRADING)['pool_max'], 500)
         finally:
             config.MAX_TIMELINE_POOL = original
+
+    def test_prf_mem_01_env_registry_is_immutable(self):        # BR-CFG-10 / P1-1
+        """注册映射本身不可变：运行期改写键/值都抛 TypeError（'导入期冻结'名副其实）。"""
+        with self.assertRaises(TypeError):
+            config._POOL_MAX_ENVS['MAX_TIMELINE_POOL'] = 9999
+        with self.assertRaises(TypeError):
+            config._POOL_MAX_ENVS['MAX_NEW_POOL'] = 1
+        # 且未注册名仍是 ValueError
+        self.assertEqual(config.cache_policy('timeline', now=TRADING)['pool_max'], 500)
+
+    def test_prf_mem_01_bad_env_spec_fails_fast(self):          # P2-1
+        """未注册/未定义的 env 名单一律 ValueError（不是 KeyError）。"""
+        for bad in ('env:NOT_REGISTERED', 'env:', 'env:MAX_NOT_DEFINED'):
+            with self.assertRaises(ValueError):
+                config._resolve_pool_max(bad)
 
     def test_sector_override_ignores_tier_and_time(self):     # BR-CFG-2
         self.assertEqual(config.cache_policy('sector', now=TRADING)['ttl'], 604800)
@@ -166,6 +188,10 @@ class CachePolicyTests(unittest.TestCase):
         self.assertGreaterEqual(config.HTTP_POOL_MAX_PER_HOST,
                                 config.BATCH_MAX_WORKERS)
         self.assertEqual(config.STREAM_PER_FETCH_EST, 0.3)
+        # PRF-MEM-01: the 3 domain pool-cap env defaults (config.md §8 CFG-T9).
+        self.assertEqual(config.MAX_QUOTE_POOL, 1000)
+        self.assertEqual(config.MAX_FUNDFLOW_POOL, 1000)
+        self.assertEqual(config.MAX_TIMELINE_POOL, 500)
 
     def test_no_bare_ttl_literals(self):                      # CFG-T10
         pkg = os.path.dirname(os.path.abspath(config.__file__))
