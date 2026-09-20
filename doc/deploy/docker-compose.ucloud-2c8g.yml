@@ -2,6 +2,10 @@
 # 压测基线：MAX_WORKERS=30/MAX_INFLIGHT=60，300并发 180 qps，CPU 86%
 # 角色：Nginx sticky 粘性目标节点，承载全部 SSE 连接 + 大半 REST 流量
 #
+# 运行时调优（2026-09-20 专项 · A/B 已证实；证据见下方 environment 段注释）：
+#   MALLOC_ARENA_MAX=2         PRF-MEM-02   python VmRSS −248MiB，容器 1.41→1.259GiB
+#   HTTP_POOL_MAX_PER_HOST=48  PRF-LAT-01   fundflow avg −52%、basic_info −25%
+#
 # 启动：
 #   docker compose -f doc/deploy/docker-compose.ucloud-2c8g.yml up -d --build
 #
@@ -40,6 +44,33 @@ services:
       # ── 日志 ──────────────────────────────────────────────
       - LOG_DIR=/app/logs
       - LOG_BACKUP_DAYS=30
+      # ── 内存（PRF-MEM-02，A/B 已证实）──────────────────────
+      # glibc per-thread arena 上限。默认最多 8×ncores 个 64MB arena，分配后
+      # 长期不归还 OS ⇒ 碎片（RssAnon 占 98%、RssFile 仅 14.5MB）。
+      # A/B 实测（压测 run 20260920-113125）：python VmRSS 1.008GiB→0.772GiB
+      # （−248MiB）、VmSize 8.96GB→1.15GB、匿名 rw-p 映射 300→166、
+      # 容器稳态 1.41GiB(93.98%)→1.259GiB(83.95%)。
+      # 本节点 8G 内存宽松、碎片不构成风险，但机制与线程数正相关（30 worker +
+      # CDP + stream 线程更多 ⇒ arena 更多），收益为内存卫生（VmSize 虚高消除）
+      # 且无实测回退；如出现异常可在本行单独回退。
+      # 见 SAD §7.2 AR-18 / §9.17（tech-stack.json infrastructure.deployment）。
+      - MALLOC_ARENA_MAX=2
+      # ── 上游连接池（PRF-LAT-01，A/B 已证实）────────────────
+      # 每 (scheme,host,port) keep-alive 池上限。默认 24 在高并发下成为排队
+      # 瓶颈（30 worker × fan-out 抢连接）。实测（run 20260920-142456，基线
+      # run 20260920-140901）：fundflow tier1000 avg 3.00→1.43s（−52%）、
+      # basic_info 4.08→3.08s（−25%）、ok_rate 100%，内存无变化。
+      # 取 48（=已实证值）满足：
+      #   ① 池 ≥ BATCH_MAX_WORKERS(=20)：批扇出不排队在池上（硬约束，改其一须
+      #      连带核另一；BUG-SSE-DEPTH-01 / SAD AR-14）；
+      #   ② 池 ≥ MAX_WORKERS(=30)，每个 worker 至少一条专属连接。
+      # ⚠ 本节点 MAX_INFLIGHT=60 > 48，超出部分按设计走 ephemeral 短连接
+      #   （不排队、不阻塞，仅多一次握手）；若要完全覆盖在飞快照可升到 60
+      #   （= MAX_INFLIGHT），但**需先核上游在 60 并发下是否限流并单独 A/B**，
+      #   故本次不取。
+      # 注意：timeline 尾延迟未改善——由上游/CPU（单码 ~96KB JSON 解析）支配、
+      # 非连接池，属已知容量边界（_PROGRESS.md B-7 / SAD §4.2）。
+      - HTTP_POOL_MAX_PER_HOST=48
     volumes:
       - ../../data:/app/data
       - ../../logs:/app/logs

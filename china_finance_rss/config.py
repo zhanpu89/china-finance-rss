@@ -10,6 +10,7 @@ module (layerIsolation).
 import os
 import re
 from datetime import datetime, timezone, timedelta
+from types import MappingProxyType
 from urllib.parse import urlsplit
 
 # Env-based configuration
@@ -323,31 +324,65 @@ def stock_nav_page_names():
     return tuple(names)
 
 
+# PRF-MEM-01（2026-09-20）每域池上限 —— env 注册（BR-CFG-16 / §1.1#5）。
+# 池是 code→最近触碰时刻 的廉价账本，上限决定该域 prefetch 轮转覆盖多少码；
+# 在此注册使部署可免改码调参。终端缓存 cache_max 才是真实内存界，按既有模式
+# 保持为矩阵内的整数字面量（与其余 9 域一致）。
+MAX_QUOTE_POOL = int(os.getenv('MAX_QUOTE_POOL', '1000'))
+MAX_FUNDFLOW_POOL = int(os.getenv('MAX_FUNDFLOW_POOL', '1000'))
+MAX_TIMELINE_POOL = int(os.getenv('MAX_TIMELINE_POOL', '500'))
+# 名单与取值同源：键即唯一合法 NAME，值即冻结的池上限（新增 env 只改这里一处）。
+# 池上限的注册映射在导入期建成并冻结（MappingProxyType）⇒ 运行期改写键/值都抛
+# TypeError，池上限结构性不可被改写（BR-CFG-10）；`'dedup'` 分支仍取导入期常量
+# MAX_DEDUP_CODES。未注册 NAME 一律 ValueError，与 `cache_policy` 的
+# KeyError(domain) 契约解耦（不再像 globals() 那样对"白名单内但未定义"的名字抛
+# KeyError——那会与 KeyError(domain) 契约撞型）。
+_POOL_MAX_ENVS = MappingProxyType({
+    'MAX_QUOTE_POOL': MAX_QUOTE_POOL,
+    'MAX_FUNDFLOW_POOL': MAX_FUNDFLOW_POOL,
+    'MAX_TIMELINE_POOL': MAX_TIMELINE_POOL,
+})
+
+
 # Domain cache matrix — the single authority for TTL / pool refresh / pool max /
 # endpoint cache max / upstream encoding (SAD §2.1, BR-CFG-*).
 #   domain -> (tier, ttl_factor, pool_refresh_factor, pool_max, cache_max)
 #     ttl_factor            : float | 'override:<seconds>'
 #     pool_refresh_factor   : float | 'n/a'
-#     pool_max              : 'dedup' (=MAX_DEDUP_CODES) | 'fixed:<n>' | 'n/a'
+#     pool_max              : 'dedup' (=MAX_DEDUP_CODES) | 'fixed:<n>' | 'n/a' | 'env:<NAME>'(env 注册常量)
 #     cache_max             : int | 'n/a'
-# `cache_max` bounds a domain's *terminal* cache (stock_api._cache_store) or its
-# feed cache (cache.feed_cache_put).  Domains served only through the shared URL
-# cache (cache.fetch_json — plate / news_url / longhu / margin) declare 'n/a':
-# their entries are bounded by the global cache.MAX_CACHE_SIZE, so a per-domain
-# int there would be a dead setting an operator could not act on (P2-9).
+# `cache_max` bounds a domain's *terminal* cache (stock_api._cache_store /
+# market_api._margin_cache) or its feed cache (cache.feed_cache_put).  Domains
+# served only through the shared URL cache (cache.fetch_json — plate /
+# news_url / longhu) declare 'n/a': their entries are bounded by the global
+# cache.MAX_CACHE_SIZE, so a per-domain int there would be a dead setting an
+# operator could not act on (P2-9).  `margin` left that group (PRF-LAT-02): a
+# URL-cache hit still re-ran json.loads + _transform_margin on every request
+# (hot-path P50 ≈8-9ms), so it now keeps its own 8-entry terminal cache.
 # 'n/a' literals are kept in the matrix for 1:1 SAD reading; cache_policy
 # normalises them to None (BR-CFG-11).
+# 2026-09-20 PRF-MEM-01 / PRF-MEM-02（内存调优，A/B 实测更正）：3 域 pool/cache
+# 同源收缩（pool 经 env 注册可调；cache_max 1000/1000/500 为内存硬界）。实测 run
+# 20260920-110805：python RSS 1.095→1.012GiB（−83MiB）、容器 1.449→1.41GiB
+# ⇒ 终端缓存只是小头。纠偏：共享 URL 缓存存**解码文本**（cache.py:851-866，
+# json.loads 在调用方命中后才做），仅约几十 MB，非大头（上一轮"条目存解析后
+# Python 对象 / 真大头"归因已证伪）。真因＝glibc per-thread arena 碎片：33 线程
+# × 默认最多 8×ncores 个 64MB arena、VmSize 8.96GB、300 个匿名 rw-p 映射；设
+# MALLOC_ARENA_MAX=2（docker-compose env）后 python RSS −248MiB 至 0.772GiB、
+# 容器 1.259GiB（83.95%）、VmSize 1.15GB、匿名映射 166；tier1000 timeline
+# ok_rate 89.6%→100%（单次观测，或含上游波动，勿写成结论）。累计 python RSS
+# 1.095→0.772GiB；仍未到 0.65GiB 级，剩余＝缓存解析对象＋运行时/分配器残余。
 DOMAIN_MATRIX = {
-    'quote':        ('L0', 1.0, 1.0, 'dedup', 2000),                  # stock/data, basic_info, 实时价
+    'quote':        ('L0', 1.0, 1.0, 'env:MAX_QUOTE_POOL', 1000),    # stock/data, basic_info, 实时价
     'depth':        ('L0', 1.0, 1.0, 'dedup', 500),                   # 五档盘口 (与 quote 同拍)
-    'fundflow':     ('L1', 1.0, 1.0, 'dedup', 2000),
-    'timeline':     ('L1', 1.0, 1.0, 'dedup', 2000),
+    'fundflow':     ('L1', 1.0, 1.0, 'env:MAX_FUNDFLOW_POOL', 1000),
+    'timeline':     ('L1', 1.0, 1.0, 'env:MAX_TIMELINE_POOL', 500),
     'plate':        ('L2', 1.0, 1.0, 'fixed:200', 'n/a'),             # cls/hotplate, cls/plate (URL cache)
     'news_url':     ('L3', 1.0, 1.0, 'n/a', 'n/a'),                   # 5 源 RSS URL (share cache{})
     'feed':         ('L3', 1.0, 1.0, 'fixed:100', 100),
     'announcement': ('L3', 1.0, 1.0, 'dedup', 500),
     'longhu':       ('L4', 1.0, 1.0, 'n/a', 'n/a'),                   # GBK upstream, 日更 (URL cache)
-    'margin':       ('L4', 2.0, 2.0, 'fixed:16', 'n/a'),              # = 600s / 1200s (URL cache)
+    'margin':       ('L4', 2.0, 2.0, 'fixed:16', 8),                  # = 600s / 1200s (终端缓存 8)
     'f10':          ('L4', 1.0, 1.0, 'dedup', 500),
     'sector':       ('L4', 'override:604800', 'n/a', 'fixed:2000', 2000),  # 7d 行业名
 }
@@ -440,13 +475,20 @@ def _resolve_int_factor(spec, base):
 
 
 def _resolve_pool_max(spec):
-    """'n/a' -> None; 'dedup' -> MAX_DEDUP_CODES; 'fixed:<n>' -> int(n)."""
+    """'n/a' -> None; 'dedup' -> MAX_DEDUP_CODES; 'fixed:<n>' -> int(n);
+    'env:<NAME>' -> 导入期冻结的注册表取值（未知 NAME 立即 ValueError）。"""
     if spec == 'n/a':
         return None
     if spec == 'dedup':
         return MAX_DEDUP_CODES
     if isinstance(spec, str) and spec.startswith('fixed:'):
         return int(spec.split(':', 1)[1])
+    if isinstance(spec, str) and spec.startswith('env:'):
+        name = spec.split(':', 1)[1]
+        try:
+            return int(_POOL_MAX_ENVS[name])           # 名单与值同源 + 类型归一（BR-CFG-4）
+        except KeyError:
+            raise ValueError(f'bad pool_max env name: {name!r}') from None
     raise ValueError(f'bad pool_max spec: {spec!r}')
 
 

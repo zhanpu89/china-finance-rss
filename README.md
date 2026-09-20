@@ -89,6 +89,7 @@ http://localhost:8053/healthz?check=1
 | `STREAM_HOST` | `127.0.0.1` | SSE listen addr; set `0.0.0.0` for cross-host/container access (no-auth mgmt surface) |
 | `CDP_RESTART_THROTTLE` | `15` | Full Chrome restart throttle (s); guards the `full_chrome_restart` lock (×2 = no re-restart within 30s) |
 | `STREAM_GROUP_IDLE_TTL` | `300` | Idle zombie subscription-group reaper (s); a group with no live connection is destroyed after this — clients must re-POST `/stream/subscriptions` after a long disconnect |
+| `MALLOC_ARENA_MAX` | `2` | glibc per-thread arena cap (container runtime, **not** read by the app; set in `docker-compose.yml`). With 33 threads the glibc default (up to `8 × ncores` 64MB arenas) fragments and does not return memory: A/B under load cut python RSS 1.008→0.772GiB and container steady state 1.41GiB(93.98%)→1.259GiB(83.95%) (SAD §7.2 AR-18) |
 
 > Cache TTL is **per data-domain and trading-hours aware** (`config.cache_policy`, single source of truth) — it is no longer a single env var. Examples: `quote`/`depth` **4s** (trading) / 120s (off-hours), RSS/`news_url` 30s / 180s, `fundflow`/`timeline` 8s / 120s, `plate` 12s / 120s, `f10`/`longhu` 300s, `margin` 600s, `sector` 7d. Upstream failures are rate-limited by a negative cache (5s) plus an escalating probe budget (2→4→5s). Upstream HTTP is pooled with keep-alive + in-process DNS caching.
 

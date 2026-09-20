@@ -2,6 +2,10 @@
 # 压测基线：MAX_WORKERS=20/MAX_INFLIGHT=40，300并发 244 qps，CPU 92%，内存稳定 35%
 # 角色：UCloud 主节点宕机时接管全部 SSE（ip_hash 粘性 fallback）+ REST 轮询冗余
 #
+# 运行时调优（2026-09-20 专项 · A/B 已证实；证据见下方 environment 段注释）：
+#   MALLOC_ARENA_MAX=2         PRF-MEM-02   python VmRSS −248MiB，容器 1.41→1.259GiB
+#   HTTP_POOL_MAX_PER_HOST=48  PRF-LAT-01   fundflow avg −52%、basic_info −25%
+#
 # 启动：
 #   docker compose -f doc/deploy/docker-compose.aliyun-2c2g.yml up -d --build
 #
@@ -38,6 +42,27 @@ services:
       # ── 日志 ──────────────────────────────────────────────
       - LOG_DIR=/app/logs
       - LOG_BACKUP_DAYS=30
+      # ── 内存（PRF-MEM-02，A/B 已证实）──────────────────────
+      # glibc per-thread arena 上限。默认最多 8×ncores 个 64MB arena，分配后
+      # 长期不归还 OS ⇒ 碎片（RssAnon 占 98%、RssFile 仅 14.5MB）。
+      # A/B 实测（压测 run 20260920-113125）：python VmRSS 1.008GiB→0.772GiB
+      # （−248MiB）、VmSize 8.96GB→1.15GB、匿名 rw-p 映射 300→166、
+      # 容器稳态 1.41GiB(93.98%)→1.259GiB(83.95%)。
+      # 2C2G 节点内存最紧（mem_limit 1.5g），本项是本档收益最大的一项。
+      # 见 SAD §7.2 AR-18 / §9.17（tech-stack.json infrastructure.deployment）。
+      - MALLOC_ARENA_MAX=2
+      # ── 上游连接池（PRF-LAT-01，A/B 已证实）────────────────
+      # 每 (scheme,host,port) keep-alive 池上限。默认 24 在高并发下成为排队
+      # 瓶颈（20 worker × fan-out 抢连接）。取 48 同时满足两条约束：
+      #   ① 池 ≥ MAX_INFLIGHT(=40)：每个在飞请求都有专属连接；
+      #   ② 池 ≥ BATCH_MAX_WORKERS(=20)：批扇出不排队在池上
+      #      （硬约束，改其一须连带核另一；BUG-SSE-DEPTH-01 / SAD AR-14）。
+      # 实测（run 20260920-142456，基线 run 20260920-140901）：fundflow tier1000
+      # avg 3.00→1.43s（−52%）、basic_info 4.08→3.08s（−25%）、ok_rate 100%，
+      # 且内存无变化；上游在 48 并发下未观测到限流。
+      # 注意：timeline 尾延迟未改善——由上游/CPU（单码 ~96KB JSON 解析）支配、
+      # 非连接池，属已知容量边界（_PROGRESS.md B-7 / SAD §4.2）。
+      - HTTP_POOL_MAX_PER_HOST=48
     volumes:
       - ../../data:/app/data
       - ../../logs:/app/logs

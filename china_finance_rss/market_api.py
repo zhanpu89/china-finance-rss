@@ -2,14 +2,17 @@
 
 Sourced from 同花顺 data center (public REST APIs, no auth needed).
 
-TTL is derived from ``config.cache_policy('margin')`` only; fetching goes
-through ``cache.fetch_json`` only. Failures are classified as
+TTL is derived from ``config.cache_policy('margin')`` only. ``cache.fetch_json``
+remains the sole HTTP egress, but a TTL-fresh terminal-cache hit serves the
+stored payload without calling it. Failures are classified as
 ``cache.FetchError(kind)`` and surface as an enumerated ``_error`` code.
 """
 
 import json
 import logging
+import threading
 import time
+from collections import OrderedDict
 
 from . import metrics
 from .cache import FetchError, fetch_json
@@ -22,6 +25,16 @@ log = logging.getLogger('market')
 # Single authority — server.py imports this for its boundary check, so the
 # enum cannot drift between the routing layer and the URL builder.
 VALID_MARKETS = ('99', '1', '2', '3')
+
+# Terminal cache (LRU + TTL + cache_max; PRF-LAT-02).  The shared URL cache
+# stores decoded *text* (cache.py) — every request that hits it still pays
+# ``json.loads`` + ``_transform_margin`` on the hot path (measured P50 ≈8-9ms).
+# Keyed by ``market`` (the full validated enum), so the cache can never hold
+# more than len(VALID_MARKETS) entries in practice while ``cache_max`` still
+# bounds it structurally.
+_margin_cache = OrderedDict()          # market -> transformed payload
+_margin_cache_ts = {}                  # market -> write instant (TTL base)
+_margin_cache_lock = threading.Lock()
 
 _DEGRADED_LATEST = {'rzye': 0.0, 'rqye': 0.0, 'rzmre': 0.0,
                     'rzjmr': 0.0, 'rqjmc': 0.0, 'lr': 0.0, 'zb': 0.0}
@@ -54,15 +67,36 @@ def fetch_margin(market='99', deadline=None):
     built** (`FetchError('upstream_error')`, no network): the value is
     interpolated into a path segment, so unvalidated input could otherwise
     inject same-host paths/queries and mint one cache key per bogus value.
+
+    PRF-LAT-02: a TTL-fresh entry in the process-local ``_margin_cache``
+    short-circuits both the URL fetch *and* the ``upstream_fetch_total`` count
+    (the gauge tracks fetch-path invocations, i.e. terminal-cache misses).
+    Nothing is cached on a failure or a "no data" payload — only a usable
+    ``latest`` row is stored, so a degraded body can never be served.
     """
     if market not in VALID_MARKETS:                               # §2.1 enum gate
         raise FetchError('upstream_error', url=_MARGIN_URL)
     url = f'{_MARGIN_URL}/{market}/'
-    ttl = cache_policy('margin')['ttl']                           # BR-MKT-1 (no bare ttl)
+    policy = cache_policy('margin')                               # BR-MKT-1 (no bare ttl)
+    ttl = policy['ttl']
     if deadline is not None and time.time() >= deadline:          # BR-MKT-3: no network
         raise FetchError('upstream_timeout', url=url)
 
-    metrics.incr('upstream_fetch_total', key='margin')            # BR-MKT-9
+    # Terminal cache lookup (TTL hit -> move_to_end, no parse / no count).
+    now = time.time()
+    with _margin_cache_lock:
+        cached = _margin_cache.get(market)
+        hit = cached is not None and now - _margin_cache_ts.get(market, 0) < ttl
+        if hit:
+            _margin_cache.move_to_end(market)                     # true LRU
+        entries = len(_margin_cache)                              # 锁内取长度
+    if hit:
+        # Publish out-of-lock (metrics is a leaf lock): keeps the gauge honest
+        # even when a hit is the only thing that touched the cache.
+        metrics.set_gauge('cache_entries', entries, key='margin')
+        return cached
+
+    metrics.incr('upstream_fetch_total', key='margin')            # BR-MKT-9 (miss only)
     try:
         raw = json.loads(                                                 # BR-MKT-2
             fetch_json(url, _MARGIN_HEADERS, ttl=ttl, deadline=deadline))
@@ -77,7 +111,21 @@ def fetch_margin(market='99', deadline=None):
     if raw.get('status_code') != 0:                               # BR-MKT-4: semantic fail
         metrics.incr('upstream_fail_total', key='upstream_error')
         raise FetchError('upstream_error', url=url)
-    return _transform_margin(raw.get('data') or {})
+    payload = _transform_margin(raw.get('data') or {})
+    if payload['latest'] is not None:                             # usable data only
+        cache_max = policy['cache_max']
+        with _margin_cache_lock:
+            _margin_cache[market] = payload
+            _margin_cache_ts[market] = now                        # TTL base
+            _margin_cache.move_to_end(market)                     # BR-MKT-15
+            while len(_margin_cache) > cache_max:
+                victim, _ = _margin_cache.popitem(last=False)     # true LRU
+                _margin_cache_ts.pop(victim, None)
+            entries = len(_margin_cache)                          # 锁内取长度
+        # Publish out-of-lock, matching stock_api._cache_store (BR-SA-26) so
+        # every terminal cache in the repo reports cache_entries{domain}.
+        metrics.set_gauge('cache_entries', entries, key='margin')
+    return payload
 
 
 def _to_float(val):

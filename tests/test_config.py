@@ -64,12 +64,60 @@ class CachePolicyTests(unittest.TestCase):
 
     def test_policy_values(self):
         self.assertEqual(config.cache_policy('margin', now=TRADING)['pool_refresh'], 1200)
+        # PRF-LAT-02: margin owns a terminal cache now (URL-cache-only list
+        # shrank to plate/news_url/longhu).  pool_max stays 'fixed:16' — margin
+        # does not use a pool, the literal is the 4 markets × 2 headroom bound.
+        self.assertEqual((config.cache_policy('margin', now=TRADING)['pool_max'],
+                          config.cache_policy('margin', now=TRADING)['cache_max']),
+                         (16, 8))
         self.assertIsNone(config.cache_policy('sector', now=TRADING)['pool_refresh'])
         self.assertEqual(config.cache_policy('f10', now=TRADING)['pool_max'],
                          config.MAX_DEDUP_CODES)
         self.assertEqual(config.cache_policy('announcement', now=TRADING)['cache_max'], 500)
         self.assertEqual(config.cache_policy('plate', now=TRADING)['pool_max'], 200)
-        self.assertEqual(config.cache_policy('quote', now=TRADING)['cache_max'], 2000)
+        self.assertEqual(config.cache_policy('quote', now=TRADING)['cache_max'], 1000)
+
+    def test_prf_mem_01_pool_cache_contract(self):        # CFG-T19（PRF-MEM-01）
+        """3 域 pool/cache 同源收缩；depth 不变。默认值以字面量锁定，防静默回退。"""
+        self.assertEqual(config.MAX_QUOTE_POOL, 1000)
+        self.assertEqual(config.MAX_FUNDFLOW_POOL, 1000)
+        self.assertEqual(config.MAX_TIMELINE_POOL, 500)
+        q = config.cache_policy('quote', now=TRADING)
+        f = config.cache_policy('fundflow', now=TRADING)
+        t = config.cache_policy('timeline', now=TRADING)
+        d = config.cache_policy('depth', now=TRADING)
+        self.assertEqual((q['pool_max'], q['cache_max']), (1000, 1000))
+        self.assertEqual((f['pool_max'], f['cache_max']), (1000, 1000))
+        self.assertEqual((t['pool_max'], t['cache_max']), (500, 500))
+        self.assertEqual((d['pool_max'], d['cache_max']), (config.MAX_DEDUP_CODES, 500))
+        # spec 与 env 注册名单的链接（结构性断言，不做运行期热替换）
+        self.assertEqual(config.DOMAIN_MATRIX['quote'][3], 'env:MAX_QUOTE_POOL')
+        self.assertEqual(config.DOMAIN_MATRIX['fundflow'][3], 'env:MAX_FUNDFLOW_POOL')
+        self.assertEqual(config.DOMAIN_MATRIX['timeline'][3], 'env:MAX_TIMELINE_POOL')
+
+    def test_prf_mem_01_pool_caps_are_frozen_at_import(self):   # BR-CFG-10
+        """cache_policy 不依赖可变模块全局：运行期重绑定常量不改变策略输出。"""
+        original = config.MAX_TIMELINE_POOL
+        config.MAX_TIMELINE_POOL = 400
+        try:
+            self.assertEqual(config.cache_policy('timeline', now=TRADING)['pool_max'], 500)
+        finally:
+            config.MAX_TIMELINE_POOL = original
+
+    def test_prf_mem_01_env_registry_is_immutable(self):        # BR-CFG-10 / P1-1
+        """注册映射本身不可变：运行期改写键/值都抛 TypeError（'导入期冻结'名副其实）。"""
+        with self.assertRaises(TypeError):
+            config._POOL_MAX_ENVS['MAX_TIMELINE_POOL'] = 9999
+        with self.assertRaises(TypeError):
+            config._POOL_MAX_ENVS['MAX_NEW_POOL'] = 1
+        # 且未注册名仍是 ValueError
+        self.assertEqual(config.cache_policy('timeline', now=TRADING)['pool_max'], 500)
+
+    def test_prf_mem_01_bad_env_spec_fails_fast(self):          # P2-1
+        """未注册/未定义的 env 名单一律 ValueError（不是 KeyError）。"""
+        for bad in ('env:NOT_REGISTERED', 'env:', 'env:MAX_NOT_DEFINED'):
+            with self.assertRaises(ValueError):
+                config._resolve_pool_max(bad)
 
     def test_sector_override_ignores_tier_and_time(self):     # BR-CFG-2
         self.assertEqual(config.cache_policy('sector', now=TRADING)['ttl'], 604800)
@@ -122,9 +170,11 @@ class CachePolicyTests(unittest.TestCase):
 
     def test_url_cache_only_domains_declare_no_cache_max(self):  # P2-9
         """`cache_max` bounds a terminal/feed cache; URL-cache-only domains
-        (plate/news_url/longhu/margin) must not advertise a per-domain cap the
-        URL cache never reads — operators would otherwise tune a dead setting."""
-        for d in ('plate', 'news_url', 'longhu', 'margin'):
+        (plate/news_url/longhu) must not advertise a per-domain cap the URL
+        cache never reads — operators would otherwise tune a dead setting.
+        `margin` left this group in PRF-LAT-02 (it now owns an 8-entry
+        terminal cache), so it is asserted in test_policy_values instead."""
+        for d in ('plate', 'news_url', 'longhu'):
             self.assertIsNone(config.cache_policy(d, now=TRADING)['cache_max'])
 
     def test_env_defaults(self):                              # CFG-T9
@@ -146,6 +196,10 @@ class CachePolicyTests(unittest.TestCase):
         self.assertGreaterEqual(config.HTTP_POOL_MAX_PER_HOST,
                                 config.BATCH_MAX_WORKERS)
         self.assertEqual(config.STREAM_PER_FETCH_EST, 0.3)
+        # PRF-MEM-01: the 3 domain pool-cap env defaults (config.md §8 CFG-T9).
+        self.assertEqual(config.MAX_QUOTE_POOL, 1000)
+        self.assertEqual(config.MAX_FUNDFLOW_POOL, 1000)
+        self.assertEqual(config.MAX_TIMELINE_POOL, 500)
 
     def test_no_bare_ttl_literals(self):                      # CFG-T10
         pkg = os.path.dirname(os.path.abspath(config.__file__))

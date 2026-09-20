@@ -1,7 +1,7 @@
 # 短线交易财经数据服务 — 高效/准确/稳定优化专项架构建档（SAD）
 
-> **文档编号** SAD-2026-P6C-01 · **版本** v1.13 · **状态** 待复审
-> **日期** 2026-09-18 · **产出** system-architect
+> **文档编号** SAD-2026-P6C-01 · **版本** v1.20 · **状态** 待复审
+> **日期** 2026-09-20 · **产出** system-architect
 > **上游输入** PRD `doc/prd/perf-stability-optimization.md`（**v0.10，36 AC**（高效 10 / 准确 14 / 稳定 12）/ R1-R20；SAD v1.8 承接的 RSS 条件请求 **AC-A13**、v1.9 承接 **AC-A14**、v1.10 承接 **AC-S12** 由 prd-writer 并行落号，落号对齐见 §8 / §9.11）
 > **版本引用时点约定（v1.13）**：本档「上游输入 / 接口权威 / 文末承接」各栏所列版本 = **本档最后一次同步时点的快照**；被引文档的**权威版本以其自身头部为准**——故该栏**落后一版不属漂移、无需每次追平**；**内容以被引文档为准，此栏仅用于定位**。引用具体条款 / BR / 取值时必须回查被引文档正文，**不得以本栏版本号替代核验**。
 > **修订依据**（v1.1）review-expert `doc/review/perf-stability-optimization_架构评审_专家版.md`（REV-ARCH-20260915-001，❌ 阻断：P0×1 + P1×7 + P2×8；Q1/Q2/Q3 裁决）；（v1.2）复审「❌ 仍阻断」但机制层（P0×1 + P1×7）已全部合格、Q1/Q2/Q3 逐字落地——仅收口 **P1-N1（coverage 单位）** ＋ **P1-N2（`_Frame.refs` 收口）** 与 7 项 P2。逐项落地见 §9；（v1.3）基础层三模块详设评审 review-expert `doc/review/基础层三模块_详细设计评审_专家版.md`（REV-DES-20260915-001，✅ 通过 P0×0/P1×1/P2×8）——落地 P3b 评审的 SAD 侧动作：3 项内部矛盾更正 + 6 项裁决 + D-1~D-7 偏差回填 + 2 项 SAD↔代码不一致更正，逐项见 §9.3；（v1.4）**P7b 契约同步**——以**代码为准**回写实现的最新行为（帧契约、订阅字段容量模型、单帧余量准入、探预算阶梯、deadline 贯通、`canonical_code` 归一化权威、CDP/观测口径），并登记 1 项与 PRD AC-A5 冲突的**待裁决**漂移，逐项见 **§9.4**；（v1.5）**裁决落地收尾同步**——编排层对 3 处契约冲突的裁决已同步 PRD（`perf-stability-optimization.md` v0.5），本轮以**代码为准**把 SAD 侧结论回写：① **N1 关闭**（业务端点降级维持 **200 + error 客体**，`server._json_payload_has_data` 已删除、`_send_json_shape` 恒 200，`http_503_total` 计数点 4→3）；② **AC-S3 模式 B 探测预算阶梯封顶 5s**（`2→4→5`，`cache._PROBE_BUDGET_CAP=5.0`；P95 口径重标为**高密度 ≤5s / 低密度 ≤10s**）；③ **`_LOCAL_BUDGET` 不入冷却账本**的 v1.4 反转**正式确认**（反转 REV-DES-15 裁决②）。逐项见 **§9.5**；（v1.6）**P2-4 内存口径统一**——按容器内实测把 CDP 页面内存从单一「150MB+/页」拆为**明示双重口径**（RSS vs PSS），登记**固定基线 250MB(PSS)** 与 `CDP_STOCK_PAGES` **env 驱动**（2C2G 档位 = 4，+2 常驻 = **6 内容页**），逐项见 **§9.6**；（v1.7）**P7b 契约同步（第二轮）**——以**代码为准**把多轮实现回写到 SAD：① **新增 L0 档（盘中 4s）**，`quote`/`depth` 升 L0、`tick_interval(fields)` 改为**订阅域最短 tier TTL**（无订阅回落 L1）；② **容量常量/数值重标定**（`_PER_FETCH_EST` 2.2→**0.3**、`BATCH_MAX_WORKERS` 8→**20**、`HTTP_POOL_MAX_PER_HOST` 16→**24**；`coverage` 盘中 4s→**213** / 8s→426 / 盘后 120s→6400，`coverage_codes` 4s quote-only→**106** / 3 域→**53**，50 码 3 域**回 C1**）；③ **`refresh_epoch`** 解耦 tick 与缓存 TTL（每拍必真回源；原"TTL==tick 即命中缓存"的相位缺陷致名义 4s 曾实际 8s）；④ **`_tick_sleep_seconds` 真实不变量订正**为「轮起点→轮起点 ≥ 1 tick」（"帧间隔 ≥ tick"已被证伪）；⑤ **上游传输层**（keep-alive 连接池 + 进程内 DNS TTL 缓存 + 启动预热 `warm_transport`；实测单请求 340ms→**139ms**、DNS 170ms→**15.8ms**、4s 重试尾消除）；⑥ **上游双 wire 格式**（沪/深 = 前缀形、北交所 = 点号大写 `430047.BJ`；新增 `config.upstream_secu_code()`；上游用 `HTTP 200 + 空壳`表示错误格式 ⇒ **关键字段非空校验**）；⑦ **新增 `depth` 五档域**并入 SSE `quote` 负载（只增字段；空 dict/全 0 ⇒ 无 `depth` 键，不伪造）；⑧ **帧发送层去重**（内容未变不发、新连接强制首发）。逐项见 **§9.7**
@@ -11,6 +11,27 @@
 > **修订依据（v1.11）** **AC 落号对齐 + `last_modified=None` 来源补全（无设计变更）**——PRD 已升至 **v0.9（AC 总数 36：高效 10 / 准确 14 / 稳定 12）**，SAD 侧因并行产出存在 AC 落号漂移。本轮据 PRD v0.9 收口，范围严格限定 `doc/arch/SAD.md` + `doc/arch/tech-stack.json`：① **§8 追溯矩阵**——把 **F2**（feed 缓存键覆盖表示全部维度）的 AC 由 `AC-A13` 改为 **`AC-A14`**（F1/F3/F4/F5/F6 仍承接 `AC-A13`；F3 并列 `S10`），把 **F8**（feed 取数锁表随并发收敛）由 `AC-S9` 改为 **`AC-S12`**（主承接；`AC-S9`「24h 资源总账」保留为并列），并新增 **AC-A14 / AC-S12** 的独立追溯行（§2.7 / §2.2 **R-7** ↔ 详设 `BR-SRV-45` / `BR-SRV-50`·`BR-CACHE-35` ↔ 测试 `SRV-T65` / `SRV-T71`·`T72`·`T-CACHE-35`）；② **§8 覆盖声明**——改为 **v1.9 承接 AC-A14、v1.10 承接 AC-S12，AC 总数 34 → 36**（只陈述这两版对应的承接，不重写历史），全文**现行** AC 计数表述统一为 **36**（历史 §9.x 记录块保留原文，其"当时 34 条"为历史快照；现行以最新 §9.x 与 §8 覆盖声明为准）；③ **§2.7 补一处覆盖缺口**——`last_modified = None` 的来源在"降级/回源失败"之外，补 **"legacy / 非六字段缓存条目缺 `last_modified` 字段"**（详设 `server.md` **v1.11** / `cache.md` **v1.10** 的 **P2-1 fail-safe**：以 `entry.get('last_modified')` 读取 ⇒ `None` ⇒ **不发 `Last-Modified`、禁用 IMS**，`If-None-Match` 仍按 ETag 评估，**绝不抛 `KeyError` 经 `_guard` 变降级体**）；§7.1 **N4** 一并补记。**无设计变更、只增不删编号。** 逐项见 **§9.11**。
 > **修订依据（v1.12）** **台账收口 + 措辞更正（无设计变更）**——编排层本轮取证后，把 SAD 中**已闭环却仍标"待编排层/待同步/待裁决"**的登记按证据收口，范围严格限定 `doc/arch/SAD.md` + `doc/arch/tech-stack.json`：① **§7.1 Q2 的 `feeds[].status` 契约漂移 → ✅ 已同步**（`API.md:499-511` 明文列取值 `configured`/`ok`/`error`/`requires_chrome_cdp`，并写明 `/stock/data`·`/stock/basic_info` = `configured`（纯 REST）、`/stock/f10` = `requires_chrome_cdp`，即详设 `server.md` §2.9.1 三处目标值）；"同步权归编排层"改为"**已由编排层行使**"，CDP 标注契约同步项表与 §8 **S4** 随之由 ⚠️ 改 ✅（全文 ⚠️ 数 5→4）；② **D-6 / S6 / ADR-014「`_LOCAL_BUDGET` 不入冷却账」**残留的"v1.4 反转"措辞统一补记 **v1.5 编排层正式确认**（PRD v0.5 已固化）；③ **面板 `max-age` 域写准**：4 面板注册 `quote` 域 ⇒ **盘中 4s / 非盘 120s**（★ `quote` 于 v1.4 升 L0，历史"8/120"作废），并指向 `API.md` §6.1「响应头口径」表（`API.md:619-631`）为对外权威；④ **核实 `tech-stack.json` 的 `stock_api → cdp_engine` 同层边**——**已含**（`stock_api` 条目 + `cdp_engine` 反向 `forbiddenImports`），§3 留痕确认，无规则变更；⑤ `tech-stack.json` `version: 1.11 → 1.12`。**只增不删编号、无设计变更。** 逐项见 **§9.12**。
 > **修订依据（v1.13）** **溯源收口 + 引用时点约定（无设计变更）**——本轮把 `doc/arch/` 的跨文档版本引用与详设侧刚确立的「引用时点」口径对齐，范围严格限定 `doc/arch/SAD.md` + `doc/arch/tech-stack.json`：① **头部「上游输入」PRD `v0.9 → v0.10`**（PRD v0.10 仅同步用例 / 断言计数口径——现行基线 **514 单元用例全绿**、并显式区分「详设设计编号 75 条 ↔ 实测 514 方法」，**无对外字段 / 头项 / 状态码变更**，故 SAD 侧**无设计变更**；历史"511 用例全绿"等时点快照见历次修订依据块与 §9.9–§9.12，**保留原文**）；② **新增「版本引用时点约定」注**（头部「上游输入」下方，口径与详设侧一致）——**版本栏 = 最后一次同步时点的快照，内容以被引文档头部/正文为准、此栏仅用于定位；落后一版不属漂移**；③ **文末承接清单收口**——`server.md` v1.11 / `cache.md` v1.10 / `metrics.md` v1.5 → **现行 `server.md` v1.17 / `cache.md` v1.15 / `metrics.md` v1.9**，并补全 `config.md` v1.7 / `stock_api.md` v1.4 / `market_api.md` v1.7 / `cdp_engine.md` v1.4 / `stream.md` v1.6（**一律以各详设头部为准**）；**§6** 的 `tech-stack.json` 版本引用 `v1.8 → v1.13`；④ **核对（无现行错误）**——现行 AC 计数 **36**（高效 10 / 准确 14 / 稳定 12；最新增补 E10 / A14 / S12）与指标注册表名数 **20**（含 `http_304_total`）在 §8 覆盖声明 / §2.6 计分板 / §3 metrics 行均一致，未发现把 30 / 34 / 35 或 19 名当作**现行**值的表述；⑤ `tech-stack.json` `version: 1.12 → 1.13`（**仅版本号，规则内容零变更**）。**只增不删编号、无设计变更**；历次修订依据块与 §9.1–§9.12 记录块中的版本引用为**历史快照，原文保留**。逐项见 **§9.13**。
+> **修订依据（v1.14）** **内存调优 PRF-MEM-01 契约同步**——压测实测容器 **1.449GiB/1.5GiB = 96.57%**、python 进程 RSS **1.095GiB**（缓存条目 fundflow=2000/quote=2000/depth=500/timeline=1350 均达 `cache_max`；`cache_hit_ratio=0.1585`；`upstream_timeout=123`），归因 = 稳态内存 ≈ Σ(`cache_max` × 单条展开体积)、prefetch 每 120s 轮询 pool 续期致 LRU 永不淘汰、压测后不回落。代码（`config.py` `DOMAIN_MATRIX`）已把 **`quote`/`fundflow` 的 `pool_max`/`cache_max` 2000→1000、`timeline` 2000→500**（`spec` 由 `'dedup'` 改为 `'fixed:1000'` / `'fixed:500'`；`depth` 及其余域不变）。本轮以**代码为准**把 SAD 侧契约同步：① **§2.1 `DOMAIN_MATRIX` 实例**（3 行 + depth 注记 + 示例输出）与 **§2.2「设计不变量」**改述为「`pool_max` **按域声明**（`'dedup'`⇒`MAX_DEDUP_CODES`；`'fixed:N'`⇒N），quote/fundflow=1000、timeline=500 为**显式收缩值**」；② **§2.6 healthz `policy` 示例**、**§4.3 资源上界表**（去重码池 / L1 端点缓存行）与「池上限自洽」推导同步；③ **§4.3 内存分项估算按 PRF-MEM-01 重算**（旧"3 域×2000×~8KB≈48MB"失效）——按实测单条体积报价 **≈58MB**（quote 1000×~9.4KB + fundflow 1000×~0.6KB + timeline 500×~96KB（**占主导**）+ depth ≤500×~0.36KB），并声明"原始体积 ≠ 展开后 Python 对象占用，**权威口径以实测 RSS 为准**"（1.095GiB→预期 **≈0.65GiB**，**估算值待部署实测复核**）；④ **§7.2 AR-5 / AR-8 / AR-2**、**§8 S9** 的引用口径同步；⑤ `tech-stack.json` **version: 1.13 → 1.14**。**只增不删编号、无对外契约（API/字段/头项/状态码）变更。** 逐项见 **§9.14**。
+> **修订依据（v1.15）** **PRF-MEM-01 修复轮契约同步（CR-02/04/05/06）**——修复首轮 P8 发现的问题（代码已落地、**517 用例全绿**），本轮以**代码为准**回写 `doc/arch/SAD.md` + `doc/arch/tech-stack.json`，范围严格限定 `doc/arch/**`。① **CR-02：`pool_max` 恢复 env 可调（来源变更、默认值不变）**——`config.py` 三域 spec 由 `'fixed:N'` 改为 **`'env:<NAME>'`**（`_resolve_pool_max` 经白名单 `_POOL_MAX_ENVS` 在**调用期**解析为模块常量；未知 NAME → `ValueError`），新增 3 个 env 注册常量 **`MAX_QUOTE_POOL`(默认 1000) / `MAX_FUNDFLOW_POOL`(1000) / `MAX_TIMELINE_POOL`(500)**；矩阵三行改 `'env:MAX_QUOTE_POOL'`/`'env:MAX_FUNDFLOW_POOL'`/`'env:MAX_TIMELINE_POOL'`，**默认值逐字不变**（同 v1.14 的 1000/1000/500）——即 v1.14 保留**数值**、v1.15 恢复**来源**（部署可调）；**`cache_max` 1000/1000/500 仍为字面量**（内存硬界，不经 env）。② **CR-04：终端缓存上界不变式更正**——`cache_max`（quote 1000 / timeline 500）**首次小于活跃码上界 `MAX_DEDUP_CODES`(2000)** ⇒ 原"终端缓存覆盖活跃全集"的隐含不变式**不再成立**；新表述 = "**LRU 有界 + `stream._last_known` 结转**"，降级语义（高负载下 `cached_batch` 命中率下降、上游取数上升；帧仍全码在位）见 §2.2。③ **CR-06：`depth` 池上限保持 `'dedup'`=2000 的理由**（**无 prefetch 循环**，池仅 `code→ts` 账本约 200KB 量级，真正的内存界是 `cache_max=500`），消除"与 quote 不对称"的观感（§2.1 / §2.2）。④ **CR-05：prefetch 间隔事实更正** = `pool_refresh` = `ttl × refresh_factor`（盘中 quote 4s、fundflow/timeline 8s，非盘 120s；`depth` **无 prefetch 循环**），原"每 120s 轮询"为误述；`≈0.65GiB` 为**估算值、待部署实测复核**（§2.1 / §4.3）。落点：头部 / §2.1（三行 spec + 示例输出 + 新增 v1.15 更正注）/ §2.2（三层缓存表 ① 行 + 新增不变式更正条目）/ §2.6（healthz `policy`）/ §3（config.py 行）/ §4.3（池上限行 + 内存界结论 + 口径声明）/ §6 / §7.2 AR-8 / §8 S9 / §9.15；⑤ `tech-stack.json` **version: 1.14 → 1.15**（`generatedAt` 2026-09-20 不变）。**无对外契约（API/字段/头项/状态码）变更**；**`cache_max` 数值未变 ⇒ §4.3 内存分项估算数值不变**。**只增不删编号。** 逐项见 **§9.15**。
+> **修订依据（v1.16）** **PRF-MEM-01 实测更正（证伪乐观估算 · 架构事实回填）**——PRF-MEM-01 重建部署后压测实测（**run 20260920-110805**）**证伪**了 v1.14/v1.15 的「收缩后 python 稳态 RSS ≈0.65GiB」乐观预测。**实测（权威）**：收缩前 python 进程 RSS **1.095GiB**、容器 **1.449GiB/1.5GiB = 96.57%**；收缩后 python RSS **1.012GiB**、容器 **1.41GiB = 93.98%** ⇒ **净收益仅 ≈83MiB**；3 域配置**精确生效**（healthz 实测 quote/fundflow `cache_entries`=1000/1000、timeline=500/500）。**归因更正**：① 终端缓存收缩只是**小头**——按单条原始体积反推删除量 ≈**92MB**（quote 1000×~9.4KB + fundflow 1000×~0.6KB + timeline 850×~96KB），与 −83MiB 净收益吻合；② **真正大头 = 共享 URL 缓存**（`cache.py:35` `MAX_CACHE_SIZE=2000`，实测 `cache_entries.url=2000` **顶满**，条目为**解析后的 Python 对象**，实际占用远超 §4.3 按原始 ~10KB/条估的"URL 20MB"），其次为**线程池 glibc arena 碎片**。**新增架构事实（CR-01 预警被实测证实）**：**「缓存上界 ≠ 进程 RSS」**——§4.3 推导的**已知缓存项**上界 ≈**278MB** 与实测 python RSS **1.012GiB** 相差 **≈750MB**，账目**只覆盖已知缓存项、未覆盖分配器/CDP/运行时开销** ⇒ 登记为**待解架构项 AR-18**（后续方向：共享 URL 缓存调优）。**未达成内存目标**（python RSS `1.012GiB` 逼近 AC-S9 的 2C2G 参考 ≤1.2GB、容器余量薄）。落点：头部 / §2.1（v1.16 实测更正注，取代 ≈0.65GiB）/ §2.2 R-4（口径声明）/ §4.3（进程内存行 + 内存分项口径 + 压测实测 bullet + 缺口）/ §7.2（AR-8 更正 + **新增 AR-18**）/ §8 S9 / §9.16；`tech-stack.json` **version: 1.15 → 1.16**（`generatedAt` 2026-09-20 不变）。**旁证（待复测归因，非结论）**：`cache_hit_ratio` 0.1585 → **0.1796**；tier1000 timeline `ok_rate` 100% → **89.6%**、`upstream_timeout` 123 → **317**。**无对外契约（API/字段/头项/状态码）变更；只增不删编号。**
+> **修订依据（v1.17）** **PRF-MEM-02 归因纠偏 + arena 治理回填（A/B 实测）**——v1.16 把 §4.3 内存缺口（≈750MB）**归因为「共享 URL 缓存（解析后 Python 对象）」＋ glibc arena 碎片**，其中**前者已被证伪**：`cache.py` 的共享 URL 缓存存**解码后的原始文本（`str`；写入点 `cache.py:851-866`——`resp.read().decode(...)` → `_cache_put`）**，**非解析对象**，按 `~10KB/条 × 2000` 仅**几十 MB 量级**（`cache.py:31` 自身注释即按 `~20MB` 预算）⇒ **不是缺口主因**。**★ A/B 实测（权威，run 20260920-113125）确立 AR-18 主因 = glibc per-thread arena 碎片**：
+
+| 指标 | 基线（默认 arena） | `MALLOC_ARENA_MAX=2` |
+|---|---|---|
+| python `VmRSS` | `1,057,324 kB`（1.008GiB） | **`809,328 kB`（0.772GiB）** |
+| `RssAnon` | `1,042,748 kB`（占 98%） | `794,776 kB` |
+| `VmSize` | `8.96 GB` | **`1.15 GB`（−87%）** |
+| 匿名 `rw-p` 映射 | 300 | **166** |
+| 容器稳态 | `1.41GiB`（93.98%） | **`1.259GiB`（83.95%）** |
+| tier1000 timeline `ok_rate` | 89.6% | **100%**（**单次观测，可能含上游波动，勿写成结论**） |
+
+> **机制**：glibc **per-thread arena**——33 线程、默认上限 `8 × ncores`，每个 arena 预留 **64MB VA** 且**长期不归还 OS**（`RssFile` 仅 14.5MB、`RssAnon` 占 98% 佐证）。**处置**：容器 env **`MALLOC_ARENA_MAX=2`**（`docker-compose.yml`，**PRF-MEM-02**，不改代码）。**累计链路**：python RSS **`1.095GiB`（收缩前）→ `1.012GiB`（3 域缓存收缩 −83MiB）→ `0.772GiB`（＋arena 治理 −248MiB）**；容器 **`1.449 → 1.41 → 1.259GiB`**。**AR-18 状态**：由 **待解** → **已定位（glibc arena 碎片）＋ 已缓解（`MALLOC_ARENA_MAX=2`，−248MiB）**；**残余** ≈ 终端缓存解析对象（~200MB）＋ 运行时/分配器残余，**仍未达 ~0.65GiB，残余度量待后续**。**旁证**：`cache_hit_ratio` 0.1585→0.1796、tier1000 `ok_rate` 89.6%→100%、`upstream_timeout` 123→317 **仍为待复测归因（非结论）**。落点：头部 / §2.1 / §2.2 R-4 / §4.3（进程内存行 + 内存分项口径 + 压测 bullet）/ §7.2（AR-8 / **AR-18** 状态推进）/ §8 S9 / §9 引言（★ v1.17 指针）/ **§9.17（新增块）**；`tech-stack.json` **version: 1.16 → 1.17**（`generatedAt` 2026-09-20 不变）＋ **`infrastructure.deployment` 登记 `MALLOC_ARENA_MAX=2`**。**无对外契约（API/字段/头项/状态码）变更；只增不删编号；未改代码/测试/详设/PRD。**
+
+> **修订依据（v1.18）** **P8-r1 遗留修复轮契约同步（`'env:<NAME>'` 注册同源 · BR-CFG-10 收口 · P1-2 取舍入档）**——本轮以**代码为准**回写 `doc/arch/SAD.md` + `doc/arch/tech-stack.json`，范围严格限定 `doc/arch/**`（**未改代码/测试/其他文档**）。背景：v1.15 引入的 `'env:<NAME>'` 池上限 spec 在 `_resolve_pool_max` 中**每次调用**执行 `int(globals()[name])` ⇒ `cache_policy` 的运行期结果**依赖可变模块全局**，与同批文档自订的 **BR-CFG-10「`DOMAIN_MATRIX` 与 env 常量运行期只读、`cache_policy` 纯函数」正面冲突**（且 env 值本身在导入期冻结，热替换对生产无新增能力）。修复（代码已落地、**518 用例全绿**，517 → 518）：① **`'env:<NAME>'` 改由导入期冻结的注册映射解析**——`config._POOL_MAX_ENVS = {'MAX_QUOTE_POOL': 1000, 'MAX_FUNDFLOW_POOL': 1000, 'MAX_TIMELINE_POOL': 500}`（**键=NAME、值=冻结值，名单与取值同源**；新增 env 只改映射一处），`cache_policy` **只读该映射、不依赖可变模块全局** ⇒ **运行期重绑定 `config.MAX_*_POOL` 不再影响 `cache_policy`**（此前会）；**未注册 NAME 一律 `ValueError`**（此前经 `globals()` 对"白名单内但未定义"的名字可能 `KeyError`——与 `KeyError(domain)` 契约撞型且会被 `_prefetch_loop` 的 `except Exception` 静默吞掉）。② **测试 hermetic 化**：CFG-T19 改**字面量锁定**（不再靠原地重绑定模块全局证明联动）＋新增 frozen / `ValueError` 用例；删除与 `test_cache_true_lru_eviction` 重复的降级用例，新增"**被 LRU 淘汰的码读路径为 miss 而非陈旧值**"用例 ⇒ 计数 **517 → 518**（属工程卫生收口，**无对外契约变更**）。③ **P1-2 设计取舍入档**：**不设 `pool_max ≤ cache_max` 强制护栏**——`pool_max`（prefetch 轮转覆盖码数）与 `cache_max`（内存界）是**两个独立上限**，前者大于后者只导致**回转/回源浪费**、非正确性问题（`depth`/`f10`/`announcement` 现状即 `pool_max`=2000 > `cache_max`=500；3 个 PRF-MEM-01 收缩域当前 `pool_max == cache_max`）。落点：头部 / §2.1（v1.15 更正注就地更正"调用期解析"措辞）/ §2.2（三层缓存表 ① 行 + **新增独立上限注**）/ §3 config.py 行 / §4.3（池上限行 + 解耦结论）/ §6 / §7.2 AR-18（残余补测试 hermetic 化 + env 注册同源）/ §9 引言 / **§9.18（新增块）**；`tech-stack.json` **version: 1.17 → 1.18**（`generatedAt` 2026-09-20 不变）。**无对外契约（API/字段/头项/状态码）变更；只增不删编号；历史块（v1.15 修订依据行 / §9.15）原文保留、其"调用期"措辞在新块标注已更正。**
+
+> **修订依据（v1.19）** **PRF-LAT-02 契约同步（`margin` 终端缓存 · 计数器语义对齐 · 以代码为准）**——本轮以**代码为准**回写 `doc/arch/SAD.md` + `doc/arch/tech-stack.json`，范围严格限定 `doc/arch/**`（**未改代码/测试/其他文档**）。**动机（实测）**：`margin` 原先**无终端缓存**，每次请求对共享 URL 缓存的**文本**重复 `json.loads` + `_transform_margin`（热路径 P50 ≈**8–9ms**，为 AC-E4 聚合 P99 的主要贡献）；且 `upstream_fetch_total{margin}` 在 URL 缓存命中时**仍 +1**，与其它域"**仅终端 miss 才 +1**"的语义不一致、误导回源率判断。**代码已落地（525 用例全绿，519 → 525）**：① **`config.py`** `DOMAIN_MATRIX['margin']` 第 5 格 `cache_max` 由 `'n/a'` → **`8`**，`margin` **移出「URL 缓存独占域」集合**——现行集合 = **`plate` / `news_url` / `longhu`**；② **`market_api.py`** 新增**模块内终端缓存**（`_margin_cache` `OrderedDict` + `_margin_cache_ts` + 独立 `_margin_cache_lock`，上限取 `cache_policy('margin')['cache_max']=8`，**真 LRU** `move_to_end`/`popitem(last=False)`）；`fetch_margin` **命中直接返回**（不 `json.loads`、不 transform、不计数、不触网），**仅 `latest is not None`** 的可用结果才写缓存（失败 / 空数据**不缓存**）；`upstream_fetch_total{margin}` 改为**仅终端 miss 时 +1**（与 `stock` 域口径对齐）。落点：头部 / §2.1（矩阵 `margin` 行 + 示例 + v1.4 更正注补 ★ v1.19 更正）/ §2.2（R-3 补 URL-cache-only 集合及判据）/ §2.6（healthz `policy` 示例补 `margin`）/ §3（config.py 行 + market_api 行）/ §4.3（新增 `margin` 终端缓存行 + 内存分项「可忽略项」）/ §6 / **§9.19（新增块）**；`tech-stack.json` **version: 1.18 → 1.19**（`generatedAt` 2026-09-20 不变）。**无对外契约（API / 字段 / 头项 / 状态码）变更**（`/market/margin` 响应形状与 `_error` 降级语义逐字不变）；**只增不删编号**；历史块（§2.1 v1.4 更正注 / §9.4 D-2）原文保留，其"`margin` = URL 缓存独占"口径在新块标注**已更正**。
+
+> **修订依据（v1.20）** **云上部署配置下发运行时调优登记（PRF-MEM-02 + PRF-LAT-01 落地 · 只改文档）**——编排层已把两项**已 A/B 证实**的运行时调优下发到两份云上部署配置（`doc/deploy/docker-compose.aliyun-2c2g.yml`（阿里云 2C2G 容灾节点，`MAX_WORKERS=20`/`MAX_INFLIGHT=40`/`mem_limit=1.5g`）与 `doc/deploy/docker-compose.ucloud-2c8g.yml`（UCloud 2C8G 主节点，`MAX_WORKERS=30`/`MAX_INFLIGHT=60`/`mem_limit=3g`），两份注释已写明证据与 `SAD §7.2 AR-18 / §9.17`、`_PROGRESS.md B-7` 指针），本轮把该**交付事实**只增不删地登记进本档，范围严格限定 `doc/arch/SAD.md` + `doc/arch/tech-stack.json`。**下发内容（两份相同）**：① **`MALLOC_ARENA_MAX=2`**（PRF-MEM-02，原 `docker-compose.yml` 已含）——A/B 实测（run 20260920-113125，基线 run 20260920-110805）：python `VmRSS` **1.008GiB→0.772GiB（−248MiB）**、`VmSize` **8.96GB→1.15GB**、匿名 `rw-p` 映射 **300→166**、容器稳态 **1.41GiB(93.98%)→1.259GiB(83.95%)**；② **`HTTP_POOL_MAX_PER_HOST=48`**（PRF-LAT-01，原 `docker-compose.yml` 已含）——A/B 实测（run 20260920-142456，基线 run 20260920-140901）：fundflow tier1000 avg **3.00→1.43s（−52%）**、basic_info **4.08→3.08s（−25%）**、ok_rate **100%**，**内存无变化**；**上游在 48 并发下未观测到限流**；**代码默认仍为 24，48 属部署侧 env 覆盖**（`config.md` 契约默认值 **24 不变**）。**取值口径**：两份均取 **48**（=已实证值），满足双约束 ① 池 ≥ `BATCH_MAX_WORKERS`(=20)（**AR-14 硬约束**）② 池 ≥ `MAX_WORKERS`(20 / 30)。**UCloud 的 `MAX_INFLIGHT=60 > 48`**，超出部分按设计走 **ephemeral 短连接**（**BR-CACHE-27**：不排队、不阻塞）；**升到 60（= `MAX_INFLIGHT`）需先核上游 60 并发限流 + 单独 A/B，本轮不取** ⇒ 登记为**未验证候选**（勿当结论）。**本轮无新实验**——全部数字引自上述**既有 run**。① **§9.17 待办行收口**：`docker-compose.yml` 的 `MALLOC_ARENA_MAX=2` 落地核验由「待办」改**已落地**、落地面更正为**三份 compose 全部落地**；② **§7.2 AR-18 缓解 ①** 追加「云上两份配置已同步落地」（**AR-18 状态仍为已定位 + 已缓解，定位/缓解结论不变**）；③ **新增 §9.20 记录块**（本块指针）；④ `tech-stack.json` **version: 1.19 → 1.20**（`generatedAt` 2026-09-20 不变）、`infrastructure.deployment` 追加云上两份配置登记。**无对外契约（API 字段 / 头项 / 状态码）变更；只增不删编号；未改代码 / 测试 / 详设 / PRD / `docker-compose.yml` / `.opencode`（`doc/deploy/**` 由编排层改、本档只登记）。**
 
 > **硬约束** Python 3 标准库零依赖 · 无前端 · 无外部存储 · 不改技术栈
 > **定位** 优化专项架构（非新建系统）：只做**架构级改造与契约收口**，不新增业务功能、不改路由与 API 签名
@@ -157,30 +178,39 @@ push_loop()                                          [stream.py:246]  每 L1 tic
 
 ```
 DOMAIN_MATRIX = {   # domain → (tier, ttl_factor, pool_refresh_factor, pool_max, cache_max)
-  'quote':        ('L0', 1.0, 1.0, 'dedup', 2000),   # ★ v1.7：个股实时价（basic_info / stock_detail / data），升 L0
-  'depth':        ('L0', 1.0, 1.0, 'dedup',  500),   # ★ v1.7 新增：五档盘口（与 quote 同拍；空 dict/全 0 ⇒ 无数据）
-  'fundflow':     ('L1', 1.0, 1.0, 'dedup', 2000),
-  'timeline':     ('L1', 1.0, 1.0, 'dedup', 2000),
+  'quote':        ('L0', 1.0, 1.0, 'env:MAX_QUOTE_POOL', 1000),   # ★ v1.7：个股实时价（basic_info / stock_detail / data），升 L0；★ v1.14 PRF-MEM-01：池/缓存同源收缩（原 'dedup'/2000）；★ v1.15 CR-02：pool_max 来源改 env 注册常量（默认仍 1000、部署可调），cache_max 1000 仍字面量（内存硬界）
+  'depth':        ('L0', 1.0, 1.0, 'dedup',  500),   # ★ v1.7 新增：五档盘口（与 quote 同拍；空 dict/全 0 ⇒ 无数据）；★ v1.15 CR-06：池上限保持 'dedup'=2000 是**正确**的（无 prefetch 循环，池仅 code→ts 账本；内存界是 cache_max=500）
+  'fundflow':     ('L1', 1.0, 1.0, 'env:MAX_FUNDFLOW_POOL', 1000),   # ★ v1.14 PRF-MEM-01：池/缓存同源收缩（原 'dedup'/2000）；★ v1.15 CR-02：pool_max 来源改 env 注册常量（默认仍 1000、部署可调）
+  'timeline':     ('L1', 1.0, 1.0, 'env:MAX_TIMELINE_POOL', 500),    # ★ v1.14 PRF-MEM-01：池/缓存同源收缩（原 'dedup'/2000；单条 ~96KB 为内存大户）；★ v1.15 CR-02：pool_max 来源改 env 注册常量（默认仍 500、部署可调）
   'plate':        ('L2', 1.0, 1.0, 'fixed:200',  'n/a'),  # 3 分区 stagger 由 handler 从 L2 派生（见下）；URL 缓存独占 ⇒ cache_max n/a
   'news_url':     ('L3', 1.0, 1.0, 'n/a',        'n/a'),  # 5 源 RSS URL 缓存（共享 cache{}，2000）
   'feed':         ('L3', 1.0, 1.0, 'fixed:100',  100),    # ★ 修 D4：feed 缓存改由 L3 派生
   'announcement': ('L3', 1.0, 1.0, 'dedup',      500),
   'longhu':       ('L4', 1.0, 1.0, 'n/a',        'n/a'),  # ★ 新增：龙虎榜（GBK 上游，日更；补 P1-4）
-  'margin':       ('L4', 2.0, 2.0, 'fixed:16',   'n/a'),  # URL 缓存独占 ⇒ cache_max n/a
+  'margin':       ('L4', 2.0, 2.0, 'fixed:16',   8),      # ★ v1.19 PRF-LAT-02：终端缓存 8 条（原 'n/a'「URL 缓存独占」）；命中免去 json.loads + _transform_margin 重复解析（热路径 P50 ≈8–9ms）
   'f10':          ('L4', 1.0, 1.0, 'dedup',      500),
   'sector':       ('L4', 'override:604800', 'n/a', 'fixed:2000', 2000),  # 行业名，7d
 }
-cache_policy('quote')  → 盘中 {'tier':'L0','ttl':4,  'pool_refresh':4,  'pool_max':2000,'cache_max':2000}
+cache_policy('quote')  → 盘中 {'tier':'L0','ttl':4,  'pool_refresh':4,  'pool_max':1000,'cache_max':1000}   # ★ v1.14 PRF-MEM-01；★ v1.15 CR-02：pool_max 值恒为 1000 但【来源】= env 常量 MAX_QUOTE_POOL（部署可调），cache_max=1000 为字面量（内存硬界、不可调）
                            非盘中 {'tier':'L0','ttl':120,'pool_refresh':120,...}
 cache_policy('depth')  → 盘中 {'tier':'L0','ttl':4,  'pool_refresh':4,  'pool_max':2000,'cache_max':500}
 cache_policy('feed')   → {'tier':'L3','ttl':30 (盘中) / 180 (非盘中),'pool_refresh':30/180,'cache_max':100}
 cache_policy('longhu') → {'tier':'L4','ttl':300,'encoding':'gbk','cache_max':null}
 cache_policy('plate')  → {'tier':'L2','ttl':12,'pool_refresh':12,'pool_max':200,'cache_max':null}
+cache_policy('margin') → {'tier':'L4','ttl':600,'pool_refresh':1200,'pool_max':16,'cache_max':8}   # ★ v1.19 PRF-LAT-02：终端缓存 8（原 null）；「URL 缓存独占域」现为 plate / news_url / longhu
 ```
+
+> ⚠️ **v1.14 更正（PRF-MEM-01 内存调优，按代码回写）**：`quote`/`fundflow`/`timeline` 三域的 `pool_max` 与 `cache_max` **同源收缩**——`quote` `'dedup'/2000 → 'fixed:1000'/1000`、`fundflow` `'dedup'/2000 → 'fixed:1000'/1000`、`timeline` `'dedup'/2000 → 'fixed:500'/500`；`depth`（`'dedup'`/500）及其余域**不变**。**理由**：压测实测容器 `1.449GiB/1.5GiB = 96.57%`、python 进程 RSS `1.095GiB`，稳态内存 ≈ `Σ(cache_max × 单条展开体积)`，且 prefetch 按 `pool_refresh`（= `ttl × refresh_factor`；盘中 quote 4s、fundflow/timeline 8s，非盘 120s——★ v1.15 CR-05 更正，原"每 120s"为误述）轮询 pool 续期使 LRU 永不淘汰、压测后不回落；`timeline` 单条 ~96KB 为内存大户。`'dedup'` 语义仍为"与 `MAX_DEDUP_CODES` 同源"，但**实时域不再使用它**——`quote`/`fundflow`/`timeline` 改用具名 `'fixed:N'` 以表达"这是**显式收缩值**、不再等于去重码硬上界"。预期 python 稳态 RSS `≈0.65GiB`（**估算值，待重建部署后实测复核**）。
+>
+> ⚠️ **v1.16 实测更正（PRF-MEM-01 实测回填；取代上一条 v1.14 注末的 `≈0.65GiB` 乐观估算）**：上一条"预期 python 稳态 RSS ≈0.65GiB"**已被重建部署实测（run 20260920-110805）证伪**。**实测（权威）**：收缩前 python 进程 RSS **`1.095GiB`** / 容器 **`1.449GiB = 96.57%`** → 收缩后 python RSS **`1.012GiB`** / 容器 **`1.41GiB = 93.98%`**，**净收益仅 ≈`83MiB`**（3 域配置经 healthz 实测精确生效：quote/fundflow=1000/1000、timeline=500/500）。**归因更正（★ v1.17 二次更正）**：终端缓存收缩为**小头**（按单条原始体积反推删除量 ≈92MB，与 −83MiB 吻合）；**缺口主因 = 线程池 glibc per-thread arena 碎片**（A/B 实测 `MALLOC_ARENA_MAX=2` 再降 **−248MiB**、`VmSize` 8.96GB→**1.15GB**、匿名 `rw-p` 300→166）。**本注原列的「共享 URL 缓存（解析后 Python 对象）」归因已被证伪**——URL 缓存存**解码后的原始文本（`str`，写入点 `cache.py:851-866`）**、估算仅**几十 MB**，**不是** ≈750MB 缺口的主因。§4.3 的 **≈278MB 只是「已知缓存项」上界，不是进程总内存上界**（详见 §4.3 口径声明 / §7.2 **AR-18**）。**★ v1.17 A/B 实测（run 20260920-113125）**：python RSS `1.012GiB` → **`0.772GiB`**、容器 `1.41GiB` → **`1.259GiB = 83.95%`**（详见 §9.17）。
+
+> ⚠️ **v1.15 更正（CR-02，PRF-MEM-01 修复轮，按代码回写）**：上一条 v1.14 注中的"改用具名 `'fixed:N'`"**已由代码再次变更**——三域 spec 现为 **`'env:<NAME>'`**：`quote` = **`'env:MAX_QUOTE_POOL'`**、`fundflow` = **`'env:MAX_FUNDFLOW_POOL'`**、`timeline` = **`'env:MAX_TIMELINE_POOL'`**（`config.py` `DOMAIN_MATRIX`）。**默认值逐字不变**（1000 / 1000 / 500）⇒ v1.14 的**数值结论全部保留**，v1.15 只把**来源**从"代码内字面量"恢复为"**env 注册常量**"（部署可免改码调参）。`_resolve_pool_max` 经 **导入期冻结的注册映射 `_POOL_MAX_ENVS`**（`{'MAX_QUOTE_POOL': <冻结值>, 'MAX_FUNDFLOW_POOL': <冻结值>, 'MAX_TIMELINE_POOL': <冻结值>}`——**键=NAME、值=冻结值，名单与取值同源**）解析；**未注册 NAME → `ValueError`**（fail-fast，不留静默回落）。**★ v1.18 更正（旧措辞作废）**：本注原写"**调用期**经 `frozenset` 白名单解析为模块常量"——解析值实为**导入期冻结**进映射，`cache_policy` **只读该映射、不依赖可变模块全局**（**BR-CFG-10「运行期只读」**）⇒ **运行期重绑定 `config.MAX_*_POOL` 不再影响 `cache_policy`**（此前会）。**边界（务必区分）**：`cache_max`（1000/1000/500）**仍是矩阵内的整数字面量、不经 env**——它是**内存硬界**（§4.3），env 只能调**池上限**（成员账规模 / prefetch 轮转覆盖），**调 pool 不改变内存界**。
+>
+> ⚠️ **v1.15 说明（CR-06，`depth` 池上限保持 `'dedup'`=2000 是正确设计，非遗漏）**：三域改 env 常量是**为部署期可调 prefetch 轮转覆盖**；`depth` 与之**不可类比**——`depth` **没有 prefetch 循环**（其数据经 `fetch_cls_basic_info` **阶段 3** 写入 `_depth_store`，随 `quote` 同拍），池仅承担 `code→ts` **账本**（单条极小，2000 条约 **200KB 量级**），真正的内存界是 `cache_max=500`。故 `depth.pool_max` 是否等于 `MAX_DEDUP_CODES` 对 `depth` 内存**无实质影响** ⇒ 保持 `'dedup'` 是正确取舍，**不构成"与 quote 不对称"的缺陷**。
 
 > ⚠️ **v1.7 更正（L0 档，按代码回写）**：`_trading_tiers()` 现为 **5 档**——盘中 `{'L0':4,'L1':8,'L2':12,'L3':30,'L4':300}`，非盘中 `{'L0':120,'L1':120,'L2':120,'L3':180,'L4':300}`。**L0 = 4s**（≈上游实测 3.0s 一跳的 1.3×，既能看到每次上游变化又砍掉 8s 档的一半浪费），承载 `quote` 与新增的 `depth`；**非盘中 L0 钉到 L1 基线 120s**，不交易的市场不为"更快"多付上游请求。SAD v1.6 及以前写 `quote` 属 L1（8s），与代码不符，此处以代码为准。
 
-> ⚠️ **v1.4 更正（`cache_max` 口径，2 格）**：`plate` 与 `margin` 的 `cache_max` 是 `'n/a'`（运行时 `None`），**不是** 200 / 16。理由（实现 P2-9）：`cache_max` 约束的是**域自己的终点缓存**（`stock_api._cache_store` 的 `_*_cache`）或 **feed 缓存**（`cache.feed_cache_put`）；`plate`/`margin` 只经**共享 URL 缓存**（`cache.fetch_json`，`cache{}`）服务，其条目由全局 `cache.MAX_CACHE_SIZE=2000` 约束 ⇒ 给它们一个 per-domain int 是**操作者无法执行的死配置**。故"URL 缓存独占域"（`plate` / `news_url` / `longhu` / `margin`）一律 `'n/a'`；`pool_max` 不受影响（`plate`/`margin` 的 `fixed:200`/`fixed:16` 保留，它们约束的是去重池而非缓存）。SAD 上一版这两格与实现不符，此处以**代码为准**更正。
+> ⚠️ **v1.4 更正（`cache_max` 口径，2 格）**：`plate` 与 `margin` 的 `cache_max` 是 `'n/a'`（运行时 `None`），**不是** 200 / 16。理由（实现 P2-9）：`cache_max` 约束的是**域自己的终点缓存**（`stock_api._cache_store` 的 `_*_cache`）或 **feed 缓存**（`cache.feed_cache_put`）；`plate`/`margin` 只经**共享 URL 缓存**（`cache.fetch_json`，`cache{}`）服务，其条目由全局 `cache.MAX_CACHE_SIZE=2000` 约束 ⇒ 给它们一个 per-domain int 是**操作者无法执行的死配置**。故"URL 缓存独占域"（`plate` / `news_url` / `longhu` / `margin`）一律 `'n/a'`；`pool_max` 不受影响（`plate`/`margin` 的 `fixed:200`/`fixed:16` 保留，它们约束的是去重池而非缓存）。SAD 上一版这两格与实现不符，此处以**代码为准**更正。 **★ v1.19 更正（PRF-LAT-02，`margin` 已移出该组）**：上句的「URL 缓存独占域（`plate` / `news_url` / `longhu` / **`margin`**）」**已更正**——`margin` **移出该集合**（`cache_max` `'n/a' → 8`，新增**模块内终端缓存** `market_api._margin_cache`，见 §2.1 矩阵 / §3/§4.3），**现行集合 = `plate` / `news_url` / `longhu`**；本注其余理由（`plate`/`news_url`/`longhu` 仍无终端缓存 ⇒ 仍 `'n/a'`）**现行有效**。
 
 要点补充（消除 P2-5 的两处悬置）：
 - **`plate` 的 3 分区 stagger**：`/cls/hotplate`、`/cls/plate` 现有 `_STAGGER = max(3, L2//4)` 的三档错峰（industry/concept/area 或 info/stocks/industry）不是 policy 的第四维，而是**分区 offset = `_STAGGER × 分区序` 由 handler 从 `cache_policy('plate')['ttl']` 派生**（等价于 `ttl × (1, 1.25, 1.5)`），仍属 policy 派生、非裸字面量。**该项目为明令保留的行为（D-7）**——TTL 收敛（R16）时**不得**把三块压成同一 TTL；详设迁移表若只列基值即为口径失真，须由 `server.md` 显式承接 stagger 派生。
@@ -232,11 +262,23 @@ cache_policy('plate')  → {'tier':'L2','ttl':12,'pool_refresh':12,'pool_max':20
 
 | 层 | 现状 | 目标 |
 |----|------|------|
-| ① 去重池 `_*_pool`（码 → 最后访问 ts） | LRU 触碰已有（`_process_chunk` 写 pool[code]=now），**上限 500 与"跨组活跃码 ≤2000"不匹配**；且池淘汰会 `cache.pop` 连带清除终点缓存 | ① 池是**跨组共享的成员账（membership ledger）**，上限 = `cache_policy(d)['pool_max']`（实时域 L0/L1 = `MAX_DEDUP_CODES=2000`，与去重码硬上界同源）；② **池淘汰不再 `cache.pop`**（解耦），避免多活跃组时反复抖空终点缓存（修 P1-1） |
+| ① 去重池 `_*_pool`（码 → 最后访问 ts） | LRU 触碰已有（`_process_chunk` 写 pool[code]=now），**上限 500 与"跨组活跃码 ≤2000"不匹配**；且池淘汰会 `cache.pop` 连带清除终点缓存 | ① 池是**跨组共享的成员账（membership ledger）**，上限 = `cache_policy(d)['pool_max']`，**按域声明**：`'dedup'` ⇒ `MAX_DEDUP_CODES`(=2000，与去重码硬上界同源)；`'fixed:N'` ⇒ N；**`'env:<NAME>'` ⇒ env 注册常量**——经**导入期冻结的注册映射 `_POOL_MAX_ENVS`**（**键=NAME、值=冻结值，名单与取值同源**）解析，未注册 NAME → `ValueError`；`cache_policy` **只读该映射、不依赖可变模块全局**（**BR-CFG-10**）（v1.15 CR-02；★ v1.18 更正"调用期解析"旧措辞）。★ v1.14 PRF-MEM-01：`quote`/`fundflow`=**1000**、`timeline`=**500** 为**显式收缩值**（不再等于 `MAX_DEDUP_CODES`）；★ v1.15 CR-02：该三域**来源** = env 常量（默认值不变、部署可调），`depth`/`announcement`/`f10` 仍 `'dedup'`=2000；② **池淘汰不再 `cache.pop`**（解耦），避免多活跃组时反复抖空终点缓存（修 P1-1） |
 | ② URL 缓存 `cache{}` | TTL 由调用方各自传；淘汰按插入时间 | TTL 统一由 `cache_policy` 派生；淘汰改按 `last_access`（见 §2.2）；命中时更新 `last_access` |
-| ③ 终点缓存 `_*_cache/_*_cache_ts` | `_MAX_CACHE_AGE=120` 硬编码，与 ② 无关；大小被动受池上限约束 | `_process_chunk` 增加 `ttl` 形参，由 handler 从 `cache_policy(d)` 注入 ⇒ `ttl_terminal == ttl_url`；**独立上限** `cache_policy(d)['cache_max']`，按 LRU + TTL 自管（内存护栏从"池"移到"缓存"） |
+| ③ 终点缓存 `_*_cache/_*_cache_ts` | `_MAX_CACHE_AGE=120` 硬编码，与 ② 无关；大小被动受池上限约束 | `_process_chunk` 增加 `ttl` 形参，由 handler 从 `cache_policy(d)` 注入 ⇒ `ttl_terminal == ttl_url`；**独立上限** `cache_policy(d)['cache_max']`，按 LRU + TTL 自管（内存护栏从"池"移到"缓存"）。**★ v1.15 CR-04：`cache_max` 与活跃码上界（`MAX_DEDUP_CODES`）解耦**——`quote`(1000)/`timeline`(500) 的 `cache_max` **首次小于** `MAX_DEDUP_CODES`(2000)，"终端缓存覆盖活跃全集"**不再成立**，见下方「v1.15 不变式更正」 |
 
-> **① / ③ 解耦的理由（P1-1）**：同一码可能被多个组订阅，池是全局单例。若仍用池上限驱动 `cache.pop`，当活跃码 > 池上限时每处理一块就轮换整池并清缓存 → 每 tick 大量回源、L1 新鲜度反而变差。解耦后：池（廉价 `code→ts`）上限 = 活跃码硬上界 2000，不触发清理；数据内存由 ③ 的 `cache_max` 独立 LRU 守住。这同时消除 R11 的"过期条目滞留"与 P1-1 的"抖空"两种失效。
+> **① / ③ 解耦的理由（P1-1）**：同一码可能被多个组订阅，池是全局单例。若仍用池上限驱动 `cache.pop`，当活跃码 > 池上限时每处理一块就轮换整池并清缓存 → 每 tick 大量回源、L1 新鲜度反而变差。解耦后：池（廉价 `code→ts`）上限 = 该域 `pool_max`（★ v1.14 PRF-MEM-01：`quote`/`fundflow`=1000、`timeline`=500 的**显式收缩值**，`depth` 等仍 2000；不再是"活跃码硬上界"），**且池淘汰不再 `cache.pop`** ⇒ 即便收缩到 1000/500（仍远大于单组上限 200）也不清空终点缓存；数据内存由 ③ 的 `cache_max` 独立 LRU 守住。这同时消除 R11 的"过期条目滞留"与 P1-1 的"抖空"两种失效。
+
+> **★ v1.15 不变式更正（CR-04）：终端缓存上界独立于活跃码上界**
+>
+> v1.14 及以前隐含的不变式「**终端缓存（`cache_max`）覆盖活跃码全集**」**已不成立**——`quote`（`cache_max=1000`）与 `timeline`（`cache_max=500`）**首次小于**活跃码上界 `MAX_DEDUP_CODES=2000`（`fundflow` 的 1000 同样小于，但 fundflow 单条体积小、非内存主导）。**新表述（唯一口径）**：终端缓存的正确性以「**LRU 有界 + 命中率**」度量，**不以"覆盖全集"度量**——它是**内存护栏**，不是**完整性保证**。
+>
+> **降级语义（功能不破坏，只降命中率）**：当某域活跃码 > 该域 `cache_max` 时，端点缓存按 `last_access` **LRU 淘汰**；被淘汰的码在本 tick 若既未进入刷新切片、又无终点缓存命中，则由 `stream._last_known` **结转上一 tick 的非空值**（进帧 `stale` / `stale_count`），故**帧仍全码在位**（§2.5 C-5 / §2.2 R-6 last-known 结转）。**代价**：高负载（活跃码 > `cache_max`）下 `cached_batch` 命中率下降 ⇒ 上游取数上升，由 `cache_hit_ratio` / `upstream_fetch_total{domain}` 可观测（登记 **AR-8**，§7.2）。`cache_max` 仍是**内存硬界**（§4.3；池上限不参与）。
+>
+> **★ v1.15 说明（CR-06）：`depth` 池上限保持 `'dedup'`=2000 是正确设计**——三域（quote/fundflow/timeline）改 env 常量是**为部署期可调 prefetch 轮转覆盖**；`depth` **无 prefetch 循环**（数据经 `fetch_cls_basic_info` 阶段 3 写入 `_depth_store`、随 quote 同拍），池仅 `code→ts` 账本（≈200KB 量级），内存界是 `cache_max=500`。故 `depth.pool_max` 是否为 `MAX_DEDUP_CODES` 对其内存**无实质影响**，不构成"与 quote 不对称"的缺陷。
+
+> **★ v1.18 补充（P1-2 取舍）：`pool_max` 与 `cache_max` 是「独立上限」，架构上不强制 `pool_max ≤ cache_max`**
+>
+> `pool_max` 界的是**成员账规模 / prefetch 轮转覆盖码数**（廉价 `code→ts`），`cache_max` 界的是**终端缓存的内存**（解析后对象）——二者**不同量纲、不同守恒对象**，因此**不设** `pool_max ≤ cache_max` 强制护栏。**现状反例**：`depth` / `f10` / `announcement` 三域 `pool_max`（`'dedup'`=2000）**本就大于** `cache_max`（=500）；3 个 PRF-MEM-01 收缩域（`quote`/`fundflow`/`timeline`）当前恰好 `pool_max == cache_max`，但这是**巧合而非约束**（不得据此反推护栏存在）。**`pool_max > cache_max` 的后果**：tick 内被轮转覆盖的码数多于缓存可驻留数 ⇒ 部分码的 prefetch 结果被 LRU 直接淘汰、需下一轮**回转/回源**（**浪费**，由 `cache_hit_ratio` / `upstream_fetch_total{domain}` 可观测），**不是正确性问题**（帧完整性仍由 `_last_known` 结转 + 全码在位保证，§2.2 R-6）。**边界**：`cache_max` 仍是**内存硬界**（§4.3），**调 `pool_max`（含 env）不移动该界**；若运维把 `pool_max` 调到远超 `cache_max`，只应预期命中率/回转效率下降。
 
 **消除断崖的具体动作**（逐条对应 D1-D4 + 新增 D5）
 - D1/D3：`stock_api` 全部 `_MAX_CACHE_AGE` 引用 → `cache_policy('quote'|'fundflow'|'timeline'|'f10')['ttl']`；`fetch_cls_*` 传给 `fetch_json` 的 `ttl` 用同一个值（**同一变量、同一次调用**，不是"两个相等的常量"）。
@@ -270,10 +312,13 @@ cache_policy('plate')  → {'tier':'L2','ttl':12,'pool_refresh':12,'pool_max':20
 - URL 缓存：容器改 `collections.OrderedDict`；命中路径（`fetch_json` 早返回处）`move_to_end(url)`；淘汰改 `popitem(last=False)`（O(1) 真 LRU，见 ADR-008）；清扫**双触发**——① 每 `_CACHE_SWEEP_INTERVAL`（保留 60s）全量全扫过期；② 写入时若 `len(d) >= MAX_CACHE_SIZE` 先做**局部清扫**再淘汰。上限 2000 保留。
 - feed 缓存：同样改 `OrderedDict` + 命中 `move_to_end` + `popitem(last=False)`（修 R3）；上限 100 → **收敛为 policy 派生**（`feed.cache_max=100`；feed 已改 30s/180s TTL，条目自然更替，100 条 × ~300KB = 30MB 占总预算可接受，见 §4.3）。**机制落点 = `cache.feed_cache_get` / `cache.feed_cache_put`**（LRU / 双触发清扫 / 淘汰均实现在缓存层，符合"缓存机制归缓存层"且不破 `layerIsolation`；裁决 #3）；`server._get_or_fetch_feed` **只保留** `_feed_fetch_locks` per-path 防击穿职责并改为调用这两个函数——miss 流程 = `feed_cache_get` miss → per-path lock → **二次 `feed_cache_get`（双检）** → `fetch_func` → `feed_cache_put`（`server.md` 必须按此对齐，否则防击穿退化为串行穿透）。
 - 端点缓存（`_*_cache`）：**与去重池解耦**（修 P1-1）——`_process_chunk` 的池淘汰**不再** `cache.pop`；端点缓存改由自身 `cache_policy(d)['cache_max']` 做 LRU + TTL 淘汰；新增 `ttl` 注入后，`_process_chunk` 的过期判定与 URL 缓存同源。
+- **URL-cache-only 域集合与判据（★ v1.19 PRF-LAT-02 补）**：现行集合 = **`plate` / `news_url` / `longhu`**——这三个域**只有共享 URL 缓存**（`cache.fetch_json` → `cache{}`，条目由全局 `cache.MAX_CACHE_SIZE=2000` 约束），故其 `cache_max='n/a'`（运行时 `None`）。**判据（唯一口径）**：`cache_policy(d)['cache_max'] is not None` ⟺ 该域有**自己的终点缓存**（`stock_api._cache_store` 的 `_*_cache` / `market_api._margin_cache` / `cache.feed_cache_put`）；`None` ⟺ **仅经共享 URL 缓存**。**`margin` 已移出该集合**（v1.19）：其 `cache_max=8` 界的是模块内 `market_api._margin_cache`（键 = `market`，**可被执行**，不再是 D-2 意义上的"操作者无法执行的死配置"）。
 
 **R-4 内存总账**（新增 `metrics` 可观测，见 §2.6）
 将下述量显式建模并在 `/healthz` 暴露（条目数 + 估算字节），任一超阈告警日志：
 `URL 缓存条目/字节` · `各端点缓存条目/字节` · `feed 条目` · `SSE 队列字节（distinct 帧去重计费）` · `distinct 帧数/帧平均/峰值字节` · `活跃组数/连接数`。**不引入任何存储**，纯内存计数。
+
+- **★ v1.16 口径声明（缓存上界 ≠ 进程 RSS）**：R-4 与 §4.3 的**内存上界只覆盖「已知缓存项」**（URL/feed/端点/队列/`_last_known` 等），**不是进程总内存上界**——PRF-MEM-01 实测 python 进程 RSS **`1.012GiB`** 与 §4.3 已知缓存项上界 **≈278MB** 相差 **≈750MB**，缺口**未纳入分项建模**。**★ v1.17 主因结论（A/B 实测，run 20260920-113125）**：该缺口**主因 = glibc per-thread arena 碎片**（33 线程 × 默认上限 `8 × ncores`，每 arena 预留 64MB VA 且长期不归还 OS；`RssAnon` 占 98%、`RssFile` 仅 14.5MB 佐证），**处置 = 容器 env `MALLOC_ARENA_MAX=2`（PRF-MEM-02）⇒ python `1.012 → 0.772GiB`（−248MiB）、`VmSize` 8.96GB→1.15GB、容器 `1.41 → 1.259GiB`**。**★ v1.17 纠正**：v1.16 所列候选「**共享 URL 缓存（`MAX_CACHE_SIZE=2000` 顶满、解析后对象）**」**已被证伪**——URL 缓存条目是**解码后的原始文本（`str`）**、仅**几十 MB 量级**（`cache.py:851-866` / `cache.py:31`），**从缺口候选中剔除**；**残余** ≈ 终端缓存解析对象（~200MB）＋ 运行时/分配器残余。**登记为架构项 AR-18**（§7.2，状态已推进为**已定位 + 已缓解**）；由此 **「调小 `cache_max` ⇒ 进程内存线性下降」的推断不成立**。
 
 **R-5 管理请求 IO 预算（R6）**
 `_read_json_body` 前置 `self.connection.settimeout(MGMT_BODY_TIMEOUT=5)`，读完恢复为 30s（长连接/SSE 不受影响）；保留 64KB 体长上限。预算来源：`MGMT_BODY_TIMEOUT` 走 config + env（R17）。
@@ -675,7 +720,7 @@ _broadcast(snapshot):
     // ── 本次新增（只增） ──
     "stale":   true,                     // 仅准入失败时出现（只增）
     "metrics": { "<name>": <number|object|array>, ... },   // metrics.snapshot()
-    "policy":  { "<domain>": {"tier":"L1","ttl":8,"pool_refresh":8,"pool_max":2000,"cache_max":2000}, ... },
+    "policy":  { "<domain>": {"tier":"L1","ttl":8,"pool_refresh":8,"pool_max":1000,"cache_max":1000}, ... },   // ★ v1.14 PRF-MEM-01：pool_max/cache_max 按域声明（quote/fundflow=1000、timeline=500；depth/announcement/f10='dedup'=2000），此处以 fundflow 为例；★ v1.15 CR-02：pool_max 来源 = 'env:MAX_FUNDFLOW_POOL'（env 注册常量，默认 1000、部署可调），cache_max=1000 仍为字面量（内存硬界）；★ v1.19 PRF-LAT-02：`margin` 的 `cache_max` 由 `null` → **`8`**（模块内终端缓存 `market_api._margin_cache`，见 §2.1 / §2.2 R-3 / §4.3），`cache_max: null` 的域现仅 `plate`/`news_url`/`longhu`
     "cdp":     { "state":"idle|restarting|unavailable", "window_start":<epoch|null>, "window_end":<epoch|null> }
   }
   ```
@@ -754,12 +799,12 @@ normalize = 用空占位替换三类「派生元数据」的【内容】后再�
 
 | 模块 | 改什么 | 为什么（根因） | AC | 风险 |
 |------|--------|---------------|----|------|
-| **config.py** | 新增 `cache_policy()` + `DOMAIN_MATRIX`（含 `longhu` 域、`cache_max`、plate stagger 派生；`plate`/`margin` 的 `cache_max` = `'n/a'`）+ **内部名 `_DOMAIN_ENCODING`（D-5）**；删除/改由 policy 承接的 TTL 与 `*_REFRESH` 常量；**`CACHE_TTL` 逐消费者迁移后删除**（cache.py 默认、`server._get_or_fetch_feed`；**`utils.py:12` 为未使用 import**，Q3）；**新增代码归一化唯一权威 `canonical_code(code) -> str\|None`（v1.4）** + `VALID_STOCK_CODE`/`_DOTTED_STOCK_CODE`（规范形 = 小写交易所前缀 `sh600519`；接受 `SH600519`/`600519.SH`；非法 ⇒ `None`）+ **帧尺寸单一来源 `stream_frame_bytes(codes, fields)`**（`STREAM_FIELDS_PER_FRAME=3`/`STREAM_FRAME_BYTES_PER_FIELD=23KB`）；新增 env：`MAX_INFLIGHT`/`MAX_GROUPS`/`MGMT_BODY_TIMEOUT`/`STREAM_QUEUE_BYTES_BUDGET`(默认 128MB)/`NEG_TTL`/`PROBE_TIMEOUT`/`MAX_HEALTH_INFLIGHT`/**`STREAM_PING_INTERVAL`(默认 20，原硬编码，D-4)**/**`LISTEN_BACKLOG`(默认 128，TCP accept backlog，默认 5 会在突发连接下内核丢 SYN ⇒ ~1s RTO 尾巴)**/**`CDP_RESTART_THROTTLE`(默认 15)**/**`STREAM_GROUP_IDLE_TTL`(默认 300)**/**`TRADING_HOLIDAYS`(空，逗号分隔 `YYYY-MM-DD`)**；`_trading_tiers()` 保留为唯一时间源，`_is_trading_hours(now=None)` 增补 `now` 注入点 + 节假日判定（配置的假日按非交易时段处理）；**（v1.7）** `_trading_tiers()` 增 **L0=4s**（盘中），`quote` 由 L1 升 L0、**新增 `depth` 域（L0 / dedup / `cache_max=500`）**；新增**上游线路拼写**权威 `upstream_secu_code(code)`（沪/深=前缀形、北交所=点号大写 `430047.BJ`）与 `warm_hosts()`（从 SSE 热路径 URL 派生预热 host）；env 新增 `BATCH_MAX_WORKERS`(20) / `STREAM_PER_FETCH_EST`(0.3) / `HTTP_POOL_MAX_PER_HOST`(24) / `HTTP_POOL_IDLE_TTL`(60) / `HTTP_DNS_CACHE_TTL`(300) / `HTTP_WARM_CONNECTIONS`(1) / `HTTP_WARM_TIMEOUT`(2.0) | RC-1（R16/R12/D1-D5）、R6/R17、P1-6 | A3/A4/E6/E9/S3/S7 | **H** |
+| **config.py** | 新增 `cache_policy()` + `DOMAIN_MATRIX`（含 `longhu` 域、`cache_max`、plate stagger 派生；`plate` 的 `cache_max` = `'n/a'`——★ v1.19 PRF-LAT-02：`margin` 由 `'n/a'` → **`8`**，自带模块内终端缓存，URL-cache-only 域现为 `plate`/`news_url`/`longhu`）+ **内部名 `_DOMAIN_ENCODING`（D-5）**；删除/改由 policy 承接的 TTL 与 `*_REFRESH` 常量；**`CACHE_TTL` 逐消费者迁移后删除**（cache.py 默认、`server._get_or_fetch_feed`；**`utils.py:12` 为未使用 import**，Q3）；**新增代码归一化唯一权威 `canonical_code(code) -> str\|None`（v1.4）** + `VALID_STOCK_CODE`/`_DOTTED_STOCK_CODE`（规范形 = 小写交易所前缀 `sh600519`；接受 `SH600519`/`600519.SH`；非法 ⇒ `None`）+ **帧尺寸单一来源 `stream_frame_bytes(codes, fields)`**（`STREAM_FIELDS_PER_FRAME=3`/`STREAM_FRAME_BYTES_PER_FIELD=23KB`）；新增 env：`MAX_INFLIGHT`/`MAX_GROUPS`/`MGMT_BODY_TIMEOUT`/`STREAM_QUEUE_BYTES_BUDGET`(默认 128MB)/`NEG_TTL`/`PROBE_TIMEOUT`/`MAX_HEALTH_INFLIGHT`/**`STREAM_PING_INTERVAL`(默认 20，原硬编码，D-4)**/**`LISTEN_BACKLOG`(默认 128，TCP accept backlog，默认 5 会在突发连接下内核丢 SYN ⇒ ~1s RTO 尾巴)**/**`CDP_RESTART_THROTTLE`(默认 15)**/**`STREAM_GROUP_IDLE_TTL`(默认 300)**/**`TRADING_HOLIDAYS`(空，逗号分隔 `YYYY-MM-DD`)**；`_trading_tiers()` 保留为唯一时间源，`_is_trading_hours(now=None)` 增补 `now` 注入点 + 节假日判定（配置的假日按非交易时段处理）；**（v1.7）** `_trading_tiers()` 增 **L0=4s**（盘中），`quote` 由 L1 升 L0、**新增 `depth` 域（L0 / dedup / `cache_max=500`）**；新增**上游线路拼写**权威 `upstream_secu_code(code)`（沪/深=前缀形、北交所=点号大写 `430047.BJ`）与 `warm_hosts()`（从 SSE 热路径 URL 派生预热 host）；env 新增 `BATCH_MAX_WORKERS`(20) / `STREAM_PER_FETCH_EST`(0.3) / `HTTP_POOL_MAX_PER_HOST`(24) / `HTTP_POOL_IDLE_TTL`(60) / `HTTP_DNS_CACHE_TTL`(300) / `HTTP_WARM_CONNECTIONS`(1) / `HTTP_WARM_TIMEOUT`(2.0)；**（v1.14 PRF-MEM-01）** `DOMAIN_MATRIX` 的 `quote`/`fundflow`/`timeline` 三域 `pool_max` 与 `cache_max` **同源收缩**（`'dedup'`/2000 → `'fixed:1000'`/1000、`'fixed:1000'`/1000、`'fixed:500'`/500），`depth` 及其余域不变（§2.1）；**（v1.15 CR-02）** `_resolve_pool_max` 新增 **`'env:<NAME>'` spec**——经**导入期冻结的注册映射 `_POOL_MAX_ENVS`**（键=NAME、值=冻结值，名单与取值同源）解析，**未注册 NAME → `ValueError`**（★ v1.18 更正"调用期解析"旧措辞；`cache_policy` 只读该映射、**不依赖可变模块全局**，BR-CFG-10）；三域 spec 由 `'fixed:N'` 改为 **`'env:MAX_QUOTE_POOL'` / `'env:MAX_FUNDFLOW_POOL'` / `'env:MAX_TIMELINE_POOL'`**，并**新增 3 个 env 注册项** `MAX_QUOTE_POOL`(默认 1000) / `MAX_FUNDFLOW_POOL`(1000) / `MAX_TIMELINE_POOL`(500) ⇒ 池上限**部署可免改码调参**；`cache_max` 1000/1000/500 **仍为矩阵内整数字面量**（内存硬界，不经 env）（§2.1 / §4.3） | RC-1（R16/R12/D1-D5）、R6/R17、P1-6 | A3/A4/E6/E9/S3/S7 | **H** |
 | **cache.py** | `fetch_json` **五段式**（正缓存 → **端到端 deadline 闸门（v1.4，第 5 位形参 `deadline`；闸门在正缓存之后）** → 负缓存门禁 → leader 单次尝试 → follower 读状态）+ **半开探测 `_probe_budget` 阶梯（2→4→5，`_PROBE_BUDGET_CAP=5.0` 封顶，v1.5）** + 负缓存（URL 级，4 键含 `first_at`）+ `FetchError(kind)` + 删除 fall-through 三段路径 + **gap 分支 fail-closed 兜底（D-1）**；新增 `encoding='utf-8'` 形参（修 P1-4）；URL 缓存改 `last_access` 淘汰 + 双触发清扫；**feed 缓存机制落点 = `feed_cache_get`/`feed_cache_put`**（LRU/双触发清扫/淘汰均在此层，裁决 #3）；新增 `build_batch_response()`（纯函数，内置 `_` 前缀跳过 / data+error 冲突 / 未知 kind 归一，D-2；**返回组装好的 dict**）；允许 import 新增 `socket`（D-3）；**metrics 一律在业务锁释放后发布**（`_publish_url_stats`/`_record_failure`/`_clear_negative`），命中路径（段①/③双检/④）**统一计 hit**（只计段①会把 `cache_hit_ratio` 系统性低估）；`import json` 已删。**帧计费（`_Frame`/refs/`stream_queue_bytes`）不得落在此模块**——它属 stream 层，cache.py 只做纯缓存/契约，守 `layerIsolation`（修 P2-N6）；**（v1.7）** 新增 **HTTP 传输层**：`_ConnectionPool`（按 `(scheme,host,port)` keep-alive 复用、每 host 有界、空闲淘汰、失效连接丢弃并重试一次、锁外 IO）+ `_DNSResolver`（进程内 DNS TTL 缓存，仍按 hostname 拨号以保 SNI/证书校验）+ `warm_transport()`（**仅握手、不发业务请求**的启动预热）+ 池化 `urlopen` drop-in（保持 `urlopen` 可观测契约）；`fetch_json` 增**第 6 关键字形参 `refresh_epoch`**（`_cache_fresh` 拒绝 `write_time < refresh_epoch` 的条目）；**（v1.8）** 新增 **`feed_cache_get_entry(path)`**——feed 缓存的**浅拷贝访问器**（复用既有 `_feed_cache_lock`，含 `move_to_end`/`last_access`），`feed_cache_get` 签名与语义不变（既有 5 调用方零改动）；**（v1.9 / F1+F5）** 该访问器返回**六字段** `xml/time/last_modified/fingerprint/last_access/expires_at`（`last_modified` = **表示最后一次变更的时刻**，为 RSS `Last-Modified` 权威来源；`time` 仍为写入时刻、供 `refresh_epoch`），`feed_cache_put(path, xml, ttl, fingerprint=None) -> dict` 新增**指纹继承**（与同一键上一条目比较，**含已过期条目**；相同 ⇒ 继承 `last_modified`）并**返回写入条目浅拷贝（非 `None`）**（server miss 路径直接消费、删除 put 后二次查询）；**（v1.10 / F8）** 新增 **`feed_fetch_acquire(key) -> threading.Lock` / `feed_fetch_release(key)`** + **`_feed_fetch_refs`**（与 `_feed_fetch_locks` 同受 `_feed_fetch_locks_lock`；`acquire` 在返回锁前计数 +1、`release` 递减并**归零两表同删**）——feed 取数锁表**唯一读写入口**（BR-CACHE-35；`server` 不再直接 import 锁表，引用计数回收见 §2.2 R-7） | RC-2（R9）、R11/R3、RC-3（R4/R14）、P1-2/P1-4/P1-5 | S3/S6/A9/A10/E6/E9 | **H** |
 | **server.py** | 新增 `_guard(shape)` 统一异常边界，覆盖**全部 14 个** JSON 路由分支（**shape 由 `_JSON_SHAPES` 路由表派生**，含 `assert len == 14` 与"分派集合 == 表"的 import 期断言；逐一列名，§2.4）；`_handle_stock_batch` 做**入参归一化（`_parse_stock_codes` → `config.canonical_code`）+ 截断 + `dropped` 注入 + 键回写（`_rekey_batch_response`）**；`build_health_payload` 专用执行器 + **信号量有界准入（替换死代码 stale）+ `_HealthBatch` 准入位生命周期** + 零上游快路径；503 计数接入 metrics（**3 个计数点，v1.5**）；`MAX_INFLIGHT`/`MGMT` 常量接入；`_cache_age()` 改读 policy（未登记路径回落 `_DEFAULT_AGE_DOMAIN='f10'` ⇒ 恒 300，与现状逐字等价；**4 面板 `/finance/market`·`/finance/timeline`·`/quotation/market`·`/market/timeline` 注册到 `quote` 域**（v1.2 由 `f10` 的 300s 改 `quote`）⇒ **盘中 4s / 非盘 120s**——★ v1.12 口径订正：`quote` 于 v1.4 升 **L0**，故历史"8/120"为旧值、以 **4/120** 为准；对外权威见 `API.md` §6.1「响应头口径」表（`API.md:619-631`，附实测 `/finance/market` → `max-age=120`（非盘）））；`/ths/longhu` 改走 `fetch_json`（L4，`encoding='gbk'`，**2 URL 并发 ≤3**）；**feed TTL 派生 + 防击穿调用 `cache.feed_cache_get/put`**（miss → per-path lock → **二次 `feed_cache_get` 双检** → fetch → `feed_cache_put`；`ttl` 在**二次仍 miss 之后**才求值；**机制归 cache 层**，Q3③/裁决 #3）+ `CACHE_TTL` 消费者迁移；`/cls/hotplate` 保持分区 error 客体（**全分区失败时顶层补 `error`**）；**`BoundedThreadPoolServer.__init__(..., max_inflight=None)`（v1.4：流端口显式传 110，否则主端口默认 40 会掩盖 100 连接上限）**；**（v1.5 N1 关闭）`_json_payload_has_data` 已删——`_send_json_shape` 恒 200 + error 客体，业务降级不产生 503（§2.4）**；`request_queue_size = LISTEN_BACKLOG`；**（v1.7）** `main()` 以 daemon 线程调 **`cache.warm_transport`** 预热传输（best-effort，**不 gate 启动/`healthz`**，不发业务请求）；**（v1.8）** **RSS 条件请求**：新增 `_feed_etag`（规范化体弱校验器）/`_not_modified`/`_if_none_match_matches`/`_if_modified_since_not_modified`/`_feed_ttl_minutes`/`_send_not_modified`；`_serve_feed` 增条件分支（200 带 `ETag`+`Last-Modified`；命中 ⇒ 304 无 body/无 `Content-Encoding`/无 `Content-Length`；**仍 HTTP/1.0、未启用 keep-alive**）；`_send_text` **纯新增** `etag=`/`last_modified=` 两可选形参（其余调用点零改动）；`_get_or_fetch_feed` 返回 **2-tuple `(xml, last_modified)`**（降级路径 `(error_xml, None)`）；**（v1.9 / F1–F5）** `Last-Modified` 改取 feed 条目 `last_modified`（**表示最后一次变更的时刻**，`_feed_fingerprint(xml)` 与 ETag 同源、经 `feed_cache_put` 跨 TTL 继承）；新增 `_feed_cache_key(path, base_url)`（**F2**：键覆盖表示全部可变维度，cache 层视键不透明）并据同一键建 `_feed_fetch_locks`（★ v1.10 / F8：**该锁表不再直接读写**，改经 `cache.feed_fetch_acquire/release` 引用计数回收、归零两表同删，见 §2.2 R-7 / BR-SRV-50）；`_send_not_modified` 内**单点** `metrics.incr('http_304_total')`（**F3**）；`_cache_age()` 的 RSS 分支改读 **`feed` 域**（**F4**，数值不变 30/180）；miss 路径**直接消费 `feed_cache_put` 返回值**、删除二次查询（**F5**） | RC-3（R1/R4）、RC-4（R2）、D4/D5、R15、P1-3/P1-4/P1-6/P2-3② | S1/S8/S10/A5/A9/A8/E9/E6 | **H** |
 | **stream.py** | `codes→frozenset`、`fields→tuple`；`_build_frame(snapshot, codes, fields)` **签名变更 + 帧契约扩元数据**（`codes_total`/`fields`/`missing`/`missing_count`/`errors`/`stale`/`stale_count`，**items 覆盖全部订阅码**，仅空 `codes` 返回 `None`，C-5）；`_broadcast` 锁序与无锁帧构建 + **先滤 `closed` 再腾位** + put/closed 竞态收口；**distinct 帧引用计数 + 队列字节预算 + 丢弃计数**（P0-1）+ **`_frame_bytes_lock` 保护 `refs` 读改写、`_drain_conn_queue` 在摘除/销毁路径逐帧归还字节、`None` 哨兵不计费**（P1-N2）；**`_refresh_pool(codes, now=None, fields=None, tick=None, deadline=None)`** 改「**按订阅字段并集刷新的分片轮转**」（R-6/AR-1；`coverage_codes` 盘中 quote / 2 域 / 全 3 域 = **106 / 71 / 53**，v1.7；coverage=213；`tick`/`deadline` 单次计算下传 + `tick_budget_exceeded`）；**新增 `_subscribed_fields`/`_active_targets`（codes+fields 同锁读）**、**`_carry_forward`/`_last_known`（last-known 结转 + `stale`）**、**`_valid_fields` fail-closed（显式非法字段 → 400，不再静默放宽为全字段）**、**`config.canonical_code` 归一化（`create_group`/`patch_group`，含非法码 400）**、**`_capacity_meta`（201/200 响应补容量元数据）**、**`_require_code_list`（非 list → 400）**；`_read_json_body` 5s 读预算；**`_tick_sleep_seconds` 整 tick 网格滑移 + `push_loop` 异常退避（1/2/4…≤8 tick）**；`_refresh_pool` 跳过 `_` 前缀键（但**保留** `_errors` 到 `snapshot['_errors']`）；`create_group` 校验 `MAX_GROUPS`（超限 400）+ **单帧余量准入**（v1.4）；`_serve_sse` 发 `Connection: close` + `close_connection=True`；`make_stream_server` 传 `max_inflight=MAX_STREAM_CONNS+10=110`；**（v1.7）** `tick_interval(fields)` = **订阅域最短 tier TTL**（盘中 quote/depth→L0=4s；无订阅回落 L1=8s）；新增 `_domain_refresh_epoch`（最快域以轮起点为 `refresh_epoch`）+ `_call_refresh_handler`（关键字下传，仅调用帧 `TypeError` 回退）；`_FIELD_FETCH_CALLS['quote']` **1→2**（basic_info + depth 同拍）；`_broadcast` 增**发送层去重**（`_frame_signature` 剔除 `ts` 的 blake2b 摘要 / `last_sig` / 新连接 `sent_any` 强制首发：内容未变不发、新连接必收一帧）；`_wake_push_loop` 冷启动打断**空闲**等待（no-burst：只打断空池轮，活跃轮保持硬网格睡眠） | R5、R6、R7、R8、R14 陷阱点、P0-1/P1-1/P1-N1/P1-N2/P1-4/P1-6 | S2/S7/S10/E5/E7/A1/A2/A3/A7 | **H** |
 | **stock_api.py** | 全部取数器签名加 `deadline`/`ttl` 并传递到 `fetch_json`；删除 `_MAX_CACHE_AGE`，按 `cache_policy` 注入 `ttl`/`pool_refresh`/`pool_max`/`cache_max`；**池淘汰不再 `cache.pop`，端点缓存独立 LRU**（P1-1）；`fetch_cls_f10` 失败 `raise FetchError('cdp_unavailable')`；`_run_batch` 返回 `(results, errors)`；**新增共享失败状态层 `_fail_ledger`**（码级 120s 冷却，**4 元条目** `[fail_count, cooldown_until, kind, last_fail_ts]`，批量与 prefetch 共用，P1-5），删除 4 个 prefetch 的局部 `fail_blacklist`；**新增 `_LOCAL_BUDGET` 本地预算标记（对外翻译为 `upstream_timeout`、**绝不入冷却账**，v1.4）** + `_call_fetcher` 的"仅调用帧 `TypeError` 才降级"；`_process_chunk` 全链 **`canonical_code` 归一化 + 结果回写原拼写**；`cached_batch(domain, codes)` 只读终点缓存（供 stream 分片）；`code_cooldown_list` 导出 + 发布节流；`fetch_cls_announcement` 裸 `ttl=15` 删除（Q5）；**依赖新增 `cdp_engine.page_data`（同层，无环）**；**（v1.7）** 新增 `fetch_cls_stock_depth`（`depth` 域五档盘口，`GET /quote/stock/volume?field=five`，REST/无 sign/无 WS；**空 `data` dict 或 20 字段全 0（指数）⇒ 返回 `None`，不伪造**；非致命，失败绝不影响同拍的 quote）；`fetch_cls_basic_info` 阶段 3 附加 `depth` 并让 `refresh_epoch` 送达**阶段 1 与阶段 3**（阶段 2 sector 保持 TTL）；新增**空壳防御** `_basic_info_is_valid`（`code:200` 但 `secu_name`/`last_px` 全空 ⇒ `upstream_error`，**不缓存、不进帧**）；所有上游 URL 拼写改经 `config.upstream_secu_code`（沪/深前缀形、北交所点号 `430047.BJ`）；取数器签名扩为 `(code, deadline=None, ttl=None, refresh_epoch=None)` | RC-1（R12）、RC-2（R13/R14）、RC-4、P1-1/P1-5/P1-6 | A3/A6/A7/A10/E2/E9/S6/S7 | **H** |
-| **market_api.py** | TTL 改 policy（`margin` 域）；失败降级体保持既有 `_error` 语义（单体客体，**取值收敛为枚举 kind**），补 `FetchError` 分类参与 metrics + **防重复计数约定**（`fetch_json` 已计的失败不再二次计） | R16、RC-3 | S1/S10 | **M** |
+| **market_api.py** | TTL 改 policy（`margin` 域）；失败降级体保持既有 `_error` 语义（单体客体，**取值收敛为枚举 kind**），补 `FetchError` 分类参与 metrics + **防重复计数约定**（`fetch_json` 已计的失败不再二次计）；**（v1.19 PRF-LAT-02）新增模块内终端缓存（`margin`）**：`_margin_cache`（`OrderedDict`，**真 LRU** `move_to_end`/`popitem(last=False)`）+ `_margin_cache_ts` + 独立 `_margin_cache_lock`，上限 = `cache_policy('margin')['cache_max']=8`；`fetch_margin` 命中**直接返回**（不 `json.loads`、不 transform、**不计数**、不触网），**仅 `latest is not None`** 才写缓存（失败/空数据不缓存）；`upstream_fetch_total{margin}` 改为**仅终端 miss 时 +1**（与 `stock` 域口径对齐） | R16、RC-3、**AR-6（计数语义）** | S1/S10 | **M** |
 | **utils.py** | `generate_rss(..., ttl=None)` **纯新增可选形参**（RSS 2.0 `<ttl>`，分钟整数；`ttl is None or int(ttl) <= 0` ⇒ **不输出**；位置在 `</lastBuildDate>` 与 `<atom:link>` 之间）；其余 RSS/OPML 生成与解析不变 | RSS 条件请求「`<ttl>` 为 advisory、最小 1 分钟」（v1.8，§2.7 / ADR-023） | AC-A13 | **L** |
 | **cdp_engine.py** | 新增 `page_data(page)` 防御取数（总函数；None/非 dict/空 dict → `None`，**无键级回退**）；`cdp_restart_window` 状态机（`_mark_*` 唯一写者 + 读只经 `restart_window_snapshot()` + **`full_chrome_restart` 的 `finally` 兜底必达终态**）+ 模块加载即发布初始 `idle`；`watchdog_restart_skip_reason()`（盘中避让 + 节流集中判断）；`cdp_ready()`；**`_last_data` 老化口径（时钟缺失 = 陈旧）** + 四表同步淘汰；**`navigate_stock` 有界导航锁（`_acquire_navigate_lock`）+ `canonical_code` 归一化比对**；页面求值超时预算对齐 §2.3 | RC-3（R18）、R19、R20、P1-3 | S1/S4/S9/S10 | **M** |
 | **server.py（CDP 守护）** | **`_cdp_memory_watchdog`（含 `_is_trading_hours` 避让判断）在 `server.py:881`，非 cdp_engine.py**（修 P2-2）；守护重启交易时段避让（`_is_trading_hours()` 为真则跳过本轮，顺延到下一周期） | R19/R20 | S4/S9 | **M** |
@@ -897,10 +942,11 @@ MAX_GROUPS=200 **不参与**内存护栏（它界的是每 tick 帧构建次数/
 | SSE 单连接队列 | 8 帧 | 丢最旧保最新 | 不变 |
 | SSE 全局队列字节 | **128MB（新增，distinct 帧计费）** | 从最满连接丢最旧（确定性，§4.2） | 无界 → 有界 |
 | **跨组 distinct 帧工作集（准入 cap）** | **`Σ_g F_g + max_g F_g ≤ 128MB` ⇒ 满配等价组 ≤ 8**（v1.4 单帧余量） | 建组/增码 400 `subscription frames would exceed …` | 新增（S2-2/P1-4）。**这是"准入"侧的界，与"运行期"侧的队列字节预算同源**（都经 `config.stream_frame_bytes`）；`_reserve_for` 的排除集 `skip` 单调增长保证驱逐循环终止 |
-| 去重码池（成员账 `_*_pool`） | 2000 全局 / 200 单组 | **拒绝（400）**，不截断 | 池上限与"跨组活跃码 ≤2000"对齐（修 P1-1） |
-| 端点缓存（数据 `_*_cache`，L1 域） | **2000/域（独立 LRU）** | 按 `last_access` 淘汰 | 与池解耦、独立 `cache_max` |
+| 去重码池（成员账 `_*_pool`） | **按域 `pool_max`**（★ v1.14 PRF-MEM-01 数值：quote/fundflow=1000、timeline=500；depth/announcement/f10=`'dedup'`=2000）/ 200 单组；★ **v1.15 CR-02：三域来源 = env 注册常量**（`MAX_QUOTE_POOL`/`MAX_FUNDFLOW_POOL`/`MAX_TIMELINE_POOL`，默认值同左、**部署可调**） | **拒绝（400）**，不截断 | 池上限**按域声明**（`'dedup'`⇒`MAX_DEDUP_CODES`；`'fixed:N'`⇒N；**`'env:<NAME>'`⇒env 注册常量**——**导入期冻结的注册映射 `_POOL_MAX_ENVS`**（键=NAME、值=冻结值，名单与取值同源；`cache_policy` 只读该映射、不依赖可变模块全局，BR-CFG-10；★ v1.18 更正"调用期"旧措辞）解析）；原"与跨组活跃码 ≤2000 对齐"口径由 v1.14 收缩（修 P1-1）；★ **v1.15：池上限（含 env 调整）不改变内存界**——内存界由 `cache_max` 决定（下一行 / 下行推导）；★ **v1.18：`pool_max` 与 `cache_max` 为独立上限，不强制 `pool_max ≤ cache_max`**（§2.2 ★ v1.18 补充） |
+| 端点缓存（数据 `_*_cache`，L1 域） | **按域 `cache_max`（独立 LRU）**（★ v1.14 PRF-MEM-01：quote/fundflow=**1000**、timeline=**500**；原 2000/域） | 按 `last_access` 淘汰 | 与池解耦、独立 `cache_max`；★ **v1.15 CR-04：`quote`(1000)/`timeline`(500) 的 `cache_max` 已小于 `MAX_DEDUP_CODES`(2000) ⇒ "终端缓存覆盖活跃全集"不变式不再成立**，改以「**LRU 有界 + `_last_known` 结转**」度量（§2.2 不变式更正）；高负载下 `cached_batch` 命中率下降、上游取数上升，**内存界由 `cache_max` 独立守住（池上限/ env 调整不参与）** |
 | 端点缓存（f10 / announcement 数据） | 500/域 | 同上 | 独立 LRU |
 | **端点缓存（depth 五档数据，v1.7）** | **500/域** | 池上限 = `pool_max`（dedup=2000），缓存上限 = `cache_max=500`，独立 LRU | 新增（`fetch_cls_stock_depth` 自持 pool + terminal cache，随 `quote` 帧同拍） |
+| **端点缓存（margin 融资融券，★ v1.19 PRF-LAT-02）** | **8/域**（`cache_max=8`，独立 LRU） | 超过 8 个 `market` 键时按 `last_access` 淘汰；**失败 / 无数据（`latest is None`）不写缓存**；TTL 由 `cache_policy('margin')['ttl']`（L4×2 = 600s）自管 | 新增（`market_api._margin_cache`；消除对 URL 缓存**文本**的重复 `json.loads` + `_transform_margin`，热路径 P50 ≈8–9ms；`cache_max` 原 `'n/a'` ⇒ 该域**移出 URL-cache-only 集合**） |
 | URL 缓存 | 2000 条（≈20MB） | 按 `last_access` 淘汰 | FIFO → LRU；清扫双触发 |
 | feed 缓存 | 100 条（≈30MB） | 按 `last_access` 淘汰 | FIFO → LRU；TTL 30s/180s |
 | **feed 取数锁表 + 引用计数（v1.10 / F8）** | **并发在飞的键数**（`_feed_fetch_locks` 与 `_feed_fetch_refs` 同界，归零**两表同删**）；`PUBLIC_BASE_URL` 已设时恒为 **5 条 path** | — | 新增（BR-CACHE-35 / BR-SRV-50 / §2.2 R-7；**与"累计见过的 Host 数"无关**，**AC-S12** 主承接；并列 **AC-S9** 24h 资源总账） |
@@ -915,21 +961,29 @@ MAX_GROUPS=200 **不参与**内存护栏（它界的是每 tick 帧构建次数/
 | 批处理并发 | **`BATCH_MAX_WORKERS = 20`/请求（v1.7：8 → 20，env `BATCH_MAX_WORKERS` 可覆盖）** | — | 与 `HTTP_POOL_MAX_PER_HOST=24` 对齐（扇出不排队在连接池上） |
 | **上游连接池（v1.7）** | **每 `(scheme,host,port)` ≤ `HTTP_POOL_MAX_PER_HOST=24` 条 keep-alive**；空闲 > `HTTP_POOL_IDLE_TTL=60s` 在下一次取用时惰性淘汰；超上限的并发请求改用**短命（ephemeral）连接**而非等待 | 不排队、不阻塞；失效 keep-alive 丢弃并重试一次 | 新增（每请求新建 TCP+TLS 的延迟/上游压力消除） |
 | **进程内 DNS 缓存（v1.7）** | `_DNSResolver` 上限 256 条、TTL `HTTP_DNS_CACHE_TTL=300s`；失败不缓存；拨号仍用 hostname（SNI/证书不变） | TTL 内直接用缓存地址；连接被拒时**强制重解析一次** | 新增（DNS 170ms → 15.8ms） |
-| 进程内存 | AC-S9：≤ 基线×1.5，2C2G 参考 ≤1.2GB；容器 `mem_limit 1.5g`（**v1.6 内存总账改为 PSS 口径**，Chrome 跨进程求和禁止用 RSS，见下） | 指标告警 | 新增总账 |
+| 进程内存 | AC-S9：≤ 基线×1.5，2C2G 参考 ≤1.2GB；容器 `mem_limit 1.5g`（**v1.6 内存总账改为 PSS 口径**，Chrome 跨进程求和禁止用 RSS，见下）；**★ v1.16 PRF-MEM-01 实测（run 20260920-110805）：变更前 python 进程 RSS `1.095GiB` / 容器 `1.449GiB = 96.57%` → 按域收缩后 python RSS `1.012GiB` / 容器 `1.41GiB = 93.98%`，净收益仅 ≈83MiB ⇒ 未达成内存目标**（`1.012GiB` 逼近"参考 ≤1.2GB"、容器余量薄）；**★ v1.17 PRF-MEM-02 A/B 实测（run 20260920-113125）：容器 env `MALLOC_ARENA_MAX=2` 后 python `1.012GiB` → `0.772GiB`（−248MiB）、容器 `1.41GiB` → `1.259GiB = 83.95%`，`VmSize` 8.96GB → 1.15GB（−87%）、匿名 `rw-p` 映射 300 → 166**；主因 = **glibc per-thread arena 碎片**（`RssAnon` 占 98%），**v1.16 所列"共享 URL 缓存（解析后对象）"已证伪**（URL 缓存存 `str`、仅几十 MB）；**仍未达 ~0.65GiB**（残余 ≈ 终端缓存解析对象 ~200MB ＋ 运行时/分配器残余）；**且 ≈278MB 仅为「已知缓存项」上界、非进程总内存**（**AR-18**，状态已推进为已定位 + 已缓解） | 指标告警 | 新增总账 |
 
 **池上限与"跨组活跃码"的自洽（修 P1-1 / P1-N1，替换原"500→200"推导）**：
 ```
 去重池是跨组共享的单一 dict（_fundflow_pool/_basic_info_pool/_timeline_pool…），
 MAX_CODES_PER_SUB=200 只是**单组**上限，MAX_DEDUP_CODES=2000 才是**活跃码总上界**。
-⇒ 池上限 = pool_max = MAX_DEDUP_CODES (2000)，不写死 200（200 只会在 ≥2 个不重叠组时抖空缓存）。
+⇒ 池上限 = pool_max = **按域声明**：`'dedup'` ⇒ MAX_DEDUP_CODES (2000)；`'fixed:N'` ⇒ N；`'env:<NAME>'` ⇒ env 注册常量（**导入期冻结的注册映射**解析，v1.15 CR-02；★ v1.18 更正"调用期"旧措辞）。
+   ★ v1.14 PRF-MEM-01：quote/fundflow=**1000**、timeline=**500** 为**显式收缩值**（原均为 'dedup'/2000）；不写死 200（200 只会在 ≥2 个不重叠组时抖空缓存）。
+   ★ v1.15 CR-02：该三域 **spec 由 'fixed:N' 改为 'env:<NAME>'**（默认值不变、部署可调）——调大 pool 只增加成员账规模/prefetch 轮转覆盖，**不改变内存界**（内存界由 cache_max 决定）。
+   收缩后 1000/500 仍 ≥ 单组上限 MAX_CODES_PER_SUB=200，且池淘汰不再 cache.pop（解耦）⇒ 不抖空端点缓存。
 ⇒ "一个 tick 周期必然覆盖整池"仅当覆盖条件 C1 成立（`_fetches_per_code(fields) × N_active ≤ coverage = 213 取数次数/周期`（盘中 quote tick=4），⇔ `N_active ≤ coverage_codes` = **106 / 71 / 53 码/周期**（quote / 2 域 / 全 3 域，盘中），见 §2.1 INV-1b）；
    C1 不成立时按 §2.2 R-6 分片轮转，陈旧度 ≤ ceil(N_active/coverage_codes)×tick，并在 metrics 标记；
    例：200 码 × 3 域 ⇒ slice=53 ⇒ lag=4 tick ≈ 16s（盘中 4s tick）——**v1.7 前**（coverage=23、slice=7）为 lag=29 ≈ 232s，重标定后大幅收敛。
    非盘中 tick=120 ⇒ coverage=6400 ⇒ 3 域 coverage_codes=1600，同一 200 码订阅直接 C1（lag=0）。
 ⇒ 数据内存不再由池上限承担：改由终点缓存独立 cache_max（上表）守住。
+   ★ v1.15：池上限（无论 'dedup' / 'fixed:N' / 'env:<NAME>'）**只决定成员账规模与 prefetch 轮转覆盖，不改变内存界**；
+     内存界 = Σ(cache_max × 单条展开体积)（CR-02/CR-04）——env 调 pool 不会移动这条界。
 ```
 
-**内存分项估算（进程内，2C2G）**：URL 20MB + feed 30MB + L1 端点数据缓存（**3 域** quote/fundflow/timeline × 2000 × ~8KB ≈ 48MB；修 P2-N5，原"4 域≈64MB"失实）+ **depth 端点缓存 ≤500 × ~1KB ≈ 0.5MB（v1.7）** + f10/announcement ≈11MB + sector 0.2MB + **`_last_known` ≤2000 码 × 3 字段（引用同一批 dict/数值对象，≈1MB 保守计，v1.4）** + SSE 队列 ≤128MB + 解释器/栈 ≈30MB ≈ **268MB**（**上界：SSE 队列按满配 128MB 计**；空闲态实测远低于此）。
+> **★ v1.18：池上限与内存界解耦（P1-2 取舍入档）**——`pool_max`（prefetch 轮转覆盖码数 / 成员账规模）与 `cache_max`（终端缓存内存界）为**两个独立上限**，架构上**不强制 `pool_max ≤ cache_max`**：`depth`/`f10`/`announcement` 现状即 `pool_max`（=2000）> `cache_max`（=500），3 个 PRF-MEM-01 收缩域当前 `pool_max == cache_max` 属**巧合而非约束**。**超出仅致回转/回源浪费**（覆盖码数 > 可驻留数 ⇒ prefetch 结果被 LRU 淘汰、下一轮重取），由 `cache_hit_ratio` / `upstream_fetch_total{domain}` 观测，**非正确性问题**；内存界恒由 `cache_max` 独立守住（详见 §2.2 ★ v1.18 补充）。
+
+**内存分项估算（进程内，2C2G；★ v1.14 PRF-MEM-01 重算）**：URL 20MB + feed 30MB + **端点数据缓存**（`cache_max` 按域声明，**改写 v1.7 的"3 域×2000×~8KB≈48MB"旧口径**，按实测单条原始 JSON 体积报价）：**quote 1000×~9.4KB ≈ 9.4MB + fundflow 1000×~0.6KB ≈ 0.6MB + timeline 500×~96KB ≈ 48MB（**内存大户，占主导**）+ depth ≤500×~0.36KB ≈ 0.2MB** ≈ **58MB** + **margin ≤8 条 × ~KB 级 ≈ 可忽略（<0.1MB，★ v1.19 PRF-LAT-02）** + f10/announcement ≈11MB + sector 0.2MB + **`_last_known` ≤2000 码 × 3 字段（引用同一批 dict/数值对象，≈1MB 保守计，v1.4）** + SSE 队列 ≤128MB + 解释器/栈 ≈30MB ≈ **278MB**（**上界一：SSE 队列按满配 128MB 计**；空闲态实测远低于此）。**★ v1.16 口径限定：此 ≈278MB 为「已知缓存项」上界，非进程总内存上界**——实测 python RSS `1.012GiB` 与之相差 **≈750MB**。**★ v1.17 缺口排序更正**：**主因 = glibc per-thread arena 碎片**（A/B 实测 `MALLOC_ARENA_MAX=2` ⇒ python `1.012 → 0.772GiB`（−248MiB）、`VmSize` 8.96 → 1.15GB；§9.17）；**「共享 URL 缓存（解析后对象）」已从候选中剔除**（条码存 `str`、仅几十 MB，非主因）；**残余** = 终端缓存解析对象（~200MB）＋ 运行时/分配器残余（**待后续度量**）。**AR-18** 状态 = **已定位 + 已缓解**（§7.2）。 **★ v1.19 PRF-LAT-02 追加项**：`margin` 模块内终端缓存 ≤**8 条**（`cache_max=8`）× 每条约 **KB 级** ⇒ 计入**可忽略项**（<0.1MB），**不改变上列 ≈278MB 总账**（口径仍为「已知缓存项上界」）。
+> ⚠️ **口径声明（v1.14 PRF-MEM-01；v1.15 CR-05 更正 prefetch 间隔口径；★ v1.16 实测更正/回填）**：上列按**单条原始 JSON 体积**折算，仅作**量纲参考**；**展开为 Python 对象后实际占用数倍于原始体积**，故**权威口径以压测实测为准**。**★ v1.16 实测（权威，run 20260920-110805）**：变更前 python 进程 RSS **`1.095GiB`**（容器 `1.449GiB/1.5GiB = 96.57%`；缓存条目 fundflow=2000/quote=2000/depth=500/timeline=1350 均达 `cache_max`；`cache_hit_ratio=0.1585`；`upstream_timeout=123`）→ 池/缓存按域收缩后 python 进程 RSS **`1.012GiB`**、容器 **`1.41GiB = 93.98%`**（3 域配置经 healthz 精确生效：quote/fundflow=1000/1000、timeline=500/500），**净收益仅 ≈`83MiB`** ⇒ **未达成内存目标**（原 v1.14/v1.15 的"预期 ≈0.65GiB"**被实测证伪**）。**归因更正（取代 v1.14 的"稳态内存 ≈ `Σ(cache_max × 单条展开体积)`"单一归因）**：① 终端缓存收缩是**小头**——按单条原始体积反推删除量 ≈**92MB**（quote 1000×~9.4KB + fundflow 1000×~0.6KB + timeline 850×~96KB），与 −83MiB 净收益吻合；② **★ v1.17 更正（原 ②/③ 的主次排序作废）**：**真正主因 = 线程池 glibc per-thread arena 碎片**（33 线程 × 默认上限 `8 × ncores`，每 arena 预留 64MB VA 且长期不归还 OS；`RssAnon` 占 98%、`RssFile` 仅 14.5MB 佐证）——A/B 实测 `MALLOC_ARENA_MAX=2` 使 python `1.012 → 0.772GiB`（−248MiB）、`VmSize` 8.96 → 1.15GB、匿名 `rw-p` 300 → 166、容器 `1.41 → 1.259GiB = 83.95%`；**原"共享 URL 缓存（`MAX_CACHE_SIZE=2000` 顶满、解析后 Python 对象）"已被证伪**——`cache.py:851-866` 存入的是 `resp.read().decode(...)` 的 **`str`（解码后原始文本）**、**非解析对象**，2000 条仅 **几十 MB**（`cache.py:31` 自注 `~20MB`），**从缺口候选中剔除**；**残余** ≈ 终端缓存解析对象（~200MB）＋ 运行时/分配器残余。**★ 新增架构事实（CR-01 预警被实测证实）：「缓存上界 ≠ 进程 RSS」**——本表推导的**已知缓存项**上界 ≈**278MB** 与实测 python RSS **`1.012GiB`**（arena 治理后 **`0.772GiB`**）相差 **≈750MB**，即**账目只覆盖已知缓存项、未覆盖分配器（glibc arena）/CDP/运行时开销** ⇒ **AR-18 已定位（glibc arena 碎片）＋ 已缓解（`MALLOC_ARENA_MAX=2`，−248MiB）**，**残余度量待后续**（§7.2）。**旁证（待复测归因，非结论）**：`cache_hit_ratio` 0.1585 → **0.1796**；tier1000 timeline `ok_rate` 100% → **89.6%**、`upstream_timeout` 123 → **317**（**标注待复测归因，不作为结论**）。
 
 **Chrome 内存总账（v1.6 统一口径，修 P2-4）**：
 
@@ -944,9 +998,11 @@ MAX_CODES_PER_SUB=200 只是**单组**上限，MAX_DEDUP_CODES=2000 才是**活�
 | 页面配置 | — | `CDP_STOCK_PAGES=4`（compose 默认）+ 2 常驻 = **6 内容页**（另有 2 个 webui renderer） | 同左 |
 
 **按新口径的总账结论（2C2G / `mem_limit 1.5g`）**：
-- **典型（资源满配）**：Chrome = 250 + 6×60 ≈ **610MB**；+ 进程内 268MB（上界）≈ **878MB** ⇒ 对 `1.5g` 余量 ≈0.6GB。
-- **保守规划上界**：Chrome = 250 + 6×150 = **1150MB**；+ 进程内 268MB ≈ **1418MB** ⇒ **贴近 `1.5g`，余量薄**——与 SAD 原结论一致。**（口径说明：保守上界 1418MB 已超过 §4.3 资源上界表的「2C2G 参考 ≤1.2GB」典型参考线，故该参考线只适用于**典型口径**；硬约束以容器 `mem_limit 1.5g` 为准。）**
-- **实测稳态**：容器 `MemUsage 545.5 MiB`（cgroup 原始 **687.5 MiB**；**峰值 769.8 MiB = 51%**）⇒ 对 `1.5g` 实测余量 **≈0.8–1.0GB**，**稳态充足**（实测总量低于"典型规划值"是因为空闲态下缓存/队列未满、无活跃抓取）；但**按保守上界规划余量偏薄**，故 `STREAM_QUEUE_BYTES_BUDGET=128MB`、**单帧余量准入（⇒ 满配组 ≤8）** 与 `MAX_GROUPS=200` 仍是必需而非可选。
+- **典型（资源满配）**：Chrome = 250 + 6×60 ≈ **610MB**；+ 进程内 278MB（上界，v1.14 重算）≈ **888MB** ⇒ 对 `1.5g` 余量 ≈0.6GB。
+- **保守规划上界**：Chrome = 250 + 6×150 = **1150MB**；+ 进程内 278MB ≈ **1428MB** ⇒ **贴近 `1.5g`，余量薄**——与 SAD 原结论一致。**（口径说明：保守上界 1428MB 已超过 §4.3 资源上界表的「2C2G 参考 ≤1.2GB」典型参考线，故该参考线只适用于**典型口径**；硬约束以容器 `mem_limit 1.5g` 为准。）**
+- **★ 实测稳态**：容器 `MemUsage 545.5 MiB`（cgroup 原始 **687.5 MiB**；**峰值 769.8 MiB = 51%**）⇒ 对 `1.5g` 实测余量 **≈0.8–1.0GB**，**稳态充足**（实测总量低于"典型规划值"是因为空闲态下缓存/队列未满、无活跃抓取）；但**按保守上界规划余量偏薄**，故 `STREAM_QUEUE_BYTES_BUDGET=128MB`、**单帧余量准入（⇒ 满配组 ≤8）** 与 `MAX_GROUPS=200` 仍是必需而非可选。
+- **★ v1.16 PRF-MEM-01 压测实测（活跃态，非空闲；run 20260920-110805，权威）**：变更前容器 **`1.449GiB/1.5GiB = 96.57%`**、python 进程 RSS **`1.095GiB`**（缓存条目 fundflow=2000/quote=2000/depth=500/timeline=1350 均达 `cache_max`；`cache_hit_ratio=0.1585`；`upstream_timeout=123`）；池/缓存按域收缩（quote/fundflow 2000→**1000**、timeline 2000→**500**）后**实测 python RSS `1.012GiB`、容器 `1.41GiB = 93.98%`，净收益仅 ≈83MiB** ⇒ **未达成内存目标**（原"预期 ≈0.65GiB"**被实测证伪**）。**大头不在终端缓存**（收缩按原始体积反推 ≈92MB，与 −83MiB 吻合）。
+- **★ v1.17 PRF-MEM-02 A/B 实测（活跃态；run 20260920-113125，权威）**：容器 env **`MALLOC_ARENA_MAX=2`** ⇒ python RSS **`1.012GiB → 0.772GiB`（−248MiB）**、容器 **`1.41GiB → 1.259GiB = 83.95%`**、`VmSize` **8.96GB → 1.15GB（−87%）**、匿名 `rw-p` 映射 **300 → 166**；`RssAnon` 占 98%（`RssFile` 仅 14.5MB）⇒ **主因 = glibc per-thread arena 碎片**（33 线程 × 默认上限 `8 × ncores`，每 arena 预留 64MB VA 且长期不归还 OS）。**v1.16 所列"共享 URL 缓存（`MAX_CACHE_SIZE=2000` 顶满、解析后 Python 对象）"已证伪**——`cache.py:851-866` 存 `str`、仅几十 MB，**从缺口候选中剔除**。**累计链路**：python `1.095 → 1.012 → 0.772GiB`、容器 `1.449 → 1.41 → 1.259GiB` ⇒ **「已知缓存项上界 ≈278MB ≠ 进程 RSS」缺口 ≈750MB，AR-18 已定位（glibc arena 碎片）+ 已缓解（`MALLOC_ARENA_MAX=2`）**；**残余 ≈ 终端缓存解析对象（~200MB）+ 运行时/分配器残余，仍未达 ~0.65GiB（残余度量待后续）**。旁证（**待复测归因，非结论**）：tier1000 timeline `ok_rate` 89.6% → **100%**（**单次观测，可能含上游波动，勿写成结论**）；`cache_hit_ratio` 0.1585 → 0.1796；`upstream_timeout` 123 → 317。
 
 **⚠️ 测量局限（如实登记，不得当作活跃态结论）**：上述实测为**空闲/复用态**（容器 CPU ≈1%，池页停在同标的，JS 堆仅 11–13MB）——**活跃抓取时单页会更高**；峰值样本仅覆盖约 **5 分钟**，**未跨 `CDP_RESTART_INTERVAL=7200s` 长周期**；且 **renderer ≠ tab**（webui renderer 是浏览器内部 UI，非订阅内容页，两套命名不可混算）。
 
@@ -1159,7 +1215,7 @@ MAX_CODES_PER_SUB=200 只是**单组**上限，MAX_DEDUP_CODES=2000 才是**活�
 
 > ⚠️ 既有依赖说明：`cdp_engine.execute_js()` 内 `import websocket` 为**函数内延迟导入**，仅 CDP 模式使用；本架构不改该状态，且**不将其提升为硬依赖**。
 
-**tech-stack.json 已更新于 `doc/arch/tech-stack.json`（**v1.13**；v1.9–v1.11 的 `backend.cache` / `namingRules` / `architectureRules.metrics` 内容变更见 §9.9–§9.11）**：含 `architectureRules`——`importRestrictions.denylist` 固化"零第三方库"红线；`allowlist` 补入 `websocket`（仅函数内延迟导入，修 P2-7）；`layerIsolation`/`fileStructure` 与 §2.6/§3 的模块划分一致，供 `code-developer` 自验与 `check-arch-compliance.sh` 校验。**帧计费（`_Frame`/refs/`stream_queue_bytes`）归 stream 层，cache.py 不得承载**——由现有 `layerIsolation`（cache.py 禁 import stream/server/stock_api/market_api）覆盖；**feed 缓存机制归 cache 层、`socket` 已在 allowlist**（D-3）；**v1.7：HTTP 连接池/DNS 缓存同属 cache 层**（仍是 stdlib `http.client`/`socket`，不新增依赖）。
+**tech-stack.json 已更新于 `doc/arch/tech-stack.json`（**v1.20**；★ v1.20 云上部署配置下发运行时调优——`infrastructure.deployment` 追加云上两份配置登记（`MALLOC_ARENA_MAX=2` 三配置齐 + `HTTP_POOL_MAX_PER_HOST=48` 部署侧覆盖、**代码默认 24 不变**）；★ v1.19 PRF-LAT-02 仅版本号联动——`margin` 终端缓存（`cache_max=8`）属**模块内实现口径**，权威在 `config.py` 与 §2.1/§2.2/§4.3，`tech-stack.json` 无该口径可同步；v1.9–v1.11 的 `backend.cache` / `namingRules` / `architectureRules.metrics` 内容变更见 §9.9–§9.11；**v1.14/v1.15/v1.16/v1.18 仅版本号联动**——PRF-MEM-01 的 `pool_max`/`cache_max` 数值与**来源**权威在 `config.py` 与 SAD §2.1/§2.2/§4.3（v1.18 的 `_POOL_MAX_ENVS` **注册同源（导入期冻结）**与「`pool_max`/`cache_max` 独立上限」取舍同属该口径），`tech-stack.json` 无该口径可同步；**v1.17：`infrastructure.deployment` 新增容器运行时调优登记 `MALLOC_ARENA_MAX=2`（PRF-MEM-02）**，见 §9.14/§9.15/§9.16/§9.17/§9.18/§9.19）**：含 `architectureRules`——`importRestrictions.denylist` 固化"零第三方库"红线；`allowlist` 补入 `websocket`（仅函数内延迟导入，修 P2-7）；`layerIsolation`/`fileStructure` 与 §2.6/§3 的模块划分一致，供 `code-developer` 自验与 `check-arch-compliance.sh` 校验。**帧计费（`_Frame`/refs/`stream_queue_bytes`）归 stream 层，cache.py 不得承载**——由现有 `layerIsolation`（cache.py 禁 import stream/server/stock_api/market_api）覆盖；**feed 缓存机制归 cache 层、`socket` 已在 allowlist**（D-3）；**v1.7：HTTP 连接池/DNS 缓存同属 cache 层**（仍是 stdlib `http.client`/`socket`，不新增依赖）。
 
 **v1.4 对 tech-stack.json 的两处实质变更（审计实测得到，非版本号联动）**：
 1. **`allowlist` = 实测 import 闭包**。逐模块扫描 `china_finance_rss/*.py` 的模块级 import 后，`allowlist` 遗漏了 **`hashlib` / `html` / `xml`**（三者均来自 `utils.py`：`cls_sign_params` 的 `hashlib`、HTML 实体反转义的 `html.unescape`、RSS/OPML 生成的 `xml.etree.ElementTree`）。它们是**标准库**，缺失会让 `check-arch-compliance.sh` 对 `utils.py` 报假阳性。同时 `itertools` 在包内**无任何引用**（保留无害，已标注为历史项）。`websocket` 仍是唯一"函数内延迟导入"的特例。
@@ -1220,13 +1276,13 @@ MAX_CODES_PER_SUB=200 只是**单组**上限，MAX_DEDUP_CODES=2000 才是**活�
 | # | 风险 | 等级 | 缓解 |
 |---|------|------|------|
 | AR-1 | **SSE tick 内 `_active_codes()`（可达 2000）全量刷新超 tick 预算**（40 chunk；按订阅字段串行计可达 6000 次取数） | 高 | **针对 `_active_codes()`**：§2.2 R-6 分片轮转（每 tick 只刷 `\|slice\| ≤ coverage_codes` 的切片 ⇒ 切片取数 ≤ `coverage = 213`，其余读终点缓存）；`stream_refresh_lag_ticks` 可观测；tick 预算 0.8×tick + degraded。**v1.7 数字更正**：`coverage` 重标定为 **213**（盘中 quote tick=4；`_PER_FETCH_EST` 2.2→**0.3**、`BATCH_MAX_WORKERS` 8→**20**、`HTTP_POOL_MAX_PER_HOST` 16→**24**、`quote` 每码成本 1→**2**），`coverage_codes` = **106 / 71 / 53**（quote / 2 域 / 全 3 域，盘中），故 **50 码 × 3 域回 C1（lag=0）**；200 码 × 3 域的 lag ≈ 4 tick ≈ 16s（盘中）。v1.7 前（coverage=23、slice=7）同一订阅 lag ≈ 29 tick ≈ 232s。**帧完整性口径（修 P2-N2，v1.4 补 last-known）**：warm 码不降级；冷码以 `null` 出现在帧内 `missing` 中（不再"缺席"），≤lag tick 内首次取到数据；AC-A1 以 warm 稳态 + 200 帧窗口为前提。（原"池上限=200"缓解对准 prefetch 池、对 `_active_codes()` 无效；原"≤coverage≈213 切片"单位错误，均已在 P1-1/P1-N1 改） |
-| AR-2 | 命中率 ≥90% 仅为 SAD 设计目标，PRD 未列为验收项 | 中 | 纳入 `/healthz` `cache_hit_ratio` 观测项（**非 AC**）；P6c 作为主指标之一；<84% 时走 PRD 修订 |
+| AR-2 | 命中率 ≥90% 仅为 SAD 设计目标，PRD 未列为验收项 | 中 | 纳入 `/healthz` `cache_hit_ratio` 观测项（**非 AC**）；P6c 作为主指标之一；<84% 时走 PRD 修订。**★ v1.14 PRF-MEM-01 压测实测 `cache_hit_ratio=0.1585`（远低于 84% 触发线）**——属**压测冷态观测**（缓存未预热 + 高并发回源 + 池/缓存未收缩），**是否为常态退化待 P6c 按稳态窗口复核**；同批实测 `upstream_timeout=123` 一并作为 P6c 输入 |
 | AR-3 | 负缓存半开探测的"恢复感知延迟"与探测误判 | 中 | ADR-003 论证：`NEG_TTL=5s`（守 PRD ≤5s）、探测预算 `_probe_budget` **阶梯 2→4→5 封顶**（**v1.5：`_PROBE_BUDGET_CAP=5.0`**；v1.4 起不再是恒定 2s）+ `_HISTORY_AGE=600s` 老化；`negative_cache_size`/`fail_count` 可观测；`NEG_TTL`/`PROBE_TIMEOUT` env 可调（`_HISTORY_AGE` / `_PROBE_BUDGET_CAP` 不可，见 AR-13） |
 | AR-4 | `_run_batch` 返回值改 `(results, errors)` 是**内部签名破坏性变更** | 中 | 全仓 grep 调用点 + 存量用例回归；errors 缺失时组装点容忍空 dict。**v1.4 边界澄清**：该二元组只存在于**管道层内部**，对外的 handler 签名与响应形状未变（§2.4 职责边界） |
-| AR-5 | Chrome 按 **PSS 口径**：典型 `250+6×60≈`**610MB** / 保守 `250+6×150=`**1150MB**（+ 进程内 ≈268MB 上界）在 2C2G 上**保守规划余量薄**（v1.6 统一口径 / P2-4，见 §4.3） | 中 | `MAX_GROUPS`(CPU) / 队列字节预算(内存) / CDP 页面数三者联动；`cache_max` 独立 LRU；AC-S9 24h 采样 |
+| AR-5 | Chrome 按 **PSS 口径**：典型 `250+6×60≈`**610MB** / 保守 `250+6×150=`**1150MB**（+ 进程内 ≈**278MB** 上界，★ v1.14 PRF-MEM-01 由 268MB 重算）在 2C2G 上**保守规划余量薄**（v1.6 统一口径 / P2-4，见 §4.3） | 中 | `MAX_GROUPS`(CPU) / 队列字节预算(内存) / CDP 页面数三者联动；`cache_max` **按域声明**（v1.14：quote/fundflow=1000、timeline=500）；AC-S9 24h 采样 |
 | AR-6 | **TTL / prefetch 间隔收紧导致上游请求量上升**（修 P2-N3 + P3b 评审校正**幻影数据**）：① feed 300s→30s（盘中）⇒ 5 源请求量 ×10；② prefetch 有效间隔（现状代码 = `max(常量, tier 基值)`）→ 目标（`cache_policy(d)['pool_refresh']`），逐域：**fundflow `max(25, L1=8)=25`→8（×3.1）、timeline `max(30,8)=30`→8（×3.8）、announcement `max(60, L4=300)=300`→30（**×10**，且 tier **L4→L3**）、f10 `max(60, L4=300)=300`→300（**无变化**）**；**`basic_info 120→8（×15）` 为幻影，已删除**——无 basic_info prefetch loop，`_BASIC_INFO_POOL_REFRESH` 是**死常量**（无任何 import/引用，随常量删除） | 中 | 上游为行情/新闻站，量级可承受；URL 缓存同域 L3 限流；负缓存挡故障期；**新增每域 fetch 计数 `upstream_fetch_total{domain}` 入 metrics**（Q3⑤），P6c 以该计数核对"上游负载增幅 ≤ 可接受阈值"。**v1.4 方向的抵消项**：§2.2 R-6 改为**按订阅字段刷新**（ADR-015）后，SSE 侧的上游成本只与"实际被订阅的域"成正比——quote-only 组从 3×降到 1×，故上表的 ×3.1/×3.8 只对**三域全订**的组成立；单域组反而**下降**。P6c 应按 `upstream_fetch_total{domain}` 的**实测**分摊核对，不要用"订阅组数 × 3 域"外推。**v1.7 增项**：① `depth` 并入使 quote 组每码每 tick **多 1 次**上游调用（`upstream_fetch_total{domain}` 新增 **`depth`** 键）；② L0=4s 使 quote 节拍减半，但 `refresh_epoch` 保证**每拍真回源**（不再隔拍）⇒ 名义请求量 ≈"50 码 × 2 调 × 1/4s ≈ 25 call/s"（深度并入报告 4A 档实测 quote 7.34 + depth 6.33 ≈ 13.7 call/s，低于模型——URL 缓存/去重池/负缓存吸收部分，属良性余量）；③ 传输池化把单请求成本 340ms → 139ms，抵消频次上升的延迟压力 |
 | AR-7 | `stream._refresh_pool` 若漏过滤 `_` 前缀键，会把 `_errors` 当股票塞进帧 | 中 | 列为详设必测项（契约陷阱点）；`_refresh_pool` 加单测断言 |
-| AR-8 | 池上限升到 `MAX_DEDUP_CODES=2000` + `cache_max` 独立后，端点数据缓存内存需实测 | 中 | `cache_max` 独立 LRU + `cache_entries` 指标；§4.3 估算 ≈268MB（L1 为 3 域 + `_last_known` + **v1.7 depth ≤500×~1KB≈0.5MB**）；AC-S9 采样 |
+| AR-8 | 池/缓存上限（按域 `pool_max`/`cache_max`）与端点数据缓存内存需实测；★ **v1.14 PRF-MEM-01 已由压测证实成立**：变更前 `cache_max` 过大（quote/fundflow/timeline=2000）叠加 prefetch 保活致 LRU 不淘汰，python 进程 RSS 达 **1.095GiB**（容器 **96.57%**） | 中 | `cache_max` **按域声明**（v1.14：quote/fundflow=1000、timeline=500）独立 LRU + `cache_entries` 指标；§4.3 重算 ≈**278MB**（`cache_max` 按域 + `_last_known` + depth ≤500×~0.36KB≈0.2MB；**★ v1.16：此为「已知缓存项」上界、非进程总内存**）；**★ v1.16 实测（run 20260920-110805）：收缩后 python RSS `1.012GiB`、容器 `1.41GiB = 93.98%`，净收益仅 ≈83MiB ⇒ 未达成内存目标；★ v1.17 A/B 实测（run 20260920-113125）：`MALLOC_ARENA_MAX=2` 使 python `1.012 → 0.772GiB`（−248MiB）、容器 `1.41 → 1.259GiB = 83.95%`、`VmSize` 8.96 → 1.15GB ⇒ 主因 = glibc per-thread arena 碎片（v1.16 的"共享 URL 缓存（解析后对象）"归因**已证伪**），缺口 ≈750MB 见 AR-18**；AC-S9 24h 采样。★ **v1.15 CR-02/04**：三域 `pool_max` 来源改 **env 常量**（默认 1000/1000/500）——**调 pool 不改内存界**（内存界 = `cache_max`）；`quote`(1000)/`timeline`(500) 的 `cache_max` **首次小于** `MAX_DEDUP_CODES`(2000) ⇒ 终端缓存不再覆盖活跃全集，高负载下 `cached_batch` 命中率下降、上游取数上升（由 `cache_hit_ratio` / `upstream_fetch_total{domain}` 观测；`_last_known` 结转保证帧仍全码在位，§2.2 CR-04） |
 | AR-9 | AC-S3 模式 B 的**分档 P95**（高密度 ≤5s / 低密度 ≤10s）依赖"探测预算封顶 5s + `NEG_TTL=5s` 稳态周期 + 请求密度"，绝对分位数需实测 | 中 | 封顶 5s 后稳态周期 = 10s、慢占比 ≈50% ⇒ 高密度 P95≈5s、低密度≈周期上界 10s（v1.5 重标）；需按 PRD AC-S3 **高/低密度两轮分别采集**（不得合并）；首次冷窗口一次/URL；**P6c 实测校准**（Q6 / 与 AR-13 同批） |
 | AR-10 | 负缓存改造使存量用例 `test_fetch_json_leader_failure_does_not_stampede` 语义变更，与 PRD §9「51 用例全绿」冲突 | 中 | §3 tests 行**显式登记改写**；声明"**51 条基线中 1 条按新语义更新并通过，其余 50 条全绿**"（新语义断言：leader 失败后 follower 不触网、`err=8`、`max_active=1`，负缓存窗口内 <1ms 失败）；PRD §9 的"51 全绿"表述**待编排层同步**（P1-7） |
 | **AR-11（v1.4 新）** | **单帧余量准入把"满配等价组"容量从 9 收到 8**：一个"9 个 200 码 × 3 域组"的订阅集合现在被 **400 拒绝**（`subscription frames would exceed …`）。而按**码**看，9×200 = 1800 ≤ `MAX_DEDUP_CODES=2000`、每组 200 ≤ `MAX_CODES_PER_SUB=200` ⇒ 客户端会认为"参数都合法却被拒" | 中 | ① 400 理由串**必须**给出 `STREAM_QUEUE_BYTES_BUDGET` 具体值（已如此），便于客户端自证预算；② 这是 `MAX_GROUPS`/码上限之外的**第三条**建组失败轴 ⇒ 与 N1/N2 同批记入变更日志；③ 若运维调大 `STREAM_QUEUE_BYTES_BUDGET`，容量按 `floor(B/F_max) − 1` **自动**重算（无硬编码常数）；④ 该风险**不可通过调 `MAX_GROUPS` 缓解**（`MAX_GROUPS` 是 CPU 护栏） |
@@ -1236,6 +1292,7 @@ MAX_CODES_PER_SUB=200 只是**单组**上限，MAX_DEDUP_CODES=2000 才是**活�
 | **AR-15（v1.7 新）** | **上游"HTTP 200 + 空壳"错误语义**：x-quote 对错误 `secu_code` 拼写返回 `200 + code:200` 的空壳（basic 全 null / volume 空 `data`），若取数只信 `code == 200`，会把空壳**缓存并推流**为"成功但全空"的行情（北交所历史症状） | 中 | ① 关键字段非空校验（`_basic_info_is_valid` 要求 `secu_name`/`last_px` 至少一个非空，否则 `upstream_error`）；② `depth` 空 `data`/全 0 ⇒ `None`（不伪造）；③ 线路拼写经 `upstream_secu_code` 单一权威（ADR-020）；`upstream_fail_total{upstream_error}` 可观测 |
 | **AR-16（v1.8 新；★ v1.9 / F1 修订）** | **RSS 条件请求的已登记语义取舍（v1.9 由 2 项缩小为 1 项）**：① **仅 `<pubDate>` 变化**（上游真实更正 item 发布时间）⇒ ETag 不变 ⇒ 下游最多持旧副本至下一次真内容变化 / TTL 重生成。**② v1.9 修订——原"`Last-Modified` = 缓存写入时刻 ⇒ 仅带 IMS 的客户端跨 TTL 必得 200（完整重取）"的取舍已消除**：`Last-Modified` 现表示**最后一次变更的时刻**（feed 条目承载 `fingerprint`（与 ETag 同源）与 `last_modified`；指纹未变则跨 TTL 重生成**继承**同一 `last_modified`），不变式 **`ETag` 变 ⟺ `Last-Modified` 前进** ⇒ **IMS-only 与 INM-only 客户端跨 TTL 行为等价**（指纹未变 ⇒ 304）。**残留（已登记的可接受降级）**：无上一条目（首次 / LRU 淘汰 / 已 sweep）⇒ `last_modified` 取本次写入时刻（一次性 200 后恢复 304）；降级体 `last_modified=None` ⇒ 不发头、IMS 不可评估 | 低 | ① `pubDate` 在 3/5 feed 上是"解析失败回落"，纳入哈希会使条件请求必然失效；其变化通常伴随 title/description/新 item 等真内容变化（漏报面极小）；item 身份由 `<guid>` 承载。② **`ETag` 变 ⟺ `Last-Modified` 前进**（同源 `fingerprint`）是唯一可依赖的不变式；残留降级仅在条目消失/降级时出现，恢复后自动回到 304。**两条均登记 N4**（v1.9：语义收紧**不新增对外头项**；原"IMS-only 完整重取"表述作废） |
 | **AR-17（v1.8 新）** | **ETag 规范化对 `generate_rss` 输出形状的隐式依赖**：`count=1` 精确命中 channel 首个 `<lastBuildDate>`/`<ttl>` 的前提是——两者在 `generate_rss` 中**结构上先于 items**、其值由 `formatdate` 产出、且 `escape_xml` 使 item 字段不可能注入字面同名元素。该前提**无断言/护栏**：若将来重排 channel 元素、或 item 级出现同名元素、或改为直接产出 canonical 串，投影语义会**静默改变**（可能退化为误 200 或误 304） | 中 | ① `_feed_etag` 保持**纯函数 + 不读时钟/缓存**，单测以"仅 `<pubDate>` 不同 ⇒ ETag 相同"的纯函数断言 + 三 feed handler 层受控时钟断言钉死（`SRV-T52b`）；② 若 `generate_rss` 结构调整，**必须**连带复核 `_LASTBUILDDATE_RE`/`_RSS_TTL_RE`/`_PUBDATE_RE` 三正则；③ 更稳的收敛路径是让 `generate_rss` 直接产出 canonical 串（评审 P1-01 备选②），但那属体改动、须编排层批准 |
+| **AR-18（v1.16 新；★ v1.17 状态推进）** | **「缓存上界 ≠ 进程 RSS」——内存账目缺口 ≈750MB**：SAD §4.3 推导的**已知缓存项**上界 ≈**278MB**，而 PRF-MEM-01 实测 python 进程 RSS **`1.012GiB`**（收缩后），二者相差 **≈750MB**；§4.3 账目**只覆盖已知缓存项、未覆盖分配器（glibc arena）/CDP/运行时开销**（**CR-01 早已预警，现被实测证实**）。由此 **「调小 `cache_max` ⇒ 进程内存线性下降」的推断不成立**（v1.14→v1.16 实测：终端缓存收缩按原始体积反推 ≈92MB，仅兑现 **≈83MiB** 净收益）。**★ v1.17 状态 = 已定位 + 已缓解**：**主因 = glibc per-thread arena 碎片**（A/B 实测 `MALLOC_ARENA_MAX=2`，run 20260920-113125：python `1.012 → 0.772GiB`（−248MiB）、`VmSize` 8.96 → 1.15GB（−87%）、匿名 `rw-p` 300 → 166、容器 `1.41 → 1.259GiB = 83.95%`；机制 = 33 线程 × 默认上限 `8 × ncores`，每 arena 预留 64MB VA 且长期不归还 OS，`RssAnon` 占 98% / `RssFile` 仅 14.5MB 佐证）；**且 v1.16 所列"共享 URL 缓存（解析后 Python 对象）"已被证伪**（`cache.py:851-866` 存**解码后 `str`**、2000 条仅**几十 MB**） | **高** | ① **已缓解 = 容器 env `MALLOC_ARENA_MAX=2`（PRF-MEM-02）**，见 `docker-compose.yml` / `tech-stack.json` `infrastructure.deployment`（−248MiB；**不改代码**）；**★ v1.20：云上两份部署配置已同步落地**——`doc/deploy/docker-compose.aliyun-2c2g.yml`（阿里云 2C2G，`MAX_WORKERS=20`/`MAX_INFLIGHT=40`）＋ `doc/deploy/docker-compose.ucloud-2c8g.yml`（UCloud 2C8G，`MAX_WORKERS=30`/`MAX_INFLIGHT=60`），即**三份 compose 全部落地**（落地事实、A/B 证据与取值口径见 **§9.20**）；**AR-18 状态仍为「已定位 + 已缓解」、定位/缓解结论不变**；② **残余** ≈ **终端缓存解析对象（~200MB）** ＋ 运行时/分配器残余，**仍未达 ~0.65GiB ⇒ 残余度量待后续**（按进程 cgroup 实测 RSS/PSS 分列）；**★ v1.18 附带收口**：PRF-MEM-01 修复轮的 `'env:<NAME>'` 来源已**注册同源（导入期冻结）** ＋ 测试 **hermetic 化**（不再靠原地重绑定 `config.MAX_*_POOL` 证明联动，BR-CFG-10）——属该专项的**工程卫生收口**，**AR-18 状态仍为「已定位 + 已缓解」**、定位/缓解结论不变；③ ~~共享 URL 缓存调优~~（上限/TTL/按域分区/紧凑表示）**本项已证伪、不再作为方向**；④ **内存账目口径更正**：§4.3 明确标注为「**已知缓存项上界**」，**禁止**当作进程总内存上界（§2.2 R-4 / §4.3 / §8 S9 同步）；⑤ 需按**进程 cgroup 实测**（RSS/PSS 分列）建立总账，**不得**再用 `Σ(cache_max × 单条体积)` 外推进程内存；⑥ AC-S9 24h 采样 + 重建部署后复测 |
 
 ### 7.3 设计假设（变更即需重评架构）
 
@@ -1332,7 +1389,7 @@ MAX_CODES_PER_SUB=200 只是**单组**上限，MAX_DEDUP_CODES=2000 才是**活�
 | S6 | ✅ | §2.3 D-6 码级冷却 120s（**4 元条目**），批量与 prefetch 共用（P1-5 已修）；**v1.4：仅"真实上游失败"入账——本地预算耗尽（`_LOCAL_BUDGET`）不计（ADR-014 v1.4 反转 / v1.5 编排层正式确认）** |
 | S7 | ✅ | §2.3 D-3 超时矩阵（31s→5s；**v1.4 补阶梯探测、follower 等待余量、端到端 `deadline`**） |
 | S8 | ✅ | §2.6 专用执行器 + **有界准入**（stale 可达可测，P1-3 已修）+ **`_HealthBatch` 准入位恰好释放一次、在飞 ≤25**（v1.4） |
-| S9 | ✅ | §4.3 资源上界表 + 进程内存 ≈268MB（L1=3 域 + `_last_known`，修 P2-N5/v1.4）；**v1.6 内存总账统一为 PSS 口径**（Chrome = 基线 250MB + `N×60`（典型）/ `N×150`（保守）MB，N=6 内容页；**RSS 禁止跨进程求和**，§9.6） |
+| S9 | ✅ | §4.3 资源上界表 + 进程内存 ≈**278MB**（`cache_max` 按域声明 + `_last_known`，★ v1.14 PRF-MEM-01 由 268MB 重算；修 P2-N5/v1.4）；**v1.6 内存总账统一为 PSS 口径**（Chrome = 基线 250MB + `N×60`（典型）/ `N×150`（保守）MB，N=6 内容页；**RSS 禁止跨进程求和**，§9.6）；**★ v1.16 压测实测（run 20260920-110805）：变更前 python RSS `1.095GiB`（容器 96.57%）→ 按域收缩后 `1.012GiB`（容器 `1.41GiB = 93.98%`），净收益仅 ≈83MiB ⇒ 未达成内存目标；`≈278MB` 仅为「已知缓存项」上界、与实测相差 ≈750MB（缺口见 **AR-18**）；**★ v1.17 A/B 实测（run 20260920-113125）：容器 env `MALLOC_ARENA_MAX=2` ⇒ python `1.012GiB → 0.772GiB`（−248MiB）、容器 `1.41GiB → 1.259GiB = 83.95%`、`VmSize` 8.96 → 1.15GB（主因 = glibc per-thread arena 碎片；v1.16 的"共享 URL 缓存"归因已证伪）；AR-18 状态推进为**已定位 + 已缓解**，残余 ≈ 终端缓存解析对象（~200MB）+ 运行时残余、仍未达 ~0.65GiB**；★ **v1.15 CR-04**：`quote`/`timeline` 的 `cache_max` 已小于 `MAX_DEDUP_CODES` ⇒ 内存界由 `cache_max` **独立**守住（池上限含 env 调整不参与，§4.3） |
 | S10 | ✅ | §2.6 计分板（**冷却清单**可枚举、healthz 精确 schema，P2-6 已补）；**v1.4 补：`http_503_total` 计数点、`snapshot()` 零值恒定发布、`code_cooldown_list` 发布节流；v1.5 该计数点由四收敛为三** |
 | S11 | ✅ | **不改动 + 断言依据**（§3.1）：`_register_conn` 重连 + `push_loop` 下一 tick 全量快照 + `STREAM_GROUP_IDLE_TTL=300s` |
 | **AC-A13** | ✅ | **v1.8（PRD v0.7 由 prd-writer 并行落号）** §2.7 + ADR-023：弱 ETag 规范化投影（剔 `lastBuildDate`/`ttl`/`pubDate`）/ `Last-Modified` 时间源 / 304 组成 / `If-None-Match` 优先 / `<ttl>` advisory（最小 1 分钟）/ **仍为拉模型·HTTP/1.0**；详设 `server.md` BR-SRV-36..44 + 测试 `SRV-T46..T62`。**★ v1.9（P8 F1–F6）**：`Last-Modified` = 表示最后一次变更的时刻（BR-SRV-38 改写 + BR-CACHE-33）+ 键含 `base_url`（BR-SRV-45）+ `http_304_total`（BR-SRV-46）+ `max-age` authority = `feed`（BR-SRV-47）+ `feed_cache_put` 返回写入条目（BR-SRV-48）+ HTTP/1.0 304 EOF（BR-SRV-49）；详设 `server.md` v1.9 / `cache.md` v1.8 / `metrics.md` v1.4 + 测试 `SRV-T63..T70`（总 72） |
@@ -1345,7 +1402,19 @@ MAX_CODES_PER_SUB=200 只是**单组**上限，MAX_DEDUP_CODES=2000 才是**活�
 
 ## 9. 修订摘要
 
-> ⚠️ **§9.1-§9.3 是历史修订记录**（分别落地 REV-ARCH / 二轮复审 / P3b 详设评审的 SAD 侧动作），其中若干**数字口径已被后续实测或裁决推翻**（最典型：`coverage≈170` / `coverage_codes≈56` / "恒定 2s 探测" / "探测阶梯升到 10s" / "降级 503" / "`_LOCAL_BUDGET` 反转未确认" / **v1.4 的 `_PER_FETCH_EST=2.2`、`coverage=23`、`coverage_codes=23/11/7`、`quote` 稳态成本 1**）。**§9.4（v1.4）、§9.5（v1.5）、§9.6（v1.6）、§9.7（v1.7，P7b 契约同步第二轮）、§9.8（v1.8，RSS 条件请求回填）、§9.9（v1.9，P8 F1–F7 回填）、§9.10（v1.10，P8 F8 回填）、§9.11（v1.11，AC 落号对齐 + `last_modified=None` 来源补全）与 **§9.12（v1.12，台账收口 + 措辞更正）、§9.13（v1.13，溯源收口 + 引用时点约定）** 是最新且唯一的现行口径**；冲突时以**编号最大者为准**：§9.7 覆盖 §9.4 的**容量常量与数值**（`_PER_FETCH_EST` 2.2→0.3、`BATCH_MAX_WORKERS` 8→20、`coverage` 23→213、`coverage_codes` 23/11/7→106/71/53）、`quote` 稳态成本（1→2）、tick 口径（L1 固定→订阅域最短 TTL）、以及 §2.6 的"帧间隔"不变式表述；§9.6 覆盖 §4.3 / R20 / ADR-012 / AR-5 / S9 的**内存口径**；§9.5 覆盖 §9.4 的三处表述（§2.4 降级状态码、§2.3 探测阶梯封顶、ADR-014 反转的"已确认"状态）；**§9.8（v1.8，P7b SAD 回填：RSS 条件请求）覆盖"SAD 无该能力落点"的 P1 级契约缺口**（新增 §2.7 / ADR-023 / AC-A13 承接）；**§9.9（v1.9，P8 F1–F7 架构回填）为最新口径**——覆盖 §9.8 的 `Last-Modified` 时间源（写入时刻 → 表示最后一次变更的时刻）、§2.6 的注册表 19 名单（→ 20）与 RSS `max-age` authority（`news_url` → `feed`）；**§9.10（v1.10，P8 F8 架构回填）为最新口径**——覆盖 §2.2 新增 R-7（feed 取数锁表引用计数回收）并补正 §2.7 的 `BR-SRV-45` 论证边界（上游请求不放大 ≠ 本地资源不放大，后者由 F8 提供界）；**§9.11（v1.11，AC 落号对齐 + `last_modified=None` 来源补全）为最新口径**——F2 的 AC 归属更正为 **AC-A14**、F8 的 AC 主承接更正为 **AC-S12**、**AC 总数 34 → 36**（v1.9 承接 A14、v1.10 承接 S12）、§2.7 补 `last_modified=None` 第二来源（legacy / 非六字段条目 P2-1 fail-safe），**无设计变更**；历史 §9.8/§9.9/§9.10 记录块中的"当时 34 条"为历史快照，**现行 AC 计数以本节与 §8 覆盖声明为准**。 **§9.12（v1.12）为最新口径**——仅收口 Q2/S4 契约同步、D-6「已确认」措辞、面板 `max-age` 域（4/120）与 `stock_api ⇢ cdp_engine` 同层边核实，**无设计变更**。 **§9.13（v1.13，溯源收口 + 引用时点约定）为最新口径**——PRD 上游引用更正 **v0.10**、新增「版本引用时点约定」注、文末承接清单详设版本收口（`server.md` v1.17 / `cache.md` v1.15 / `metrics.md` v1.9 / `config.md` v1.7 / `stock_api.md` v1.4 / `market_api.md` v1.7 / `cdp_engine.md` v1.4 / `stream.md` v1.6）、§6 `tech-stack.json` 版本引用更正（`version: 1.12 → 1.13`），**无设计变更**。
+> ⚠️ **§9.1-§9.3 是历史修订记录**（分别落地 REV-ARCH / 二轮复审 / P3b 详设评审的 SAD 侧动作），其中若干**数字口径已被后续实测或裁决推翻**（最典型：`coverage≈170` / `coverage_codes≈56` / "恒定 2s 探测" / "探测阶梯升到 10s" / "降级 503" / "`_LOCAL_BUDGET` 反转未确认" / **v1.4 的 `_PER_FETCH_EST=2.2`、`coverage=23`、`coverage_codes=23/11/7`、`quote` 稳态成本 1**）。**§9.4（v1.4）、§9.5（v1.5）、§9.6（v1.6）、§9.7（v1.7，P7b 契约同步第二轮）、§9.8（v1.8，RSS 条件请求回填）、§9.9（v1.9，P8 F1–F7 回填）、§9.10（v1.10，P8 F8 回填）、§9.11（v1.11，AC 落号对齐 + `last_modified=None` 来源补全）与 **§9.12（v1.12，台账收口 + 措辞更正）、§9.13（v1.13，溯源收口 + 引用时点约定）** 是最新且唯一的现行口径**；冲突时以**编号最大者为准**：§9.7 覆盖 §9.4 的**容量常量与数值**（`_PER_FETCH_EST` 2.2→0.3、`BATCH_MAX_WORKERS` 8→20、`coverage` 23→213、`coverage_codes` 23/11/7→106/71/53）、`quote` 稳态成本（1→2）、tick 口径（L1 固定→订阅域最短 TTL）、以及 §2.6 的"帧间隔"不变式表述；§9.6 覆盖 §4.3 / R20 / ADR-012 / AR-5 / S9 的**内存口径**；§9.5 覆盖 §9.4 的三处表述（§2.4 降级状态码、§2.3 探测阶梯封顶、ADR-014 反转的"已确认"状态）；**§9.8（v1.8，P7b SAD 回填：RSS 条件请求）覆盖"SAD 无该能力落点"的 P1 级契约缺口**（新增 §2.7 / ADR-023 / AC-A13 承接）；**§9.9（v1.9，P8 F1–F7 架构回填）为最新口径**——覆盖 §9.8 的 `Last-Modified` 时间源（写入时刻 → 表示最后一次变更的时刻）、§2.6 的注册表 19 名单（→ 20）与 RSS `max-age` authority（`news_url` → `feed`）；**§9.10（v1.10，P8 F8 架构回填）为最新口径**——覆盖 §2.2 新增 R-7（feed 取数锁表引用计数回收）并补正 §2.7 的 `BR-SRV-45` 论证边界（上游请求不放大 ≠ 本地资源不放大，后者由 F8 提供界）；**§9.11（v1.11，AC 落号对齐 + `last_modified=None` 来源补全）为最新口径**——F2 的 AC 归属更正为 **AC-A14**、F8 的 AC 主承接更正为 **AC-S12**、**AC 总数 34 → 36**（v1.9 承接 A14、v1.10 承接 S12）、§2.7 补 `last_modified=None` 第二来源（legacy / 非六字段条目 P2-1 fail-safe），**无设计变更**；历史 §9.8/§9.9/§9.10 记录块中的"当时 34 条"为历史快照，**现行 AC 计数以本节与 §8 覆盖声明为准**。 **§9.12（v1.12）为最新口径**——仅收口 Q2/S4 契约同步、D-6「已确认」措辞、面板 `max-age` 域（4/120）与 `stock_api ⇢ cdp_engine` 同层边核实，**无设计变更**。 **§9.13（v1.13，溯源收口 + 引用时点约定）为最新口径**——PRD 上游引用更正 **v0.10**、新增「版本引用时点约定」注、文末承接清单详设版本收口（`server.md` v1.17 / `cache.md` v1.15 / `metrics.md` v1.9 / `config.md` v1.7 / `stock_api.md` v1.4 / `market_api.md` v1.7 / `cdp_engine.md` v1.4 / `stream.md` v1.6）、§6 `tech-stack.json` 版本引用更正（`version: 1.12 → 1.13`），**无设计变更**。 **§9.14（v1.14，内存调优 PRF-MEM-01 契约同步）为最新口径**——覆盖 §9.6 / §2.1 / §4.3 的**进程内缓存内存口径**（`DOMAIN_MATRIX` 的 `quote`/`fundflow` `pool_max`/`cache_max` 2000→**1000**、`timeline` 2000→**500**，`spec` 由 `'dedup'` 改 `'fixed:N'`；内存分项估算 268MB→**278MB**，权威以压测实测 RSS 1.095GiB→预期 ≈0.65GiB 为准），**无对外契约变更**——历史 §9.6 的"进程内 268MB / 保守上界 1418MB"为历史快照，**现行以本节与 §4.3 为准**。
+
+> **★ v1.15 更新**：**§9.15（v1.15，PRF-MEM-01 修复轮契约同步）为最新口径**——覆盖 §9.14 的 `pool_max` **来源**（`'fixed:N'` → `'env:<NAME>'`，默认值不变）、新增终端缓存不变式更正（**CR-04**：`cache_max` 与 `MAX_DEDUP_CODES` 解耦）与 prefetch 间隔口径更正（**CR-05**）；冲突时以 **§9.15** 为准。历史 §9.1–§9.14 记录块**原文保留**（含 §9.14 的 `'fixed:N'` 与"prefetch 每 120s"等当时快照）。
+
+> **★ v1.16 更新**：**§9.16（v1.16，PRF-MEM-01 实测更正）为最新口径**——以**实测（run 20260920-110805）**更正 v1.14/v1.15 的 `≈0.65GiB` 乐观估算（收缩后 python RSS **`1.012GiB`** / 容器 **`1.41GiB = 93.98%`**，净收益仅 **≈83MiB**，**未达成内存目标**），并新增架构事实 **「缓存上界 ≠ 进程 RSS」**（§4.3 已知缓存项上界 ≈278MB vs 实测 1.012GiB，缺口 ≈750MB ⇒ 待解架构项 **AR-18**）；冲突时以 **§9.16** 为准。历史 §9.1–§9.15 记录块**原文保留**（含 §9.14/§9.15 的 `≈0.65GiB` 估算与"待复核"标记）。
+
+> **★ v1.17 更新**：**§9.17（v1.17，PRF-MEM-02 归因纠偏 + arena 治理回填）为最新口径**——**证伪** v1.16 的「共享 URL 缓存（解析后 Python 对象）」归因（URL 缓存存**解码后的原始文本 `str`**、2000 条仅**几十 MB**，非缺口主因），确立 **AR-18 主因 = glibc per-thread arena 碎片**，并以 **A/B 实测（run 20260920-113125）**登记 **已定位 + 已缓解**（容器 env `MALLOC_ARENA_MAX=2`：python `1.012 → 0.772GiB`、容器 `1.41 → 1.259GiB = 83.95%`、`VmSize` 8.96 → 1.15GB）；冲突时以 **§9.17** 为准。历史 §9.1–§9.16 记录块**原文保留**（含 §9.16 的"共享 URL 缓存 = 真正大头"**当时快照**、`≈0.65GiB` 与 ≈750MB 缺口表述）。
+
+> **★ v1.18 更新**：**§9.18（v1.18，P8-r1 遗留修复轮契约同步）为最新口径**——把 v1.15 的 `'env:<NAME>'` 解析由"**调用期** `globals()`（每次 `cache_policy` 读可变模块全局）"更正为「**导入期冻结的注册映射 `_POOL_MAX_ENVS`**（键=NAME、值=冻结值，名单与取值同源）」：`cache_policy` **只读该映射、不依赖可变模块全局**（**BR-CFG-10**）、未注册 NAME 一律 `ValueError`（不再可能 `KeyError`）、**运行期重绑定 `config.MAX_*_POOL` 不再影响 `cache_policy`**；并登记 **P1-2 取舍**：**不设 `pool_max ≤ cache_max` 护栏**（两者为独立上限，`depth`/`f10`/`announcement` 现状即反例；超出仅致回转/回源浪费，非正确性问题）；**无设计变更、无对外契约变更**；冲突时以 **§9.18** 为准。历史 §9.1–§9.17 记录块**原文保留**（含 v1.15 修订依据行 / §9.15 的"调用期"措辞，已在新块标注更正）。
+
+> **★ v1.19 更新**：**§9.19（v1.19，PRF-LAT-02 契约同步）为最新口径**——`margin` 由「URL 缓存独占（`cache_max='n/a'`）」改为**模块内终端缓存 8 条**（`market_api._margin_cache`，真 LRU；命中免 `json.loads` + `_transform_margin`、**不计数**，仅 `latest is not None` 才写），`upstream_fetch_total{margin}` 收敛为**仅终端 miss +1**（与 `stock` 域口径对齐）；**URL-cache-only 域现行 = `plate`/`news_url`/`longhu`**；**无对外契约变更**（`/market/margin` 响应形状与 `_error` 降级语义不变）；冲突时以 **§9.19** 为准。历史 §9.1–§9.18 记录块**原文保留**（含 §2.1 v1.4 更正注 / §9.4 D-2 的"`margin` = URL 缓存独占"当时快照，已在新块标注更正）。
+
+> **★ v1.20 更新**：**§9.20（v1.20，云上部署配置下发运行时调优）为最新口径**——编排层把两项**已 A/B 证实**的运行时调优下发到两份云 compose（`doc/deploy/docker-compose.aliyun-2c2g.yml` / `doc/deploy/docker-compose.ucloud-2c8g.yml`）：**`MALLOC_ARENA_MAX=2`**（PRF-MEM-02，python `VmRSS` −248MiB，三份 compose 全部落地）与 **`HTTP_POOL_MAX_PER_HOST=48`**（PRF-LAT-01，fundflow avg −52%，**部署侧 env 覆盖、代码默认仍 24**）；§9.17 待办行已收口（落地面更正为**三份 compose 全部落地**）；**AR-18 状态仍为「已定位 + 已缓解」、定位/缓解结论不变**；UCloud 的 **60 为未验证候选**（勿当结论）；**仅登记交付事实、无设计变更、无对外契约变更**；冲突时以 **§9.20** 为准。历史 §9.1–§9.19 记录块**原文保留**。
 
 ### 9.1 v1.1（依据 REV-ARCH-20260915-001）
 
@@ -1459,7 +1528,7 @@ AR-6 校正后（供 P6c 校准）：`fundflow max(25,8)=25→8（×3.1）` · `
 | # | 项 | 代码证据 | 严重度 | SAD 落点 |
 |---|----|---------|-------|---------|
 | **D-1** | **JSON 单体/面板/工具端点在"整体降级"时返回 503，与 PRD AC-A5 的"HTTP 200"逐字冲突** | `_json_payload_has_data(payload)`（`server.py:597-620`）+ `_send_json_shape` `status = 200 if _json_payload_has_data(payload) else 503`（`:1173`）；单测 `test_server_http.py:590-628` 已锁死 503；受影响 = 4 面板 + `/cls/hotplate` + `/cls/plate` + `/market/margin` | **高（裁决阻塞）** | §2.4 降级状态码表 / §3.1 例外 4 / **§7.1 N1（待裁决）** / §8 A5 标 ⚠️ / **AR-12（新）** |
-| **D-2** | `DOMAIN_MATRIX` 中 `plate`/`margin` 的 `cache_max` 为 `'n/a'`（非 200/16） | `config.py:222`/`:227`；`test_config.py:107-112`（P2-9：URL 缓存独占域不设 per-domain cache_max） | 中 | §2.1 矩阵 + 更正说明 |
+| **D-2** | `DOMAIN_MATRIX` 中 `plate`/`margin` 的 `cache_max` 为 `'n/a'`（非 200/16） | `config.py:222`/`:227`；`test_config.py:107-112`（P2-9：URL 缓存独占域不设 per-domain cache_max） | 中 | §2.1 矩阵 + 更正说明（**★ v1.19 已更正**：`margin` **移出**该组，`cache_max` `'n/a' → 8`——新增模块内终端缓存 `market_api._margin_cache`；本行为历史快照，现行口径见 **§9.19**） |
 | **D-3** | `_fail_ledger` 条目为 **4 元** `[cnt, cooldown, kind, last_ts]`（原 SAD 写 2 元） | `stock_api.py:216`；老化判定用 `entry[3]`（`:183`/`:200`） | 中 | §2.3 D-6 / ADR-014 / §4.3 |
 | **D-4** | **handler 返回的是"已组装 dict"**，不是 `(results, errors)`（后者仅存在于管道层） | `handle_cls_*(codes, deadline=None, dropped=0) -> dict` 内部调 `build_batch_response`（`stock_api.py:1020-1088`）；`server._handle_stock_batch` 只注入 `dropped`（`server.py:1145-1147`） | 中 | §2.4 职责边界 / §3 stock_api 行 / ADR-009 影响 |
 | **D-5** | `BoundedThreadPoolServer` 新增 `max_inflight` 形参，**流端口显式 110** | `server.py:1341-1349`；`stream.make_stream_server` 传 `MAX_STREAM_CONNS+10`（`stream.py:1289-1292`） | 中 | §3 server 行 / §8 E8 |
@@ -1476,7 +1545,7 @@ AR-6 校正后（供 P6c 校准）：`fundflow max(25,8)=25→8（×3.1）` · `
 | **新增** | **ADR-015 按订阅字段刷新（中可逆）** | 3 选项（无条件 3 域 / 按订阅并集 / 按组分别刷）→ 选"按订阅并集 + codes/fields 同锁读"；核心理由是**避免容量模型被低估而错误降级**（比多付上游更糟） |
 | **新增** | **ADR-016 SSE 帧完整性契约（低可逆）** | 4 选项（稀疏 items / 稠密 + 三元数据 / 增量 diff / 只稠密化）→ 选"稠密 + `missing`/`stale`/`errors` + last-known 结转"；把"一个含糊的缺席"拆成三个可行动状态 |
 | **新增** | **ADR-017 `config.canonical_code` 单一权威（低可逆）** | 3 选项（各处就地正则 / 只归一化下游 / 单一权威函数 + 响应回写原拼写）→ 选 C；把"一个股票一个身份"变成 `canonical_code(canonical_code(x))==canonical_code(x)` 的可断言性质 |
-| **补正** | ADR-001 / 003 / 009 / 013 / 014 | 001 补 `plate`/`margin` 的 `cache_max='n/a'`；003 决策改"阶梯 + 老化"并加长推导；009 补 `fetch_json(deadline=)` 与"闸门在正缓存后"；013 补单帧余量准入与容量 9→8；014 补 4 元条目 + **`_LOCAL_BUDGET` 不入账的反转登记** |
+| **补正** | ADR-001 / 003 / 009 / 013 / 014 | 001 补 `plate`/`margin` 的 `cache_max='n/a'`（**★ v1.19 已更正**：`margin` 移出该组、`cache_max` → **`8`**，见 §9.19）；003 决策改"阶梯 + 老化"并加长推导；009 补 `fetch_json(deadline=)` 与"闸门在正缓存后"；013 补单帧余量准入与容量 9→8；014 补 4 元条目 + **`_LOCAL_BUDGET` 不入账的反转登记** |
 | **不新增** | tick 节拍（整 tick 网格 + 退避） | 按可逆性原则：改回 `_tick_sleep_seconds` 只需数行 ⇒ **高可逆 ⇒ 不记 ADR**，落 §2.6 叙述（已在 ADR 汇总行显式说明该判定） |
 
 **四、tech-stack.json 动作**：`version: 1.3 → 1.4`；**`allowlist` 补 `hashlib`/`html`/`xml`**（D-8）；**`layerIsolation` 补登 `stock_api → cdp_engine` 单向同层边**（并强化 cdp_engine 条目的 reason）；`namingRules.fetch` 措辞放宽为"至少含 `(code, deadline=None)`"（实现已增至 3 个可选形参）；`namingRules.config` 补"代码归一化一律经 `config.canonical_code`，禁止本地正则"。`fileStructure` 不变（仍是扁平 9 模块）。
@@ -1873,5 +1942,454 @@ AR-6 校正后（供 P6c 校准）：`fundflow max(25,8)=25→8（×3.1）` · `
 
 ---
 
-*SAD v1.13 完 · 供 review-expert 复审（复核 §9.13 溯源收口（PRD v0.10 / 文末详设清单 / 引用时点约定）与 §9.12 台账收口（Q2/S4 契约同步闭环、D-6「已确认」措辞、面板 `max-age` 域 4/120、`stock_api ⇢ cdp_engine` 同层边核实）及 §8 覆盖声明 ⚠️ 5→4；历史承接见 §9.11 AC 落号对齐（F2→AC-A14 / F8→AC-S12 / AC 总数 34→36）、§9.10 F8 回填、§9.9/§9.8/§9.7 记录块）与 task-decomposer 承接（**现行**详设 `server.md` v1.17 / `cache.md` v1.15 / `metrics.md` v1.9 / `config.md` v1.7 / `stock_api.md` v1.4 / `market_api.md` v1.7 / `cdp_engine.md` v1.4 / `stream.md` v1.6——**内容以各文档头部为准（此栏为快照，落后不属漂移）**；`API.md` 的 N4 其余同步项——`http_304_total` 观测名 / feed 条目六字段形态变更 / HTTP/1.0 304 EOF——仍待编排层处理）*
+### 9.14 v1.14（内存调优 PRF-MEM-01 契约同步 · 以代码为准）
+
+> **性质**：本轮为 **P7b 契约同步**（依 code-reviewer P7a 漂移清单），以**已落地代码**（`config.py` `DOMAIN_MATRIX`）为准回写 `doc/arch/SAD.md` + `doc/arch/tech-stack.json`。范围严格限定 `doc/arch/**`；**未改代码、未改测试、未改详设、未改 PRD、未改 `API.md`/`README.md`/`.opencode/**`/`opencode.json`**。**无对外契约（API 字段 / 头项 / 状态码）变更**——只收口**内部资源口径**（池/缓存上限与内存分项）。
+
+**一、权威新值（代码事实，`config.py` `DOMAIN_MATRIX`）**
+
+| 域 | `pool_max` 旧 → 新 | `cache_max` 旧 → 新 | `spec` 旧 → 新 |
+|----|--------------------|---------------------|----------------|
+| `quote` | 2000 → **1000** | 2000 → **1000** | `'dedup'` → **`'fixed:1000'`** |
+| `fundflow` | 2000 → **1000** | 2000 → **1000** | `'dedup'` → **`'fixed:1000'`** |
+| `timeline` | 2000 → **500** | 2000 → **500** | `'dedup'` → **`'fixed:500'`** |
+| `depth`（pool 2000 / cache 500）及其余域 | 不变 | 不变 | 不变 |
+
+**二、实测依据（压测）**：变更前容器 **1.449GiB / 1.5GiB = 96.57%**、python 进程 RSS **1.095GiB**；`/healthz?check=0` 实测缓存条目 **fundflow=2000 / quote=2000 / depth=500 / timeline=1350**（均达 `cache_max`）；`cache_hit_ratio=0.1585`；`upstream_timeout=123`。单条原始体积（实测）：timeline ≈96KB、quote ≈9.4KB、fundflow ≈576B、depth ≈360B。归因 = **稳态内存 ≈ Σ(`cache_max` × 单条展开体积)**、prefetch 每 120s 轮询 pool 续期 ⇒ **LRU 永不淘汰、压测后不回落**。处置后预期 python 稳态 RSS ≈**0.65GiB**（**估算，待重建部署后实测复核**）。
+
+**三、改动条目**
+
+| # | 项 | 旧 → 新 | 落点 |
+|---|----|---------|------|
+| 1 | `DOMAIN_MATRIX` 实例（3 行 + depth 注记 + 示例输出） | `quote`/`fundflow` `'dedup'/2000` → `'fixed:1000'/1000`；`timeline` `'dedup'/2000` → `'fixed:500'/500`；`cache_policy('quote')` 示例 `pool_max:2000,cache_max:2000` → `1000,1000` | §2.1（矩阵 + `cache_policy('quote')` 示例 + 新增 v1.14 更正注） |
+| 2 | **设计不变量：池上限口径** | "实时域 L0/L1 = `MAX_DEDUP_CODES=2000`，与去重码硬上界同源" → **按域声明**（`'dedup'`⇒`MAX_DEDUP_CODES`；`'fixed:N'`⇒N）；quote/fundflow=1000、timeline=500 为**显式收缩值**（不再等于 `MAX_DEDUP_CODES`） | §2.2 三层缓存表 ① 行 + ①/③ 解耦说明 + §4.3「池上限自洽」 |
+| 3 | healthz `policy` 示例 | `pool_max:2000,cache_max:2000` → `pool_max:1000,cache_max:1000`（以 fundflow 为例，附按域说明） | §2.6 精确 schema |
+| 4 | §4.3 资源上界表 | 去重码池「2000 全局 / 200 单组」→「**按域 `pool_max`**（quote/fundflow=1000、timeline=500；depth/announcement/f10 仍 `'dedup'`=2000）」；L1 端点缓存「2000/域」→「**按域 `cache_max`**（quote/fundflow=1000、timeline=500）」；进程内存行补压测实测 | §4.3 表 |
+| 5 | **内存分项估算重算** | "3 域 × 2000 × ~8KB ≈ 48MB"（失效）→ quote 1000×~9.4KB≈9.4MB + fundflow 1000×~0.6KB≈0.6MB + **timeline 500×~96KB≈48MB（占主导）** + depth ≤500×~0.36KB≈0.2MB ≈ **58MB**；合计 ≈268MB → **≈278MB**；并声明"**原始体积 ≠ 展开后 Python 对象占用，权威以实测 RSS 为准**（1.095GiB→≈0.65GiB）" | §4.3（内存分项 + 口径声明 + Chrome 总账 888/1428MB + 压测实测 bullet） |
+| 6 | §7.2 AR | AR-5（268→**278MB**；`cache_max` 按域）；**AR-8**（改写为"已由压测证实" + 新估算 + 待复核）；AR-2（补压测 `cache_hit_ratio=0.1585` 观测，**是否常态退化待 P6c**） | §7.2 |
+| 7 | §8 追溯 | S9 行进程内存 268→**278MB** + 压测实测 | §8 S9 |
+| 8 | §3 config.py 行 | 补 `DOMAIN_MATRIX` 三域 `pool_max`/`cache_max` 同源收缩说明 | §3 |
+| 9 | `tech-stack.json` | `version: 1.13 → **1.14**`（**仅版本号**；`architectureRules`/`allowlist`/`layerIsolation`/`namingRules`/`fileStructure` 与 `deployment` 内存口径零变更） | `doc/arch/tech-stack.json` |
+
+**四、未同步项及原因**
+
+| # | 项 | 原因 |
+|---|----|------|
+| 1 | `tech-stack.json` 的 `backend.cache` / `infrastructure.deployment` 文案 | 其口径为"缓存机制"与"Chrome PSS 内存总账"，**不含 per-domain `pool_max`/`cache_max` 数值**（数值权威在 `config.py` 与 SAD §2.1/§4.3）⇒ 无该口径可同步；仅升 `version` |
+| 2 | §2.2 R-3（URL 缓存上限 2000 / feed 100） | 本次收缩对象是 **L0/L1 端点缓存与去重池**；`MAX_CACHE_SIZE=2000`（URL 缓存）与 feed `cache_max=100` **未变** |
+| 3 | §5 ADR-001 / ADR-013 / ADR-014、§2.3 / §2.4 / §2.5 | 未引用本次变更的池/缓存上限或内存实际口径 ⇒ 无需改动（ADR-001 的 `DOMAIN_MATRIX` 描述为结构性、不含三域数值） |
+| 4 | 历史记录块 §9.1–§9.13 | 按文档约定为**历史快照，原文保留**（如 §9.6"进程内 268MB""保守上界 1418MB"、§9.7 数值）——现行口径以 §9.14 与 §4.3 为准 |
+| 5 | §1 现状基线（pre-P6c） | 明确标注为"优化前基线，不是当前实现描述"；其"URL 缓存 2000 条"属 URL 缓存口径（未变），**故意不改** |
+
+**五、本轮遗留（交编排层）**
+
+| # | 事项 | 性质 |
+|---|------|------|
+| 1 | 变更日志登记「SAD PRF-MEM-01 内存口径同步（池/缓存按域收缩 1000/1000/500）」 | 契约同步（编排层） |
+| 2 | **部署后实测复核** python 稳态 RSS ≈0.65GiB，并回填 §4.3 / S9 的"待复核"标记 | 实测（编排层 / P6c） |
+
+**本轮版本**：SAD v1.13 → **v1.14**；`doc/arch/tech-stack.json` 同步 `version: 1.14`。**约束保持**：Python 3 标准库零依赖、`layerIsolation`、文件结构（扁平包 + 唯一新增 `metrics.py`）均未放宽。**未改代码、未改测试、未改详设、未改 PRD、未改 `API.md`/`README.md`/`.opencode/**`/`opencode.json`。**
+
+---
+
+### 9.15 v1.15（PRF-MEM-01 修复轮契约同步 · 以代码为准：CR-02/04/05/06）
+
+> **性质**：本轮为 **P7b 契约同步（修复轮）**——首轮 P8 发现 **CR-02/04/05/06** 四项问题，代码已修复（`config.py` `DOMAIN_MATRIX` / `_resolve_pool_max` 等，**517 用例全绿**），本轮以**代码为准**回写 `doc/arch/SAD.md` + `doc/arch/tech-stack.json`。范围严格限定 `doc/arch/**`；**未改代码、未改测试、未改详设、未改 PRD、未改 `API.md`/`README.md`/`.opencode/**`/`opencode.json`**。**无对外契约（API 字段 / 头项 / 状态码）变更**——只收口**内部资源口径**（池上限来源 / 终端缓存不变式 / prefetch 间隔口径）。**`cache_max` 数值未变（1000/1000/500）⇒ §4.3 内存分项估算数值不变。**
+
+**一、权威新值（代码事实，`config.py`）**
+
+| 域 | `pool_max` 默认值（v1.14 → v1.15） | `spec`（v1.14 → v1.15） | `cache_max`（不变） |
+|----|-----------------------------------|------------------------|---------------------|
+| `quote` | 1000（**值不变**） | `'fixed:1000'` → **`'env:MAX_QUOTE_POOL'`** | 1000（字面量，内存硬界） |
+| `fundflow` | 1000（**值不变**） | `'fixed:1000'` → **`'env:MAX_FUNDFLOW_POOL'`** | 1000（字面量） |
+| `timeline` | 500（**值不变**） | `'fixed:500'` → **`'env:MAX_TIMELINE_POOL'`** | 500（字面量） |
+| `depth`（`'dedup'`=2000 / cache 500） | 不变（**正确设计**） | 不变 | 500（内存界） |
+
+**二、四项裁定与依据**
+
+| # | 项 | 结论 / 依据 |
+|---|----|------------|
+| **CR-02** | `pool_max` 恢复 env 可调（**来源**变更、**默认值**不变） | `config.py` 新增 `MAX_QUOTE_POOL`(默认 1000) / `MAX_FUNDFLOW_POOL`(1000) / `MAX_TIMELINE_POOL`(500) 注册常量 + 白名单 `_POOL_MAX_ENVS`；`_resolve_pool_max` 新增 **`'env:<NAME>'`** spec（**调用期**解析为模块常量，**未知 NAME → `ValueError`**）；三域 spec 改 `'env:MAX_*_POOL'`。**`cache_max` 仍为矩阵内整数字面量**（内存硬界，不经 env）。 |
+| **CR-04** | 终端缓存不变式更正 | `cache_max`（quote 1000 / timeline 500）**首次小于**活跃码上界 `MAX_DEDUP_CODES`(2000) ⇒ 原"终端缓存覆盖活跃全集"的隐含不变式**不再成立**；新表述 = 「**LRU 有界 + `stream._last_known` 结转**」；降级语义 = 高负载下 `cached_batch` 命中率下降、上游取数上升（**帧仍全码在位**）。 |
+| **CR-05** | prefetch 间隔事实更正 | `pool_refresh` = `ttl × refresh_factor`（盘中 quote 4s、fundflow/timeline 8s，非盘 120s；`depth` **无 prefetch 循环**）；原 SAD"每 120s 轮询"为**误述**。`≈0.65GiB` 为**估算值，待部署实测复核**。 |
+| **CR-06** | `depth` 池上限理由 | `depth.pool_max = 'dedup' = 2000` 是**正确**的——**无 prefetch 循环**，池仅 `code→ts` 账本（≈200KB 量级），内存界是 `cache_max=500`；**非"与 quote 不对称"的遗漏**。 |
+
+**三、改动条目（逐处：旧 → 新）**
+
+| # | 项 | 旧 → 新 | 落点 |
+|---|----|---------|------|
+| 1 | 头部版本 + 修订依据行 | `v1.14` → **`v1.15`**；新增「修订依据（v1.15）」行 | 头部 |
+| 2 | `DOMAIN_MATRIX` 三行 spec | `'fixed:1000'` / `'fixed:1000'` / `'fixed:500'` → **`'env:MAX_QUOTE_POOL'` / `'env:MAX_FUNDFLOW_POOL'` / `'env:MAX_TIMELINE_POOL'`**（默认值不变）；`cache_policy('quote')` 示例注明 `pool_max` **来源 = env**、`cache_max` 为字面量；新增 **v1.15 更正注（CR-02 + CR-06）** | §2.1（矩阵 + 示例 + 更正注） |
+| 3 | 三层缓存表 ① / ③ 行 + 新增不变式条目 | ① 行补 `'env:<NAME>'` spec；③ 行补 `cache_max` 与 `MAX_DEDUP_CODES` 解耦；新增「**终端缓存上界独立于活跃码上界**」（CR-04）与「`depth` 池上限理由」（CR-06）两条注 | §2.2 |
+| 4 | healthz `policy` 示例 | 注明 `pool_max` 来源 = env 常量（默认 1000、可调），`cache_max` 字面量 | §2.6 精确 schema |
+| 5 | §3 config.py 行 | 补 `'env:<NAME>'` spec + `_POOL_MAX_ENVS` 白名单 + 3 个新 env 注册常量 | §3 |
+| 6 | §4.3 资源上界表 + 池上限自洽推导 | 池上限行补 env 来源；端点缓存行补 CR-04；明确「**pool 上限（含 env 调整）不改变内存界**——内存界由 `cache_max` 决定」 | §4.3 |
+| 7 | §4.3 口径声明（+ §2.1 v1.14 注内引用） | "prefetch **每 120s** 轮询" → **`pool_refresh` = `ttl × refresh_factor`**（盘中 4s/8s、非盘 120s） | §2.1 / §4.3 |
+| 8 | §6 / §7.2 AR-8 / §8 S9 | §6 tech-stack 版本引用 `v1.14 → **v1.15**`；AR-8 补 CR-02/04；S9 补 CR-04 内存界 | §6 / §7.2 / §8 |
+| 9 | `tech-stack.json` | `version: 1.14 → **1.15**`；`generatedAt` = `2026-09-20`（不变） | `doc/arch/tech-stack.json` |
+| 10 | §9 引言追加 | 新增「★ v1.15 更新」指针（§9.15 为最新口径）；**未改动**原超长引言行的历史内容 | §9 引言 |
+
+**四、未同步项及原因**
+
+| # | 项 | 原因 |
+|---|----|------|
+| 1 | §4.3 内存分项数值（≈58MB / ≈278MB / `0.65GiB`） | **`cache_max` 未变**（仍 1000/1000/500）⇒ 内存分项不变；`0.65GiB` 仍为**待复核估算**（CR-05） |
+| 2 | §2.1 INV-1a/1b（`coverage` / `coverage_codes` = 213 / 106 / 71 / 53） | 本次变更**不涉及** TTL / 节拍 / 每码取数成本 ⇒ 容量模型不变 |
+| 3 | §5 ADR-001 / ADR-013 / ADR-014、§2.3 / §2.4 / §2.5、§1 现状基线 | 未引用本次变更的**池上限来源**或**内存界不变式** ⇒ 无需改动（ADR-001 的 `DOMAIN_MATRIX` 描述为结构性、不含三域来源） |
+| 4 | `tech-stack.json` 的 `backend.cache` / `namingRules.config` 文案 | 其口径为"缓存机制 / 单一权威派生"，**不含 per-domain `pool_max` 来源**（权威在 `config.py` 与 SAD §2.1/§4.3）⇒ 仅升 `version`（同 v1.14 判定） |
+| 5 | 历史记录块 §9.1–§9.14 | 按文档约定为**历史快照、原文保留**（含 §9.14 的 `'fixed:N'` 与"prefetch 每 120s"）——现行口径以 **§9.15** 与 §2.1/§2.2/§4.3 为准 |
+
+**五、本轮遗留（交编排层）**
+
+| # | 事项 | 性质 |
+|---|------|------|
+| 1 | 变更日志登记「SAD PRF-MEM-01 修复轮（池上限恢复 env 可调；终端缓存不变式更正；prefetch 间隔口径更正）」 | 契约同步（编排层） |
+| 2 | **部署后实测复核** python 稳态 RSS ≈`0.65GiB`，并回填 §4.3 / S9 的"待复核"标记 | 实测（编排层 / P6c） |
+
+**本轮版本**：SAD v1.14 → **v1.15**；`doc/arch/tech-stack.json` 同步 `version: 1.15`。**约束保持**：Python 3 标准库零依赖、`layerIsolation`、文件结构（扁平包 + 唯一新增 `metrics.py`）均未放宽。**未改代码、未改测试、未改详设、未改 PRD、未改 `API.md`/`README.md`/`.opencode/**`/`opencode.json`。**
+
+---
+
+### 9.16 v1.16（PRF-MEM-01 实测更正 · 以实测为准）
+
+> **性质**：本轮为 **实测回填 / 归因更正**——PRF-MEM-01 重建部署后压测实测（**run 20260920-110805**）**证伪**了 v1.14/v1.15 SAD 的"收缩后 python 稳态 RSS ≈0.65GiB"乐观预测。范围严格限定 `doc/arch/SAD.md` + `doc/arch/tech-stack.json`；**未改代码、未改测试、未改详设、未改 PRD、未改 `API.md`/`README.md`/`.opencode/**`/`opencode.json`**。**无对外契约（API 字段 / 头项 / 状态码）变更**——只更正**内存口径与归因**，并登记一项**待解架构项**。
+
+> ⚠️ **★ v1.17 更正注（本块 §二 ②/③ 与 §三 的归因主次已被推翻）**：本块把缺口**主因**判为「**共享 URL 缓存（解析后 Python 对象）**」、glibc arena 列为"第二候选"——**该主次判定已被证伪**。`cache.py:851-866` 的 URL 缓存存的是 `resp.read().decode(...)` 的 **`str`（解码后原始文本）**、**非解析对象**，2000 条仅**几十 MB** ⇒ **不是缺口主因**；**真主因 = glibc per-thread arena 碎片**（`MALLOC_ARENA_MAX=2` A/B 实测 **−248MiB**）。本块**原文保留为历史快照**（含 §二 ②/③、§三 与 §五 改动条目表），**现行口径以 §9.17 与 §2.2 R-4 / §4.3 / §7.2 AR-18 / §8 S9 为准**。
+
+**一、实测事实（权威，run 20260920-110805）**
+
+| 项 | 收缩前 | 收缩后 | 净变化 |
+|----|--------|--------|--------|
+| python 进程 RSS | **`1.095GiB`** | **`1.012GiB`** | **≈ −83MiB** |
+| 容器 | **`1.449GiB / 1.5GiB = 96.57%`** | **`1.41GiB = 93.98%`** | −2.59pp（≈ −40MiB） |
+| 3 域配置（healthz 实测） | — | quote/fundflow `cache_entries`=**1000/1000**、timeline=**500/500**（**精确生效**） | — |
+
+**结论：未达成内存目标**——收缩后 python RSS `1.012GiB` 逼近 AC-S9 的 2C2G 参考线 ≤1.2GB、容器余量薄；终端缓存收缩的收益**远小于** SAD 预期。
+
+**二、归因更正（取代 v1.14 的"稳态内存 ≈ Σ(`cache_max` × 单条展开体积)"单一归因）**
+
+| # | 归因 | 证据 / 口径 |
+|---|------|------------|
+| ① | 终端缓存收缩 = **小头** | 按单条原始体积反推删除量 ≈**92MB**（quote 1000×~9.4KB + fundflow 1000×~0.6KB + timeline 850×~96KB），与实测 **−83MiB** 净收益吻合 |
+| ② | ~~共享 URL 缓存 = 真正大头~~（**★ v1.17 证伪：非主因**，见 §9.17） | ~~条目为解析后的 Python 对象~~ **实为** `cache.py:851-866` 存入的 **`str`（`resp.read().decode(...)`，解码后原始文本）**；2000 条仅**几十 MB**（`cache.py:31` 自注 `~20MB`）⇒ **从缺口候选中剔除** |
+| ③ | 线程池 **glibc arena 碎片** | 20 批 worker 高频分配/释放；~~缺口第二候选~~ **★ v1.17：确认为主因**（33 线程 × 默认上限 `8 × ncores`，每 arena 预留 64MB VA 长期不归还 OS；`MALLOC_ARENA_MAX=2` A/B 实测 **−248MiB**） |
+
+**三、新增架构事实：「缓存上界 ≠ 进程 RSS」（CR-01 预警被实测证实）**
+
+§4.3 推导的**已知缓存项**上界 ≈**278MB** 与实测 python RSS **`1.012GiB`（≈1036MiB）** 相差 **≈750MB**。**含义**：该账目**只覆盖已知缓存项**（URL/feed/端点/队列/`_last_known`），**未覆盖分配器（glibc arena）/CDP/运行时开销**。**由此确立**：① **「调小 `cache_max` ⇒ 进程内存线性下降」的推断不成立**；② §4.3 一律标注为「**已知缓存项上界**」，**禁止**当作进程总内存上界（§2.2 R-4 / §4.3 口径声明 / §8 S9 同步）。**登记为架构项 AR-18**（§7.2；~~后续方向：**共享 URL 缓存调优**~~ **★ v1.17：方向更正——主因是 glibc arena 碎片，已用 `MALLOC_ARENA_MAX=2` 缓解；共享 URL 缓存调优已证伪、不再作为方向**）。
+
+**四、旁证（待复测归因，非结论）**
+
+| 指标 | 收缩前 | 收缩后 | 处置 |
+|------|--------|--------|------|
+| `cache_hit_ratio` | 0.1585 | **0.1796** | 观测 |
+| tier1000 timeline `ok_rate` | 100% | **89.6%** | **待复测归因**（与 `upstream_timeout` 同批） |
+| `upstream_timeout` | 123 | **317** | **待复测归因** |
+
+> ⚠️ **口径纪律**：上述 timeline `ok_rate` / `upstream_timeout` 变化**登记为待复测归因项、不作为结论**——**不据此推断"收缩 `cache_max` 导致退化"**（未排除上游波动、压测密度变化等混淆因子）。
+
+**五、改动条目（逐处：旧 → 新）**
+
+| # | 项 | 旧 → 新 | 落点 |
+|---|----|---------|------|
+| 1 | 头部版本 + 修订依据行 | `v1.15` → **`v1.16`**；新增「修订依据（v1.16）」行 | 头部 |
+| 2 | §2.1 v1.14 注的乐观估算 | `预期 python 稳态 RSS ≈0.65GiB（估算值，待重建部署后实测复核）` → **v1.16 实测更正注**（1.095→1.012GiB、净 ≈83MiB、未达标） | §2.1 |
+| 3 | §2.2 R-4 内存总账 | 补 **「缓存上界 ≠ 进程 RSS」** 口径声明（已知缓存项上界 ≠ 进程总内存；缺口 ≈750MB） | §2.2 R-4 |
+| 4 | §4.3 进程内存行 | `预期 ≈0.65GiB（估算，待部署复核）` → **实测 `1.012GiB` / 容器 `1.41GiB = 93.98%`、净 ≈83MiB、未达成内存目标** | §4.3 表 |
+| 5 | §4.3 内存分项估算 | 补注：**278MB 为「已知缓存项」上界，非进程总内存上界**（与实测差 ≈750MB） | §4.3 |
+| 6 | §4.3 口径声明 | `预期 ≈0.65GiB（估算值，待重建部署后实测复核；不是已知结论）` → **实测 1.012GiB** + **归因更正**（URL 缓存/arena）+ **「缓存上界 ≠ 进程 RSS」缺口 ≈750MB** | §4.3 |
+| 7 | §4.3 压测实测 bullet | `预期 ≈0.65GiB` → **实测 1.012GiB / 1.41GiB / −83MiB**（含旁证） | §4.3 |
+| 8 | §7.2 AR-8 | `收缩后预期 ≈0.65GiB（估算，待部署复核）` → **实测 1.012GiB、净 ≈83MiB、未达标；缺口见 AR-18** | §7.2 |
+| 9 | §7.2 **新增 AR-18** | — → **「缓存上界 ≠ 进程 RSS」内存账目缺口 ≈750MB**（待解架构项；方向 = 共享 URL 缓存调优） | §7.2（**只增编号**） |
+| 10 | §8 S9 | `预期 ≈0.65GiB（估算，待复核）` → **实测 1.012GiB / 1.41GiB、净 ≈83MiB、未达标 + AR-18** | §8 S9 |
+| 11 | §9 引言 | 追加「★ v1.16 更新」指针（§9.16 为最新口径） | §9 引言 |
+| 12 | §6 tech-stack 版本引用 | `v1.15` → **`v1.16`**（`v1.14/v1.15/v1.16 仅版本号联动`、见 §9.14/§9.15/§9.16） | §6 |
+| 13 | `tech-stack.json` | `version: 1.15 → **1.16**`；`generatedAt` = `2026-09-20`（不变） | `doc/arch/tech-stack.json` |
+
+**六、未同步项及原因**
+
+| # | 项 | 原因 |
+|---|----|------|
+| 1 | §9.14 / §9.15 记录块与头部 v1.14 / v1.15 修订依据行中的 `≈0.65GiB`、"待复核" | 按文档约定为**历史快照、原文保留**；现行口径以 **§9.16** 与 §4.3 / §7.2 / §8 为准 |
+| 2 | `tech-stack.json` 的 `backend.cache` / `infrastructure.deployment` 文案 | 其口径为"缓存机制 / Chrome PSS 内存总账"，**不含进程内缓存上界数值** ⇒ 仅升 `version`（同 v1.14/v1.15 判定） |
+| 3 | §2.1 INV-1a/1b（容量模型）、§2.3–§2.5 | 本次只更正**内存口径与归因**，**不涉及** TTL / 节拍 / 每码取数成本 ⇒ 无需改动 |
+| 4 | 代码 / 测试 / 详设 / PRD / `API.md` | 本轮为架构文档实测回填，**范围严格限定 `doc/arch/**`**；共享 URL 缓存调优属**后续待解项**（AR-18），**本轮不改代码** |
+
+**七、本轮遗留（交编排层）**
+
+| # | 事项 | 性质 |
+|---|------|------|
+| 1 | 变更日志登记「SAD PRF-MEM-01 实测更正（未达成内存目标；新增架构事实『缓存上界 ≠ 进程 RSS』；AR-18）」 | 契约同步（编排层） |
+| 2 | **AR-18 共享 URL 缓存调优专项**（上限 / TTL / 按域分区 / 紧凑表示）+ glibc arena 碎片治理，需**另立**优化轮次 | 后续架构（编排层） |
+| 3 | tier1000 timeline `ok_rate` 100%→89.6% / `upstream_timeout` 123→317 **复测归因** | 实测（编排层） |
+
+**本轮版本**：SAD v1.15 → **v1.16**；`doc/arch/tech-stack.json` 同步 `version: 1.16`。**约束保持**：Python 3 标准库零依赖、`layerIsolation`、文件结构（扁平包 + 唯一新增 `metrics.py`）均未放宽。**未改代码、未改测试、未改详设、未改 PRD、未改 `API.md`/`README.md`/`.opencode/**`/`opencode.json`。**
+
+---
+
+### 9.17 v1.17（PRF-MEM-02 归因纠偏 + arena 治理 · A/B 实测为准）
+
+> **性质**：本轮为 **归因纠偏 + 治理回填**——v1.16 把内存缺口 ≈750MB 归因为「共享 URL 缓存（解析后 Python 对象）」并给出"共享 URL 缓存调优"方向，**该归因经取证已证伪**；同时 PRF-MEM-02 以 **A/B 实测**确立**主因 = glibc per-thread arena 碎片**并完成**容器级治理**（`MALLOC_ARENA_MAX=2`）。范围严格限定 `doc/arch/SAD.md` + `doc/arch/tech-stack.json`；**未改代码、未改测试、未改详设、未改 PRD、未改 `API.md`/`README.md`/`.opencode/**`/`opencode.json`**（`docker-compose.yml` 的 env 落地属编排层/部署动作，本档只登记**架构结论与合规口径**）。**无对外契约（API 字段 / 头项 / 状态码）变更**；**只增不删编号**。
+
+**一、纠偏：v1.16 的"共享 URL 缓存（解析后对象）"归因已证伪**
+
+| 项 | v1.16 表述 | v1.17 事实（权威） |
+|----|-----------|------------------|
+| URL 缓存条目形态 | **解析后的 Python 对象** | **解码后的原始文本（`str`）**——`cache.py:851-866`：`data = resp.read().decode(encoding, errors='replace')` → `_cache_put(cache, url, data, ttl=ttl)`；`cache{}` 存的就是 `str` |
+| URL 缓存规模 | 远超"~10KB/条"报价 | `MAX_CACHE_SIZE=2000`（`cache.py:35`）× `~10KB` ⇒ **几十 MB 量级**（`cache.py:31` 自身注释即按 `~20MB` 预算）⇒ **非缺口主因** |
+| 与读路径的关系 | — | `fetch_json` 命中直接返回 `str`，由**调用方自行 `json.loads`**；缓存层**不做解析** ⇒ **不存在"解析后对象长期驻留"** |
+
+⇒ **处置**：§2.1 / §2.2 R-4 / §4.3（口径声明 + 压测 bullet）/ §7.2 AR-8 / §7.2 AR-18 / §8 S9 中的该归因**一律更正**；AR-18 的"后续方向 = 共享 URL 缓存调优"**作废**。
+
+**二、主因确立：glibc per-thread arena 碎片（A/B 实测，run 20260920-113125）**
+
+| 指标 | 基线（默认 arena） | `MALLOC_ARENA_MAX=2` | 变化 |
+|------|-------------------|---------------------|------|
+| python `VmRSS` | `1,057,324 kB`（1.008GiB） | **`809,328 kB`（0.772GiB）** | **−248MiB** |
+| `RssAnon` | `1,042,748 kB`（占 98%） | `794,776 kB` | 匿名页主导 |
+| `VmSize` | `8.96 GB` | **`1.15 GB`** | **−87%** |
+| 匿名 `rw-p` 映射 | 300 | **166** | −134 |
+| 容器稳态 | `1.41GiB`（93.98%） | **`1.259GiB`（83.95%）** | −2.0pp |
+| tier1000 timeline `ok_rate` | 89.6% | **100%** | **单次观测，可能含上游波动，勿写成结论** |
+
+**机制**：glibc 为**每个线程**分配一个 arena（默认上限 `8 × ncores`）；本进程 **33 线程** ⇒ 多 arena；每个 arena **预留 64MB 虚拟地址**且**长期不归还 OS** ⇒ `VmSize` 虚高至 **8.96GB**、匿名映射数膨胀。**佐证**：`RssFile` 仅 **14.5MB**（文件映射不是大头）、`RssAnon` 占 **98%**（匿名页/分配器才是）。
+
+**处置（PRF-MEM-02）**：容器 env **`MALLOC_ARENA_MAX=2`**（`docker-compose.yml`）——**运行时调优、不改代码**；登记于 `tech-stack.json` `infrastructure.deployment`。**累计链路**：python RSS **`1.095GiB`（收缩前）→ `1.012GiB`（3 域缓存收缩 −83MiB）→ `0.772GiB`（＋arena 治理 −248MiB）**；容器 **`1.449 → 1.41 → 1.259GiB`**。
+
+**三、AR-18 状态推进（待解 → 已定位 + 已缓解）**
+
+| 项 | 状态 |
+|----|------|
+| 定位 | **已定位** —— **glibc per-thread arena 碎片**（v1.16 的 URL 缓存归因**证伪**） |
+| 缓解 | **已缓解** —— `MALLOC_ARENA_MAX=2`（**−248MiB**；容器 `1.41 → 1.259GiB = 83.95%`） |
+| 残余 | **≈ 终端缓存解析对象（~200MB）** ＋ **运行时/分配器残余**；**仍未达 ~0.65GiB** ⇒ **残余度量待后续**（按进程 cgroup 实测 RSS/PSS 分列） |
+| 不变结论 | 「调小 `cache_max` ⇒ 进程内存线性下降」**仍不成立**；§4.3 **≈278MB 仍是「已知缓存项」上界、非进程总内存上界** |
+| 旁证 | `cache_hit_ratio` 0.1585 → 0.1796；tier1000 `ok_rate` 89.6% → 100%（**单次观测**）；`upstream_timeout` 123 → 317 —— **均待复测归因，非结论** |
+
+**四、改动条目（逐处：旧 → 新）**
+
+| # | 项 | 旧 → 新 | 落点 |
+|---|----|---------|------|
+| 1 | 头部版本 + 修订依据行 | `v1.16` → **`v1.17`**；新增「修订依据（v1.17）」行（含 A/B 实测表） | 头部 |
+| 2 | §2.1 v1.16 注 | `大头 = 共享 URL 缓存（解析后 Python 对象）与 glibc arena 碎片` → **主因 = glibc per-thread arena 碎片；URL 缓存归因证伪（存 `str`、仅几十 MB）** | §2.1 |
+| 3 | §2.2 R-4 | 缺口候选 `共享 URL 缓存（解析后对象）+ arena 碎片 + CDP/运行时` → **主因 arena（已缓解）；URL 缓存剔除；残余 = 终端缓存解析对象 + 运行时** | §2.2 R-4 |
+| 4 | §4.3 进程内存行 | 补 **A/B 实测**（python 1.008→0.772GiB、容器 1.41→1.259GiB、`VmSize` 8.96→1.15GB、`rw-p` 300→166）+ 证伪说明 | §4.3 表 |
+| 5 | §4.3 内存分项估算 | 缺口候选 `共享 URL 缓存解析后对象 + arena + CDP/运行时` → **主因 arena、URL 缓存剔除、残余待度量** | §4.3 |
+| 6 | §4.3 口径声明 | 原 ②/③ 主次排序作废 → **主因 arena（A/B 实测）+ URL 缓存证伪 + AR-18 已定位/已缓解** | §4.3 |
+| 7 | §4.3 压测实测 bullet | 新增 **★ v1.17 PRF-MEM-02 A/B 实测** bullet（累计链路 1.095→1.012→0.772GiB） | §4.3 |
+| 8 | §7.2 AR-8 | `大头 = 共享 URL 缓存（顶满）+ arena 碎片` → **主因 arena 碎片（A/B 实测 −248MiB）；URL 缓存归因证伪** | §7.2 |
+| 9 | §7.2 **AR-18** | 状态 `待解架构项` → **已定位（glibc arena 碎片）+ 已缓解（`MALLOC_ARENA_MAX=2`，−248MiB）**；保留残余项（终端缓存解析对象 + 运行时残余，度量待后续）；"共享 URL 缓存调优"方向划除 | §7.2 |
+| 10 | §8 S9 | 补 **v1.17 A/B 实测**（1.012→0.772GiB / 1.41→1.259GiB）+ AR-18 状态推进 | §8 S9 |
+| 11 | §9 引言 | 追加「★ v1.17 更新」指针（§9.17 为最新口径） | §9 引言 |
+| 12 | §9.16 历史块 | 加 **★ v1.17 更正注**；§二 ② 标证伪、③ 标"确认为主因"；§三 方向更正（**原文保留、仅就地标注**） | §9.16 |
+| 13 | §6 tech-stack 版本引用 | `v1.16` → **`v1.17`**（补 `deployment` 的 `MALLOC_ARENA_MAX=2` 登记） | §6 |
+| 14 | `tech-stack.json` | `version: 1.16 → **1.17**`；`infrastructure.deployment` 补 **`MALLOC_ARENA_MAX=2`（容器运行时调优，PRF-MEM-02）**；`generatedAt` = `2026-09-20`（不变） | `doc/arch/tech-stack.json` |
+
+**五、未同步项及原因**
+
+| # | 项 | 原因 |
+|---|----|------|
+| 1 | §9.14/§9.15/§9.16 记录块与头部 v1.14/v1.15/v1.16 修订依据行中的 `≈0.65GiB`、≈750MB 缺口、"共享 URL 缓存 = 真正大头" | 按文档约定为**历史快照、原文保留**（§9.16 另加就地更正注）；**现行口径以 §9.17 与 §2.2 R-4 / §4.3 / §7.2 / §8 S9 为准** |
+| 2 | §2.1 INV-1a/1b（容量模型）、§2.3–§2.5、§2.6 | 本次只更正**内存口径与归因**，**不涉及** TTL / 节拍 / 每码取数成本 / 观测注册表 ⇒ 无需改动 |
+| 3 | 代码 / 测试 / 详设 / PRD / `API.md` / `docker-compose.yml` | 本轮为架构文档回填，**范围严格限定 `doc/arch/**`**；`MALLOC_ARENA_MAX=2` 的 compose 落地属**部署/编排层动作**（PRF-MEM-02），本档只**登记**结论与合规口径，**不改代码/部署文件** |
+
+**六、本轮遗留（交编排层）**
+
+| # | 事项 | 性质 |
+|---|------|------|
+| 1 | 变更日志登记「SAD PRF-MEM-02 归因纠偏 + arena 治理（AR-18 已定位 + 已缓解）」 | 契约同步（编排层） |
+| 2 | 残余内存（终端缓存解析对象 ~200MB + 运行时残余）**度量与后续专项**；内存目标仍未达 ~0.65GiB | 实测 + 后续架构（编排层） |
+| 3 | tier1000 `ok_rate` 89.6%→100% / `upstream_timeout` 123→317 **复测归因**（**单次观测、勿作结论**） | 实测（编排层） |
+| 4 | `docker-compose.yml` 的 `MALLOC_ARENA_MAX=2` 落地核验（本档无写权限） | 部署（编排层）——**★ v1.20 收口：已落地**（2026-09-20）；落地面由「仅 `docker-compose.yml`」**更正为「三份 compose 全部落地」**：`docker-compose.yml`（本地/测试）+ `doc/deploy/docker-compose.aliyun-2c2g.yml` + `doc/deploy/docker-compose.ucloud-2c8g.yml`（详见 **§9.20**） |
+
+**本轮版本**：SAD v1.16 → **v1.17**；`doc/arch/tech-stack.json` 同步 `version: 1.17`。**约束保持**：Python 3 标准库零依赖、`layerIsolation`、文件结构（扁平包 + 唯一新增 `metrics.py`）均未放宽。**未改代码、未改测试、未改详设、未改 PRD、未改 `API.md`/`README.md`/`.opencode/**`/`opencode.json`。**
+
+---
+
+### 9.18 v1.18（P8-r1 遗留修复轮契约同步 · 以代码为准）
+
+> **性质**：本轮为 **P8-r1 遗留项收口（契约同步）**——把 v1.15 引入、但**与同批文档自订的 BR-CFG-10 正面冲突**的 `'env:<NAME>'` **调用期**解析更正为**导入期冻结的注册映射**，并把评审遗留的 **P1-2 设计取舍（不设 `pool_max ≤ cache_max` 护栏）**正式入档。范围严格限定 `doc/arch/SAD.md` + `doc/arch/tech-stack.json`；**未改代码、未改测试、未改详设、未改 PRD**。**无对外契约（API 字段 / 头项 / 状态码）变更**；**只增不删编号**；历史块原文保留（其"调用期"措辞已在本块与落点处标注更正）。
+
+**一、变更事实（代码已落地，518 用例全绿；517 → 518）**
+
+| 项 | v1.15（旧） | v1.18（新，权威） |
+|----|------------|------------------|
+| `'env:<NAME>'` 解析时机 | **调用期**：`int(globals()[name])`（每次 `_resolve_pool_max` 调用） | **导入期冻结**：`_POOL_MAX_ENVS = {'MAX_QUOTE_POOL': 1000, 'MAX_FUNDFLOW_POOL': 1000, 'MAX_TIMELINE_POOL': 500}`（**键=NAME、值=冻结值，名单与取值同源**；新增 env 只改映射一处） |
+| `cache_policy` 与可变全局 | **依赖**可变模块全局（重绑定 `config.MAX_*_POOL` 会改变输出） | **不依赖**——只读冻结映射（**BR-CFG-10「运行期只读」**）；重绑定 `config.MAX_*_POOL` **不再影响** `cache_policy` |
+| 未注册 NAME | 经 `globals()` 对"白名单内但未定义"的名字可能 `KeyError`（与 `KeyError(domain)` 契约撞型、且会被 `_prefetch_loop` 的 `except Exception` 静默吞掉） | 一律 **`ValueError`**（fail-fast，不留静默回落） |
+| 默认值 | 1000 / 1000 / 500 | **逐字不变** |
+| `cache_max` | 矩阵内整数字面量（内存硬界，不经 env） | **不变** |
+| 测试 | CFG-T19 靠原地重绑定模块全局证明联动（**非 hermetic**） | CFG-T19 改**字面量锁定** + 新增 frozen / `ValueError` 用例；删除与 `test_cache_true_lru_eviction` **重复**的降级用例，新增"**被 LRU 淘汰的码读路径为 miss 而非陈旧值**"用例 ⇒ **517 → 518** |
+
+**二、P1-2 设计取舍入档：不设 `pool_max ≤ cache_max` 强制护栏**
+
+`pool_max`（成员账规模 / prefetch 轮转覆盖码数）与 `cache_max`（终端缓存内存界）是**两个独立上限**（不同量纲、不同守恒对象），架构上**不强制**前者 ≤ 后者。**现状反例**：`depth` / `f10` / `announcement` 三域 `pool_max`（`'dedup'`=2000）**本就大于** `cache_max`（=500）；3 个 PRF-MEM-01 收缩域（`quote`/`fundflow`/`timeline`）当前 `pool_max == cache_max`，属**巧合而非约束**。**`pool_max > cache_max` 的后果 = 回转/回源浪费**（覆盖码数 > 可驻留数 ⇒ 部分 prefetch 结果被 LRU 淘汰、下一轮重取），由 `cache_hit_ratio` / `upstream_fetch_total{domain}` 可观测，**非正确性问题**（帧完整性仍由 `_last_known` 结转 + 全码在位保证，§2.2 R-6）；内存界恒由 `cache_max` 独立守住。
+
+**三、改动条目（逐处：旧 → 新）**
+
+| # | 项 | 旧 → 新 | 落点 |
+|---|----|---------|------|
+| 1 | 头部版本 + 修订依据行 | `v1.17` → **`v1.18`**；新增「修订依据（v1.18）」行 | 头部 |
+| 2 | §2.1 v1.15 更正注 | `_resolve_pool_max` "**调用期**经白名单 `_POOL_MAX_ENVS`（`frozenset`）解析为模块常量" → **导入期冻结的注册映射（键=NAME、值=冻结值，名单与取值同源）；`cache_policy` 只读该映射、不依赖可变模块全局（BR-CFG-10）**；未注册 NAME → `ValueError` | §2.1 |
+| 3 | §2.2 三层缓存表 ① 行 | "调用期经白名单 `_POOL_MAX_ENVS` 解析" → **导入期冻结的注册映射解析（名单与取值同源），只读、不依赖可变全局（BR-CFG-10）** | §2.2 |
+| 4 | §2.2（**新增独立上限注**） | — → **★ v1.18：`pool_max` 与 `cache_max` 为独立上限，不强制 `pool_max ≤ cache_max`**（`depth`/`f10`/`announcement` 现状即反例；超出仅致回转/回源浪费，非正确性问题） | §2.2（只增） |
+| 5 | §3 config.py 行 | "经白名单 `_POOL_MAX_ENVS`（`frozenset`）在**调用期**解析为模块常量" → **导入期冻结的注册映射（名单与取值同源），未注册 NAME → `ValueError`；只读、不依赖可变全局（BR-CFG-10）** | §3 |
+| 6 | §4.3 池上限行 / 推导块 | "调用期经 `_POOL_MAX_ENVS` 白名单解析" → **导入期冻结的注册映射解析**；并补 **池上限与内存界解耦（独立上限）** 结论，指向 §2.2 | §4.3 |
+| 7 | §6 tech-stack 版本引用 | `v1.17` → **`v1.18`**（v1.18 仅版本号联动） | §6 |
+| 8 | §7.2 AR-18 残余项 | 补一句 **测试 hermetic 化 + env 注册同源（v1.18）**；**状态仍为已定位 + 已缓解**（定位/缓解结论不变） | §7.2 |
+| 9 | §9 引言 | 追加「★ v1.18 更新」指针（§9.18 为最新口径） | §9 引言 |
+| 10 | `tech-stack.json` | `version: 1.17 → **1.18**`；`generatedAt` = `2026-09-20`（不变）；**规则内容零变更** | `doc/arch/tech-stack.json` |
+
+**四、未同步项及原因**
+
+| # | 项 | 原因 |
+|---|----|------|
+| 1 | v1.15 修订依据行 / §9.15 记录块中的"**调用期**经白名单 `_POOL_MAX_ENVS` 解析" | 按文档约定为**历史快照、原文保留**；**现行口径以 §9.18 与 §2.1 / §2.2 / §4.3 为准**（本块已标注旧措辞作废） |
+| 2 | 代码 / 测试 / 详设（`config.md` 等）/ PRD / `API.md` | 本轮以**代码为准**回写架构文档，**范围严格限定 `doc/arch/**`**；`config.md` §2.7「热替换模块常量即可生效」（`:247`）与 `:239` 的"调用期绑定"表述**已与代码脱节**，由编排层按漂移类型另行 dispatch（**本档不改**） |
+| 3 | `BR/AR/ADR/N` 编号 | **无新增**（P1-2 取舍只作 §2.2 / §4.3 注释与本节说明，未新开 AR） |
+
+**五、本轮遗留（交编排层）**
+
+| # | 事项 | 性质 |
+|---|------|------|
+| 1 | 变更日志登记「SAD P8-r1 遗留修复轮契约同步（`'env:<NAME>'` 注册同源 / BR-CFG-10 收口 / P1-2 取舍入档）」 | 契约同步（编排层） |
+| 2 | 详设侧 `config.md` §2.7（原写"热替换模块常量即可生效"，`:247`）与 `:239`"调用期绑定"的措辞收口 | 契约同步（编排层 dispatch task-decomposer） |
+
+**本轮版本**：SAD v1.17 → **v1.18**；`doc/arch/tech-stack.json` 同步 `version: 1.18`。**约束保持**：Python 3 标准库零依赖、`layerIsolation`、文件结构（扁平包 + 唯一新增 `metrics.py`）均未放宽。**未改代码、未改测试、未改详设、未改 PRD、未改 `API.md`/`README.md`/`.opencode/**`/`opencode.json`。**
+
+---
+
+### 9.19 v1.19（PRF-LAT-02 契约同步：`margin` 终端缓存 · 计数器语义对齐 · 以代码为准）
+
+> **性质**：本轮为 **PRF-LAT-02 契约同步**——`margin` 域新增**模块内终端缓存**，并把 `upstream_fetch_total{margin}` 的计数点收敛为"**仅终端 miss +1**"，与其余域口径对齐。范围严格限定 `doc/arch/SAD.md` + `doc/arch/tech-stack.json`；**未改代码、未改测试、未改详设、未改 PRD**。**无对外契约（API 字段 / 头项 / 状态码）变更**（`/market/margin` 响应形状与 `_error` 降级语义逐字不变）；**只增不删编号**；历史块原文保留（§2.1 v1.4 更正注 / §9.4 D-2 的"`margin` = URL 缓存独占"口径已在本块与落点处标注更正）。
+
+**一、变更事实（代码已落地，525 用例全绿；519 → 525）**
+
+| 项 | v1.18（旧） | v1.19（新，权威） |
+|----|------------|------------------|
+| `DOMAIN_MATRIX['margin']` 第 5 格 `cache_max` | `'n/a'`（运行时 `None`；URL 缓存独占，P2-9） | **`8`**（界 `market_api._margin_cache` 条目数） |
+| 「URL-cache-only 域」集合 | `plate` / `news_url` / `longhu` / **`margin`** | **`plate` / `news_url` / `longhu`**（`margin` 移出） |
+| `market_api` 终端缓存 | **无**——每次请求对 URL 缓存的**文本**重复 `json.loads` + `_transform_margin` | **`_margin_cache`（`OrderedDict`，真 LRU）+ `_margin_cache_ts` + 独立 `_margin_cache_lock`**，上限 = `cache_policy('margin')['cache_max']=8` |
+| `fetch_margin` 命中路径 | 仅 URL 缓存命中（仍付解析成本） | **终端命中直接返回**（不 `json.loads`、不 transform、**不计数**、不触网） |
+| 写入条件 | — | **仅 `latest is not None`**（可用结果）才写；**失败 / 空数据不缓存** |
+| `upstream_fetch_total{margin}` | URL 缓存命中**也**计入（与其它域不一致） | **仅终端 miss 时 +1**（与 `stock` 域口径对齐） |
+| 动机（实测） | 热路径 P50 ≈**8–9ms**（重复解析 + transform），为 AC-E4 聚合 P99 主要贡献 | 终端命中免解析 ⇒ 消除该重复成本 |
+
+**二、为什么 `cache_max=8` 是"操作者可执行"的界（取代 D-2 对 `margin` 的「死配置」判定）**
+
+D-2（§9.4）判定 `plate`/`margin` 的 per-domain `cache_max` 是**死配置**，其前提是"该域**只**经共享 URL 缓存服务"。`margin` 新增**自己的终端缓存**后该前提**不再成立**：`cache_max=8` 界的是 `_margin_cache`（键 = `market`，`VALID_MARKETS` 枚举数即天然上界，8 为余量声明），**LRU 与 TTL（`cache_policy('margin')['ttl']`=600s）由 `market_api` 自管** ⇒ 该 int **可被执行**，不再是 dead setting。**`plate` / `news_url` / `longhu` 仍无终端缓存 ⇒ 仍 `'n/a'`**（D-2 对这三域的判定不变）。
+
+**三、改动条目（逐处：旧 → 新）**
+
+| # | 项 | 旧 → 新 | 落点 |
+|---|----|---------|------|
+| 1 | 头部版本 + 修订依据行 | `v1.18` → **`v1.19`**；新增「修订依据（v1.19）」行 | 头部 |
+| 2 | §2.1 `DOMAIN_MATRIX['margin']` | `('L4', 2.0, 2.0, 'fixed:16', 'n/a')` → **`('L4', 2.0, 2.0, 'fixed:16', 8)`**；注释 "URL 缓存独占 ⇒ cache_max n/a" → **终端缓存 8 条** | §2.1 |
+| 3 | §2.1 `cache_policy` 示例 | **新增** `cache_policy('margin') → {…,'cache_max':8}` 一行（原缺） | §2.1（只增） |
+| 4 | §2.1 v1.4 更正注 | 「URL 缓存独占域 = `plate`/`news_url`/`longhu`/**`margin`**」→ **追加 ★ v1.19 更正：`margin` 移出，现行 = `plate`/`news_url`/`longhu`** | §2.1（历史注**标注更正**） |
+| 5 | §2.2 R-3 | 新增 **URL-cache-only 域集合与判据**条（`plate`/`news_url`/`longhu`；`margin` 已移出；判据 = `cache_max is not None` ⟺ 有自有终点缓存） | §2.2（只增） |
+| 6 | §2.6 healthz `policy` 示例 | 补 **`margin` 的 `cache_max` `null` → `8`**；`null` 现仅 `plate`/`news_url`/`longhu` | §2.6 |
+| 7 | §3 config.py 行 | 「`plate`/`margin` 的 `cache_max` = `'n/a'`」→ **`plate` 仍 `'n/a'`；`margin` `'n/a'` → `8`**（URL-cache-only 域现为 `plate`/`news_url`/`longhu`） | §3 |
+| 8 | §3 market_api.py 行 | 补 **模块内终端缓存（`margin`）** + 计数语义（**仅终端 miss +1**、命中不解析不计数） | §3 |
+| 9 | §4.3 资源上界表 | **新增一行**「端点缓存（margin 融资融券）**8/域**」 | §4.3（只增） |
+| 10 | §4.3 内存分项 | 补 **`margin` ≤8 条 × ~KB 级 ⇒ 可忽略项**（<0.1MB；总账 ≈278MB **不变**，口径仍为「已知缓存项上界」） | §4.3 |
+| 11 | §6 tech-stack 版本引用 | `v1.18` → **`v1.19`**（**仅版本号联动**，无规则内容变更） | §6 |
+| 12 | §9 引言 | 追加「★ v1.19 更新」指针（§9.19 为最新口径） | §9 引言 |
+| 13 | `tech-stack.json` | `version: 1.18 → **1.19**`；`generatedAt` = `2026-09-20`（不变）；**规则内容零变更** | `doc/arch/tech-stack.json` |
+
+**四、未同步项及原因**
+
+| # | 项 | 原因 |
+|---|----|------|
+| 1 | §2.1 v1.4 更正注 / §9.4 D-2 中的「`margin` = URL 缓存独占、`cache_max='n/a'`」 | 按文档约定为**历史快照、原文保留**；**现行口径以 §9.19 与 §2.1 / §2.2 / §3 / §4.3 为准**（本块已标注旧口径作废） |
+| 2 | 代码 / 测试 / 详设（`market_api.md` 等）/ PRD / `API.md` | 本轮以**代码为准**回写架构文档，**范围严格限定 `doc/arch/**`**；`market_api.md` 承接 `margin` 终端缓存与计数语义（`BR-MKT-9`/`BR-MKT-15`）由编排层按漂移类型另行 dispatch（**本档不改**） |
+| 3 | `BR/AR/ADR/N` 编号 | **无新增**（`cache_max` 取值变更与模块内终端缓存属 §2.1/§2.2/§4.3 既有条目内的口径更新，未新开 AR/ADR） |
+
+**五、本轮遗留（交编排层）**
+
+| # | 事项 | 性质 |
+|---|------|------|
+| 1 | 变更日志登记「SAD PRF-LAT-02 契约同步（`margin` 终端缓存 / `cache_max` `'n/a' → 8` / `upstream_fetch_total{margin}` 仅终端 miss 计数）」 | 契约同步（编排层） |
+| 2 | 详设侧 `market_api.md` 同步 `margin` 终端缓存（`_margin_cache` / 8 条 LRU / 仅 `latest is not None` 写 / 命中免解析）与 `upstream_fetch_total` 计数语义收口 | 契约同步（编排层 dispatch task-decomposer） |
+
+**本轮版本**：SAD v1.18 → **v1.19**；`doc/arch/tech-stack.json` 同步 `version: 1.19`。**约束保持**：Python 3 标准库零依赖、`layerIsolation`（`margin` 终端缓存为**模块内私有** `OrderedDict` + `threading.Lock`，**无新增 import**：`collections`/`threading` 均已在 allowlist）、文件结构（扁平包 + 唯一新增 `metrics.py`）均未放宽。**未改代码、未改测试、未改详设、未改 PRD、未改 `API.md`/`README.md`/`.opencode/**`/`opencode.json`。**
+
+---
+
+### 9.20 v1.20（云上部署配置下发运行时调优（PRF-MEM-02 + PRF-LAT-01 落地）· 2026-09-20 · 只改文档）
+
+> **性质**：本轮为**交付事实登记（只改文档）**——编排层已把两项**已 A/B 证实**的运行时调优下发到两份云上部署配置，本档把该事实**只增不删**地登记进 `doc/arch/SAD.md` + `doc/arch/tech-stack.json`。范围严格限定 `doc/arch/**`；**未改代码、未改测试、未改详设、未改 PRD、未改 `docker-compose.yml`、未改 `.opencode/**`**（`doc/deploy/**` 由编排层改完，本档只**登记**）。**无对外契约（API 字段 / 头项 / 状态码）变更**；**只增不删编号**。**本轮无新实验**——下列数字**全部引自既有 run**（run 20260920-113125 / 基 20260920-110805；run 20260920-142456 / 基 20260920-140901）。
+
+**一、下发的两份云上部署配置（编排层已落地）**
+
+| 配置 | 角色 | 准入 | `mem_limit` |
+|------|------|------|-------------|
+| `doc/deploy/docker-compose.aliyun-2c2g.yml` | 阿里云 2C2G 容灾节点 | `MAX_WORKERS=20` / `MAX_INFLIGHT=40` | `1.5g` |
+| `doc/deploy/docker-compose.ucloud-2c8g.yml` | UCloud 2C8G 主节点 | `MAX_WORKERS=30` / `MAX_INFLIGHT=60` | `3g` |
+
+（本地/测试档 `docker-compose.yml` 原已含这两项；本轮**未改**它。两份云配置的注释已写明上述证据与 `SAD §7.2 AR-18 / §9.17`、`_PROGRESS.md B-7` 的指针。）
+
+**二、变更项（两份云 compose 相同）**
+
+| # | 项 | 取值 | 证据（既有 run，本轮无新实验） | 落点 |
+|---|----|------|------------------------------|------|
+| ① | `MALLOC_ARENA_MAX=2`（PRF-MEM-02） | `2` | A/B（run **20260920-113125**，基线 run **20260920-110805**）：python `VmRSS` **1.008GiB → 0.772GiB（−248MiB）**、`VmSize` **8.96GB → 1.15GB**、匿名 `rw-p` 映射 **300 → 166**、容器稳态 **1.41GiB(93.98%) → 1.259GiB(83.95%)** | 两份云 compose `environment` + `tech-stack.json` `infrastructure.deployment` |
+| ② | `HTTP_POOL_MAX_PER_HOST=48`（PRF-LAT-01） | `48`（**部署侧 env 覆盖**） | A/B（run **20260920-142456**，基线 run **20260920-140901**）：fundflow tier1000 avg **3.00 → 1.43s（−52%）**、basic_info **4.08 → 3.08s（−25%）**、ok_rate **100%**，**内存无变化**；**上游在 48 并发下未观测到限流** | 两份云 compose `environment` + `tech-stack.json` `infrastructure.deployment` |
+| ③ | 取值口径与双约束 | 两份均取 **48**（=已实证值） | 满足 ① 池 ≥ `BATCH_MAX_WORKERS`(=**20**)（**AR-14 硬约束**：改其一须连带核另一）② 池 ≥ `MAX_WORKERS`（**20** / **30**） | §7.2 **AR-14** |
+| ④ | UCloud 未取的 **60** 候选 | **不取**（本轮） | UCloud `MAX_INFLIGHT=60 > 48`，超出部分按设计走 **ephemeral 短连接**（**BR-CACHE-27**：不排队、不阻塞，仅多一次握手）；**升到 60（= `MAX_INFLIGHT`）需先核上游在 60 并发下是否限流 + 单独 A/B** | 见下「四、未验证候选」 |
+| ⑤ | 头部摘要行 | 版本 `v1.19 → v1.20` + 本块指针 | — | 头部修订依据 / §9 引言 |
+
+**三、`HTTP_POOL_MAX_PER_HOST=48` 的契约口径（重要）**
+
+- **48 是部署侧 env 覆盖，不是代码默认值**：`config.HTTP_POOL_MAX_PER_HOST` 默认仍为 **24**（`config.md` 契约默认值 **24 不变**）；本档**不改代码默认值口径**，`tech-stack.json` `backend.cache` 的 `HTTP_POOL_MAX_PER_HOST=24` 描述**一字不动**。
+- **AR-14 耦合在代码默认层面仍成立**：默认 `24 ≥ BATCH_MAX_WORKERS=20`；**48 亦满足该约束**（且 48 ≥ 两份配置的 `MAX_WORKERS` 20/30），故不违反 AR-14。
+- 48 是**已实证值**，非新推测——数字引自 run 20260920-142456（见 §二 ②）。
+
+**四、未验证候选（勿当结论）**
+
+| # | 候选 | 状态 | 前置条件 |
+|---|------|------|---------|
+| 1 | UCloud 节点 `HTTP_POOL_MAX_PER_HOST` 升到 **60**（= `MAX_INFLIGHT`），使在飞快照全部有专属连接、消除 ephemeral 握手 | **未验证候选**（**本轮不取**，**不得写成结论或已决**） | **需先核实上游在 60 并发下是否限流** + **单独 A/B**；未完成前维持 **48** |
+
+**五、§9.17 待办行收口（只增不删）**
+
+| 原行（§9.17 六、本轮遗留 #4） | 收口 |
+|-------------------------------|------|
+| `docker-compose.yml` 的 `MALLOC_ARENA_MAX=2` 落地核验（本档无写权限） → 部署（编排层） | **★ v1.20：已落地**（2026-09-20）；落地面由「仅 `docker-compose.yml`」**更正为「三份 compose 全部落地」**：`docker-compose.yml`（本地/测试）+ `doc/deploy/docker-compose.aliyun-2c2g.yml` + `doc/deploy/docker-compose.ucloud-2c8g.yml`（§9.17 原行原文保留、就地追加） |
+
+**六、范围声明（未改清单）**
+
+| # | 未改 | 说明 |
+|---|------|------|
+| 1 | **代码 / 测试 / 详设 / PRD** | 本轮**只改文档**，范围严格限定 `doc/arch/**` |
+| 2 | **`docker-compose.yml`**（本地/测试档） | 原已含这两项 env，本轮**未改** |
+| 3 | **`.opencode/**` / `opencode.json`** | 未改 |
+| 4 | `doc/deploy/docker-compose.aliyun-2c2g.yml` / `doc/deploy/docker-compose.ucloud-2c8g.yml` | **由编排层改完**；本档**只登记**、不重写 |
+| 5 | **对外契约（API 字段 / 头项 / 状态码）** | **无变更**（运行时 env 调优不改变任何响应形状） |
+| 6 | `BR / AR / ADR / N` 编号 | **只增不删、无新增编号**（§9.17 待办行就地追加收口；不新开 AR/ADR） |
+
+**七、改动条目（逐处：旧 → 新）**
+
+| # | 项 | 旧 → 新 | 落点 |
+|---|----|---------|------|
+| 1 | 头部版本 + 修订依据行 | `v1.19` → **`v1.20`**；新增「修订依据（v1.20）」行 | 头部 |
+| 2 | §9.17 六、本轮遗留 #4 | 「`docker-compose.yml` 的 `MALLOC_ARENA_MAX=2` 落地核验（本档无写权限）」→ **★ v1.20 已落地**、落地面**更正为三份 compose**（原行保留、追加） | §9.17 |
+| 3 | §7.2 **AR-18** 缓解 ① | 追加「**云上两份配置已同步落地**」；**状态仍为已定位 + 已缓解**（结论不变） | §7.2 |
+| 4 | §9 引言 | 追加「★ v1.20 更新」指针（§9.20 为最新口径） | §9 引言 |
+| 5 | §6 tech-stack 版本引用 | `v1.19` → **`v1.20`**（补 `infrastructure.deployment` 云上两份登记） | §6 |
+| 6 | `tech-stack.json` | `version: 1.19 → **1.20**`；`infrastructure.deployment` 追加云上两份登记；`generatedAt` = `2026-09-20`（不变）；`backend.cache` 的 `HTTP_POOL_MAX_PER_HOST=24` **不动** | `doc/arch/tech-stack.json` |
+
+**八、本轮遗留（交编排层）**
+
+| # | 事项 | 性质 |
+|---|------|------|
+| 1 | 变更日志登记「云上部署配置下发运行时调优登记（PRF-MEM-02 + PRF-LAT-01 落地）」 | 契约同步（编排层） |
+| 2 | UCloud 的 `HTTP_POOL_MAX_PER_HOST` **60 候选**：核上游 60 并发限流 + 单独 A/B（**未验证，勿当结论**） | 实测 + 后续（编排层） |
+| 3 | `_PROGRESS.md B-7`（timeline 尾延迟属上游/CPU 容量边界）与本块的指针一致性 | 台账（编排层） |
+
+**本轮版本**：SAD v1.19 → **v1.20**；`doc/arch/tech-stack.json` 同步 `version: 1.20`。**约束保持**：Python 3 标准库零依赖、`layerIsolation`、文件结构（扁平包 + 唯一新增 `metrics.py`）均未放宽。**未改代码、未改测试、未改详设、未改 PRD、未改 `docker-compose.yml`、未改 `.opencode/**`/`opencode.json`。**
+
+---
+
+*SAD v1.20 完 · 供 review-expert 复审（**复核 §9.20 云上部署配置下发运行时调优**——编排层把两项已 A/B 证实的运行时调优下发到两份云 compose（`docker-compose.aliyun-2c2g.yml` / `docker-compose.ucloud-2c8g.yml`）：`MALLOC_ARENA_MAX=2`（PRF-MEM-02，python `VmRSS` 1.008→0.772GiB = −248MiB、`VmSize` 8.96→1.15GB）与 `HTTP_POOL_MAX_PER_HOST=48`（PRF-LAT-01，fundflow avg 3.00→1.43s = −52%，**部署侧 env 覆盖、代码默认仍 24**）；取 48 满足 AR-14 双约束（≥ `BATCH_MAX_WORKERS` 20、≥ `MAX_WORKERS` 20/30）；UCloud 的 **60 为未验证候选**（`MAX_INFLIGHT=60 > 48` 超出走 ephemeral 短连接，升 60 需先核上游限流 + 单独 A/B，**勿当结论**）；§9.17 待办行已收口（落地面更正为**三份 compose 全部落地**）；**AR-18 状态仍为「已定位 + 已缓解」、结论不变**；`tech-stack.json` `version → 1.20`、`infrastructure.deployment` 追加登记（`backend.cache` 的 24 不动）；**无对外契约变更、未改代码/测试/详设/PRD/`docker-compose.yml`/`.opencode`**）与 §9.19 PRF-LAT-02 契约同步**——`margin` 由「URL 缓存独占、`cache_max='n/a'`」改为**模块内终端缓存 8 条**（`market_api._margin_cache`，真 LRU，命中免 `json.loads` + `_transform_margin` 且不计数，仅 `latest is not None` 才写），`upstream_fetch_total{margin}` 收敛为**仅终端 miss +1**（与 stock 域对齐）；URL-cache-only 域现行 = `plate`/`news_url`/`longhu`；内存分项 +「可忽略项」、总账 ≈278MB 不变；`tech-stack.json` `version → 1.19`；**无对外契约变更**）与 §9.18 P8-r1 遗留修复轮契约同步**——`'env:<NAME>'` 由"调用期 `globals()`"更正为**导入期冻结的注册映射 `_POOL_MAX_ENVS`**（键=NAME、值=冻结值，名单与取值同源），`cache_policy` **只读该映射、不依赖可变模块全局**（BR-CFG-10）、未注册 NAME 一律 `ValueError`、运行期重绑定 `config.MAX_*_POOL` 不再影响策略；**P1-2 取舍入档：不设 `pool_max ≤ cache_max` 护栏**（两者为独立上限，`depth`/`f10`/`announcement` 现状即反例；超出仅致回转/回源浪费）；测试 hermetic 化（517→518）；`tech-stack.json` `version → 1.18`）与 §9.17 PRF-MEM-02 归因纠偏 + arena 治理（**证伪** v1.16 的「共享 URL 缓存（解析后对象）」归因——URL 缓存存**解码后 `str`**、仅几十 MB、非缺口主因；确立 **AR-18 主因 = glibc per-thread arena 碎片**，A/B 实测（run 20260920-113125）`MALLOC_ARENA_MAX=2` ⇒ python `1.012 → 0.772GiB`（−248MiB）、容器 `1.41 → 1.259GiB = 83.95%`、`VmSize` 8.96 → 1.15GB；**AR-18 由「待解」推进为「已定位 + 已缓解」**，残余 ≈ 终端缓存解析对象 ~200MB + 运行时残余、**仍未达 ~0.65GiB**；`tech-stack.json` `infrastructure.deployment` 登记 `MALLOC_ARENA_MAX=2`）与 §9.16 PRF-MEM-01 实测更正（未达成内存目标：python RSS 1.095→1.012GiB、容器 1.449→1.41GiB=93.98%，净收益仅 ≈83MiB；新增架构事实「缓存上界 ≠ 进程 RSS」，缺口 ≈750MB；新增待解架构项 **AR-18**「共享 URL 缓存调优」；归因更正为共享 URL 缓存 + glibc arena 碎片）与 §9.15 PRF-MEM-01 修复轮契约同步（CR-02 `pool_max` 恢复 env 可调（`'env:<NAME>'`，默认值不变）/ CR-04 终端缓存不变式更正 / CR-05 prefetch 间隔口径更正 / CR-06 `depth` 池上限理由；`cache_max` 数值未变）与 §9.14 PRF-MEM-01 内存口径同步（`DOMAIN_MATRIX` quote/fundflow=1000、timeline=500；内存分项 268→278MB 与实测 RSS 1.095GiB→≈0.65GiB 口径声明）与 §9.13 溯源收口（PRD v0.10 / 文末详设清单 / 引用时点约定）、§9.12 台账收口（Q2/S4 契约同步闭环、D-6「已确认」措辞、面板 `max-age` 域 4/120）及 §8 覆盖声明 ⚠️ 5→4；历史承接见 §9.11 AC 落号对齐（F2→AC-A14 / F8→AC-S12 / AC 总数 34→36）、§9.10 F8 回填、§9.9/§9.8/§9.7 记录块）与 task-decomposer 承接（**现行**详设 `server.md` v1.17 / `cache.md` v1.15 / `metrics.md` v1.9 / `config.md` v1.7 / `stock_api.md` v1.4 / `market_api.md` v1.7 / `cdp_engine.md` v1.4 / `stream.md` v1.6——**内容以各文档头部为准（此栏为快照，落后不属漂移）**；`config.md` 承接 `DOMAIN_MATRIX` 三域收缩与 `'env:<NAME>'` 池上限来源（v1.15）；`cache.md` 承接 `pool_max`/`cache_max` 消费口径；`API.md` 的 N4 其余同步项仍待编排层处理）*
 

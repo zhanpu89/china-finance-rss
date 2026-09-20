@@ -1,7 +1,7 @@
 {
   "project": "china-finance-rss",
-  "version": "1.13",
-  "generatedAt": "2026-09-18",
+  "version": "1.20",
+  "generatedAt": "2026-09-20",
   "primaryLanguage": "python",
   "moduleRoot": "china_finance_rss",
   "totalComponents": 9,
@@ -30,7 +30,7 @@
       "messageQueue": "none",
       "searchEngine": "none",
       "monitoring": "自研 metrics.py + logging (标准库，无监控依赖)",
-      "deployment": "Docker + docker-compose; 入口 python -m china_finance_rss.server; 端口 8053(主) / 8054(流)；内存总账口径：Chrome ≈ 250MB(PSS) 基线 + N×每页（典型 60 / 保守 150 MB），**跨进程求和必须用 PSS/Pss_Anon，禁止用 RSS**（虚高 ~3.2×）；容器 mem_limit 1.5g，2C2G 档位 N=6 内容页（详见 SAD §4.3 / §9.6）"
+      "deployment": "Docker + docker-compose; 入口 python -m china_finance_rss.server; 端口 8053(主) / 8054(流)；内存总账口径：Chrome ≈ 250MB(PSS) 基线 + N×每页（典型 60 / 保守 150 MB），**跨进程求和必须用 PSS/Pss_Anon，禁止用 RSS**（虚高 ~3.2×）；容器 mem_limit 1.5g，2C2G 档位 N=6 内容页（详见 SAD §4.3 / §9.6）；v1.17/PRF-MEM-02：容器运行时调优 **MALLOC_ARENA_MAX=2**——glibc per-thread arena 上限（33 线程下默认 8×ncores ⇒ 每 arena 预留 64MB VA 且长期不归还 OS，VmSize 虚高、RssAnon 占 98%）；A/B 实测（run 20260920-113125）python RSS 1.012→0.772GiB（−248MiB）、容器 1.41→1.259GiB=83.95%、VmSize 8.96→1.15GB（详见 SAD §7.2 AR-18 / §9.17）；v1.20/云上部署配置下发（**本档只登记交付事实，未改代码/部署**）：上述 `MALLOC_ARENA_MAX=2` 已在**三份 compose 全部落地**——`docker-compose.yml`（本地/测试）+ `doc/deploy/docker-compose.aliyun-2c2g.yml`（阿里云 2C2G 容灾，MAX_WORKERS=20/MAX_INFLIGHT=40/mem_limit 1.5g）+ `doc/deploy/docker-compose.ucloud-2c8g.yml`（UCloud 2C8G 主，MAX_WORKERS=30/MAX_INFLIGHT=60/mem_limit 3g）；两份云配置另补 **`HTTP_POOL_MAX_PER_HOST=48`（PRF-LAT-01，部署侧 env 覆盖）**——A/B 实测（run 20260920-142456，基线 run 20260920-140901）fundflow tier1000 avg 3.00→1.43s（−52%）、basic_info 4.08→3.08s（−25%）、ok_rate 100%、内存无变化；上游在 48 并发下未观测到限流；**代码/契约默认值仍为 24（`backend.cache` 口径一字不动）**，48 满足 AR-14 双约束（≥ BATCH_MAX_WORKERS 20、≥ MAX_WORKERS 20/30）；UCloud 的 MAX_INFLIGHT=60 超出部分按 BR-CACHE-27 走 ephemeral 短连接（不排队、不阻塞），**升到 60 属未验证候选**（需先核上游 60 并发限流 + 单独 A/B，本轮不取）；详见 SAD §9.20（§7.2 AR-18 缓解 ① / §9.17 待办行已收口）"
     }
   },
   "runtimeDependencies": [],

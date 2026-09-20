@@ -27,6 +27,8 @@
 - 缓存防击穿: 双重检查 + 按 path 独立锁 + TTL 分层（`_trading_tiers()`：盘中/盘后不同 TTL）
 
 ## 配置管理
+- 池上限等矩阵 spec 的注册名单与取值合并为单一 MappingProxyType 映射（键=合法 NAME、值=导入期冻结值），运行期只读、不可改写（改键/改值抛 TypeError）
+- 需要部署可调的每域资源上限统一以 env 注册常量（config 模块顶层）承载，矩阵以 'env:<NAME>' spec 引用，_resolve_pool_max 调用期经 globals() 白名单解析；新增 spec 分支必须对未知名 fail-fast ValueError
 - 配置项统一在 `config.py`（读取环境变量 + 默认值），代码不硬编码端口/主机/TTL
 - 敏感信息（cookie/token）走环境变量，**绝不入库/入 git**（.env、HAR、Chrome profile 均不提交）
 - 运行时开关（如 CDP 可用否）在 config/engine 状态判断，不散落判断逻辑
@@ -39,3 +41,5 @@
 
 ## 文档同步
 - 契约文档（API.md/README.md）与实现不符时，code-developer 只输出 `>>DOC_SYNC:` 标记，由编排层调度同步，code-developer 不直接改契约
+## 通用约定
+- 终端缓存统一形态：OrderedDict + 同步的 _*_cache_ts 字典 + 独立 Lock + cache_policy(domain)['cache_max'] 的 while len>cap: popitem(last=False) 淘汰；同层模块不得 import stock_api，各自在模块内实现（stock_api 多域 + market_api margin 共 ≥2 处证实）
