@@ -41,3 +41,5 @@
 
 ## 文档同步
 - 契约文档（API.md/README.md）与实现不符时，code-developer 只输出 `>>DOC_SYNC:` 标记，由编排层调度同步，code-developer 不直接改契约
+## 通用约定
+- 终端缓存统一形态：OrderedDict + 同步的 _*_cache_ts 字典 + 独立 Lock + cache_policy(domain)['cache_max'] 的 while len>cap: popitem(last=False) 淘汰；同层模块不得 import stock_api，各自在模块内实现（stock_api 多域 + market_api margin 共 ≥2 处证实）

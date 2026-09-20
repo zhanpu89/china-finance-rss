@@ -29,6 +29,10 @@
 
 - **本次（P8-r2 收尾（注册表不可变 + int 归一 + 措辞如实） · 2026-09-20 · 只改文档）**：`config.md` → **v1.13**（+ 本文件；`stock_api.md` 仅 §10#27 补一行、**版本保持 v1.10**）。**① 注册表不可变（P1-1）**——`_POOL_MAX_ENVS` 由普通可变 `dict` 改为 **`MappingProxyType({...})`**（`from types import MappingProxyType`）⇒ **改键 / 改值 / 新增键一律 `TypeError`**（v1.12 的"导入期冻结"此前只冻结值，映射本身仍可被就地改）。**② `int()` 归一恢复（P1-3）**——`_resolve_pool_max` 的 `'env:'` 分支恢复 `return int(_POOL_MAX_ENVS[name])`（防注册值类型漂移；当前合法 int 输出逐字不变）。**③ 措辞如实收窄（P1-4）**——删去"`cache_policy` 完全不依赖可变模块全局"的**过宽**断言（`'dedup'` 分支**仍取**导入期常量 `MAX_DEDUP_CODES`）与"避免被 `_prefetch_loop` 的 `except` 静默吞掉"这一**不成立**陈述（`_prefetch_loop` **不调用** `_resolve_pool_max`）；**真实收益 = 与 `cache_policy` 的 `KeyError(domain)` 契约解耦**。**④ 测试（518 → 519 · 代码/测试已落地）**——`test_env_defaults`（CFG-T9）补 3 个 `MAX_*_POOL` 默认值；新增 `test_prf_mem_01_env_registry_is_immutable`（CFG-T19，改写值 / 新增键均 `TypeError`）；`test_prf_mem_01_evicted_code_reads_as_miss_not_stale` 改从**真实** `config.cache_policy('quote')` 派生并断言 `policy['cache_max'] < config.MAX_DEDUP_CODES`（**回退 `cache_max` 即红**）。**⑤ 保留不改（已登记为设计取舍）**——**不设** `pool_max ≤ cache_max` 护栏；**不在 unittest 中断言进程 RSS**（内存属实测/运维口径）。落点：`config.md` 头部/§1.1#5/§2.3/§2.7/§3.1/§3.3/§5/§6/BR-CFG-4/§8(CFG-T9/CFG-T19；**518 → 519**)/§10#24/§10.1(新增第 8 节)/§11；`stock_api.md` §10#27 补记一行（**版本保持 v1.10**）；本文件。**只改 `doc/detailed/`；未改代码 / 测试（修复已落地）/ `doc/arch/` / `doc/prd/` / `API.md` / `README.md` / `.opencode`。**
 
+- **本次（PRF-LAT-02 margin 终端缓存契约同步 · 2026-09-20 · 只改文档）**：`config.md` → **v1.14** / `market_api.md` → **v1.8** / `metrics.md` → **v1.10**（+ 本文件）。**代码已落地、525 用例全绿**。① `config.py`：`DOMAIN_MATRIX['margin']` 的 `cache_max` 由 `'n/a'` → **`8`**（margin 自本轮起有**终端缓存**，上限 8 = 4 market × 2 余量；`pool_max` 仍 `'fixed:16'`、margin **不用池**）；矩阵上方「仅经共享 URL 缓存取数、`cache_max='n/a'`」清单由 `plate / news_url / longhu / margin` **收窄为 `plate / news_url / longhu`**（margin 移出）。② `market_api.py`：新增模块内终端缓存 `_margin_cache`(OrderedDict)/`_margin_cache_ts`/`_margin_cache_lock`；`fetch_margin(market)` 新流程 = 参数校验 + `deadline` 入口闸 → **终端缓存命中直接返回**（LRU `move_to_end`，不解析、不计数）→ 未命中才 `metrics.incr('upstream_fetch_total', key='margin')` + `fetch_json`/`json.loads`/`_transform_margin` → **仅当 `latest is not None`** 才写缓存并按 `cache_max`(8) LRU 淘汰（同步删 ts）；失败/空数据不写。③ `upstream_fetch_total{margin}` 语义由"每次 handler 调用 +1" → **"仅终端缓存 miss 时 +1"**（与 stock 域对齐）。④ 测试 **519 → 525**（margin 命中不取数 / TTL 过期重取 / LRU 有界 / 失败不缓存 / 空数据不缓存 / 计数仅 miss）。落点：`config.md` 头部/§2.4/§3.1/§3.2/BR-CFG-5/CFG-T13/§9/§10#15+新增 **§10#25**/§11；`market_api.md` 头部/§1.1–1.4/§2.1/§3.3+新增 **§3.4**/BR-MKT-9 改写+新增 **BR-MKT-13..16**/§5/§6/§7/§8（MKT-T7/T13 更正 + **MKT-T14..T19**）/§9/§10#4·#10·#11/§11/§12/接口权威栏；`metrics.md` 头部/§3.2+表后注/§10#15/§11。**只改 `doc/detailed/`；未改代码 / 测试 / SAD / PRD / API.md / README.md / `.opencode`。** 详见下方「★ PRF-LAT-02 margin 终端缓存契约同步」。
+
+- **本次（PRF-LAT-02 P2 收尾（CR-02）· 2026-09-20 · 只改文档）**：`market_api.md` → **v1.9** / `metrics.md` → **v1.11**（+ 本文件）。**代码 / 测试已落地、526 用例全绿**。① `market_api.py`：margin 终端缓存 `_margin_cache` 的**命中路径与写入/淘汰路径**均新增**锁外**发布 `metrics.set_gauge('cache_entries', len(_margin_cache), key='margin')`（`entries` 锁内取、发布锁外；对齐 `stock_api._cache_store` BR-SA-16/26 与 `cache._publish_url_stats` BR-CACHE-24 的「锁内取标量、锁外发布」纪律）；模块 docstring 把过时的 "fetching goes through ``cache.fetch_json`` only" 改为如实表述（`fetch_json` 仍是**唯一 HTTP 出口**，但 TTL 新鲜的终端缓存命中不再调用它）。② 测试：新增 `tests/test_data_layer.py::test_terminal_cache_publishes_cache_entries_gauge`（写后 `cache_entries{margin} == 1`、命中后仍 == 1、LRU 淘汰后 == `cache_max`）⇒ 用例 **525 → 526**。落点：`market_api.md` 头部 + **v1.9 变更块** + §1.4/§2.1 注/§3.4 + **新增 BR-MKT-17**（+ BR-MKT-13/15 交叉引用）+ §5/§7/§8（MKT-T13/T14 补 + **MKT-T20**）/§9/§10#12/§11/§12/接口权威栏；`metrics.md` 头部 + **v1.11 变更块** + §3.2（`cache_entries` 标签枚举**补 `margin`**）+ §10#16 + §11。**只改 `doc/detailed/`；未改代码 / 测试 / SAD / PRD / API.md / README.md / `.opencode`。**
+
 ## ★ 未决项（后续处理 · 单点入口）
 
 > **本清单是"仍开放项"的唯一入口**；各详设 §10 / SAD / PRD 内的登记为该条的**详细上下文**，两者冲突时**以本清单的"状态"为准**。
@@ -1193,3 +1197,56 @@
 
 - **现行有效正文**已无"调用期解析 / 可热替换"表述（见本轮 grep 自查：`config.md` 仅剩**历史 ★ v1.9 片段/块/自检行**，`stock_api.md` 仅剩**历史 v1.7/v1.8/v1.9 块与 §12 历史行**）。
 - 本文件下方「★ PRF-MEM-01 修复轮契约同步」§1/§2 及 `CR-02`/`CR-03` 行仍记旧措辞（`int(globals()[NAME])`、"热替换常量 ⇒ 值跟随"）——**为该轮历史快照，按约定原样保留**，其状态由本节取代。
+
+## ★ PRF-LAT-02 margin 终端缓存契约同步（`config.md` v1.14 / `market_api.md` v1.8 / `metrics.md` v1.10 · 2026-09-20 · 只改文档）
+
+> 范围：**只改** `doc/detailed/{config,market_api,metrics,_PROGRESS}.md`。依据：**已落地的代码**（`china_finance_rss/config.py` / `market_api.py`，**525 用例全绿**）。**未改代码 / 测试 / `doc/arch/`（SAD）/ `doc/prd/`（PRD）/ `API.md` / `README.md` / `.opencode/`**；**只增不删编号**；未回改任何历史变更块（旧口径以「已更正 / 已被推翻」标注，保留原文）。
+
+### 1. 变更事实（代码，已落地）
+
+| # | 模块 | 旧 → 新 |
+|---|------|---------|
+| 1 | `config.py` `DOMAIN_MATRIX['margin']` | `('L4', 2.0, 2.0, 'fixed:16', 'n/a')` → **`('L4', 2.0, 2.0, 'fixed:16', 8)`**（`cache_max`：`'n/a'` → `8`） |
+| 2 | `config.py` 矩阵上方注释 | 「仅经共享 URL 缓存取数、`cache_max='n/a'`」清单 `plate / news_url / longhu / margin` → **`plate / news_url / longhu`**（margin 移出） |
+| 3 | `market_api.py` 模块级 | **新增**终端缓存三元组：`_margin_cache`(OrderedDict) / `_margin_cache_ts` / `_margin_cache_lock` |
+| 4 | `market_api.fetch_margin` | 新流程：参数校验 + `deadline` 入口闸 → **终端缓存命中直接返回**（`move_to_end`，不解析、不计数）→ 未命中才 `metrics.incr('upstream_fetch_total', key='margin')` + `fetch_json`/`json.loads`/`_transform_margin` → **仅 `latest is not None`** 才写缓存并按 `cache_max`(8) LRU 淘汰（**同步删 ts**）；失败/空数据不写 |
+| 5 | `upstream_fetch_total{margin}` 语义 | "每次 handler 调用 +1" → **"仅终端缓存 miss 时 +1"**（与 stock 域「终端 miss 才调 fetcher → 计数」对齐） |
+| 6 | 测试 | **519 → 525**（6 条：margin 命中不取数 / TTL 过期重取 / LRU 有界 / 失败不缓存 / 空数据不缓存 / 计数仅 miss） |
+
+### 2. 逐处落点（`旧 → 新`）
+
+| 文件 | 位置 | 旧 → 新 |
+|------|------|---------|
+| `config.md` | 头部 / 版本 | v1.13 → **v1.14**；新增 **v1.14 变更块** |
+| `config.md` | §3.1 matrix `margin` 行 | `'n/a'` → **`8`**（注释补「终端缓存上限 8（4 market × 2 余量），margin 不用池」） |
+| `config.md` | §3.1 spec 注释 / P7b 语义段 | URL-cache-only 域 `plate/news_url/longhu/margin` → **`plate/news_url/longhu`**（注明 margin 自 v1.14 有终端缓存、上限 8） |
+| `config.md` | §3.2 逐域实值表 | `margin … cache_max: null` → **`cache_max: 8`** |
+| `config.md` | **BR-CFG-5** | URL-cache-only 域列举**移除 `margin`**；补「margin 自 v1.14 声明 `cache_max=8`」 |
+| `config.md` | §8 **CFG-T13** | `plate/margin/news_url/longhu` 的 `cache_max is None` → **`plate/news_url/longhu` is None；`margin.cache_max == 8`** |
+| `config.md` | §2.4 迁移行 / §9 / §10#15 / **§10#25（新增）** / §11 | `_MARGIN_CACHE_TTL` 行补注（另消费 `['cache_max']`=8）；补 AC 行；#15 加更正注；新增 #25 登记；新增 v1.14 自检行 |
+| `market_api.md` | 头部 / 版本 / 接口权威栏 | v1.7 → **v1.8**；新增 **v1.8 变更块**；接口权威 `config v1.6 → v1.14`、`metrics v1.8 → v1.10`（`cache.md` v1.14 不变） |
+| `market_api.md` | §1.1 / §1.2 / §1.3 / §1.4 | 职责新增 #4 终端缓存；**§1.2「不新增缓存容器」更正**为「持有终端缓存三元组」；import 补 `threading`/`collections`；对齐表补 `['cache_max']` |
+| `market_api.md` | §2.1 | 补终端缓存语义（命中不解析/不计数、失败/空数据不写、LRU 有界、共享对象） |
+| `market_api.md` | §3.3 / **§3.4（新增）** | `cache_max: null` → **`8`**；新增终端缓存三元组 yaml + LRU 说明 |
+| `market_api.md` | §4 **BR** | **BR-MKT-9 改写**（仅 miss 计数）；**新增 BR-MKT-13..16**（命中/上限、只缓存可用数据、真 LRU 有界、命中返回共享对象） |
+| `market_api.md` | §5 伪代码 | `fetch_margin` 流程重写（终端缓存查找/写回/LRU）+ imports + 模块级三元组 |
+| `market_api.md` | §6 / §7 | 错误处理补 3 行（命中/miss/不写/超限）；并发安全由「无锁」改为 **`_margin_cache_lock`**（锁序/共享对象） |
+| `market_api.md` | §8 测试 | **MKT-T7 更正**（miss 路径）+ **MKT-T13 更正**（`cache_max == 8`）+ **新增 MKT-T14..T19** |
+| `market_api.md` | §9 / §10#4·#10·#11 / §11 / §12 | AC 补行（S9 有界 + 命中零解析 + 不写缓存）；#4 口径更正、#10 加推翻注、新增 #11；自检补 v1.8 行；变更记录补 v1.8 行 |
+| `metrics.md` | 头部 / 版本 | v1.9 → **v1.10**；新增 **v1.10 变更块** |
+| `metrics.md` | §3.2 表 + 表后注 | `upstream_fetch_total` owner 列 + 注：**语义 = 该域 fetch 路径被调用次数（终端 miss 计一次）**；补 margin 修复前后差异 |
+| `metrics.md` | §10#15（新增） / §11 | 登记语义明确；新增 v1.10 自检行 |
+| `_PROGRESS.md` | 「当前状态」+ 本节 | 新增登记 |
+
+### 3. 口径边界（**注明，不扩大到范围外文档**）
+
+- **SAD §2.1 / §2.6 矩阵与计分板**：SAD 对 `margin` 的 `cache_max` 与"终端缓存 miss 计数"口径**未定义 / 仍按 URL-cache-only 处理** ⇒ 需 **system-architect 回填**（属 `doc/arch/`，本轮**未改**）。
+- **`API.md` / `README.md`**：margin 端点对外契约未变（响应字段集合/HTTP 语义不变）⇒ **无需同步**；若 `API.md` 有 `margin.cache_max` 之类描述则另判（本轮未授权、未查改）。
+- **`config.py` 侧"仅经共享 URL 缓存"注释清单**已随代码同步（代码已落地），文档侧本轮对齐。
+
+### 4. grep 自查（**现行有效表述**）
+
+- ✅ `config.md`：**现行有效正文**已无「margin 属 URL-cache-only」或「`margin.cache_max` 为 `null`」——仅剩**历史 v1.2/P7b 行**（已加 ★ v1.14 更正注）与 **§10#15 历史裁决**（已加"★ v1.14 更正"）。
+- ✅ `market_api.md`：**现行有效正文**已无「margin 不消费 `cache_max`」——§3.3/§10#10 的旧口径均标注「★ v1.8 更正 / 已被 PRF-LAT-02 推翻」。
+- ✅ `metrics.md`：`upstream_fetch_total` 无「URL 缓存命中亦计数（上界）」**现行有效**表述——已由 v1.10 明确为「终端缓存 miss 计一次」，旧口径仅存于 v1.2–v1.9 历史块。
+- ⇒ 三份详设的**现行有效正文**口径一致，**无残留矛盾**。

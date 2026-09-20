@@ -64,6 +64,12 @@ class CachePolicyTests(unittest.TestCase):
 
     def test_policy_values(self):
         self.assertEqual(config.cache_policy('margin', now=TRADING)['pool_refresh'], 1200)
+        # PRF-LAT-02: margin owns a terminal cache now (URL-cache-only list
+        # shrank to plate/news_url/longhu).  pool_max stays 'fixed:16' — margin
+        # does not use a pool, the literal is the 4 markets × 2 headroom bound.
+        self.assertEqual((config.cache_policy('margin', now=TRADING)['pool_max'],
+                          config.cache_policy('margin', now=TRADING)['cache_max']),
+                         (16, 8))
         self.assertIsNone(config.cache_policy('sector', now=TRADING)['pool_refresh'])
         self.assertEqual(config.cache_policy('f10', now=TRADING)['pool_max'],
                          config.MAX_DEDUP_CODES)
@@ -164,9 +170,11 @@ class CachePolicyTests(unittest.TestCase):
 
     def test_url_cache_only_domains_declare_no_cache_max(self):  # P2-9
         """`cache_max` bounds a terminal/feed cache; URL-cache-only domains
-        (plate/news_url/longhu/margin) must not advertise a per-domain cap the
-        URL cache never reads — operators would otherwise tune a dead setting."""
-        for d in ('plate', 'news_url', 'longhu', 'margin'):
+        (plate/news_url/longhu) must not advertise a per-domain cap the URL
+        cache never reads — operators would otherwise tune a dead setting.
+        `margin` left this group in PRF-LAT-02 (it now owns an 8-entry
+        terminal cache), so it is asserted in test_policy_values instead."""
+        for d in ('plate', 'news_url', 'longhu'):
             self.assertIsNone(config.cache_policy(d, now=TRADING)['cache_max'])
 
     def test_env_defaults(self):                              # CFG-T9

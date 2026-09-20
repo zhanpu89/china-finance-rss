@@ -351,11 +351,14 @@ _POOL_MAX_ENVS = MappingProxyType({
 #     pool_refresh_factor   : float | 'n/a'
 #     pool_max              : 'dedup' (=MAX_DEDUP_CODES) | 'fixed:<n>' | 'n/a' | 'env:<NAME>'(env 注册常量)
 #     cache_max             : int | 'n/a'
-# `cache_max` bounds a domain's *terminal* cache (stock_api._cache_store) or its
-# feed cache (cache.feed_cache_put).  Domains served only through the shared URL
-# cache (cache.fetch_json — plate / news_url / longhu / margin) declare 'n/a':
-# their entries are bounded by the global cache.MAX_CACHE_SIZE, so a per-domain
-# int there would be a dead setting an operator could not act on (P2-9).
+# `cache_max` bounds a domain's *terminal* cache (stock_api._cache_store /
+# market_api._margin_cache) or its feed cache (cache.feed_cache_put).  Domains
+# served only through the shared URL cache (cache.fetch_json — plate /
+# news_url / longhu) declare 'n/a': their entries are bounded by the global
+# cache.MAX_CACHE_SIZE, so a per-domain int there would be a dead setting an
+# operator could not act on (P2-9).  `margin` left that group (PRF-LAT-02): a
+# URL-cache hit still re-ran json.loads + _transform_margin on every request
+# (hot-path P50 ≈8-9ms), so it now keeps its own 8-entry terminal cache.
 # 'n/a' literals are kept in the matrix for 1:1 SAD reading; cache_policy
 # normalises them to None (BR-CFG-11).
 # 2026-09-20 PRF-MEM-01 / PRF-MEM-02（内存调优，A/B 实测更正）：3 域 pool/cache
@@ -379,7 +382,7 @@ DOMAIN_MATRIX = {
     'feed':         ('L3', 1.0, 1.0, 'fixed:100', 100),
     'announcement': ('L3', 1.0, 1.0, 'dedup', 500),
     'longhu':       ('L4', 1.0, 1.0, 'n/a', 'n/a'),                   # GBK upstream, 日更 (URL cache)
-    'margin':       ('L4', 2.0, 2.0, 'fixed:16', 'n/a'),              # = 600s / 1200s (URL cache)
+    'margin':       ('L4', 2.0, 2.0, 'fixed:16', 8),                  # = 600s / 1200s (终端缓存 8)
     'f10':          ('L4', 1.0, 1.0, 'dedup', 500),
     'sector':       ('L4', 'override:604800', 'n/a', 'fixed:2000', 2000),  # 7d 行业名
 }

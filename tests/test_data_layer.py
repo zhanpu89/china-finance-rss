@@ -1311,11 +1311,26 @@ class PrefetchLoopTests(unittest.TestCase):
 # ── market_api ─────────────────────────────────────────────────────────────
 
 class MarketApiTests(unittest.TestCase):
+    # A shape that survives `_transform_margin` with a usable `latest` row —
+    # the only payload PRF-LAT-02 will store in the terminal cache.
+    _OK_BODY = ('{"status_code": 0, "data": {"date": ["2026-07-14"], '
+                '"item": [{"rzye": 14900000000, "rqye": 115000000}]}}')
+
     def setUp(self):
         metrics.reset()
+        # PRF-LAT-02: the terminal cache is process-global, so every test starts
+        # (and ends) cold — a warm entry would silently short-circuit a fetch.
+        self._clear_margin_cache()
 
     def tearDown(self):
         metrics.reset()
+        self._clear_margin_cache()
+
+    @staticmethod
+    def _clear_margin_cache():
+        with market_api._margin_cache_lock:
+            market_api._margin_cache.clear()
+            market_api._margin_cache_ts.clear()
 
     def test_margin_ttl_comes_from_policy(self):
         captured = {}
@@ -1431,6 +1446,100 @@ class MarketApiTests(unittest.TestCase):
         out = market_api._degraded('bogus kind')
         self.assertEqual(out['_error'], 'upstream_error')
         self.assertEqual(set(out), {'latest', 'recent', '_error'})
+
+    # ── PRF-LAT-02: margin terminal cache (LRU + TTL + miss-only count) ────
+
+    def test_terminal_cache_hit_does_not_refetch(self):
+        """Two calls for the same market within the TTL touch upstream once and
+        return an equivalent payload — the URL-cache parse/count is skipped."""
+        with patch.object(market_api, 'fetch_json',
+                          return_value=self._OK_BODY) as mocked:
+            first = market_api.fetch_margin('99')
+            second = market_api.fetch_margin('99')
+        self.assertEqual(mocked.call_count, 1)
+        self.assertEqual(first, second)
+        self.assertAlmostEqual(second['latest']['rzye'], 149.0, places=3)
+        self.assertIn('99', market_api._margin_cache)
+
+    def test_terminal_cache_expires_after_ttl(self):
+        """An entry older than the policy TTL is a miss -> upstream again."""
+        with patch.object(market_api, 'fetch_json',
+                          return_value=self._OK_BODY) as mocked:
+            market_api.fetch_margin('99')
+            ttl = config.cache_policy('margin')['ttl']
+            with market_api._margin_cache_lock:
+                market_api._margin_cache_ts['99'] = time.time() - ttl - 1
+            market_api.fetch_margin('99')
+        self.assertEqual(mocked.call_count, 2)
+
+    def test_terminal_cache_lru_is_bounded(self):
+        """cache_max (8) > len(VALID_MARKETS), so the bound is exercised with
+        synthetic enum members: the oldest keys are evicted first."""
+        cap = config.cache_policy('margin')['cache_max']
+        self.assertEqual(cap, 8)
+        markets = tuple(str(i) for i in range(cap + 2))
+        with patch.object(market_api, 'VALID_MARKETS', markets), \
+                patch.object(market_api, 'fetch_json', return_value=self._OK_BODY):
+            for market in markets:
+                market_api.fetch_margin(market)
+        self.assertEqual(len(market_api._margin_cache), cap)
+        self.assertEqual(len(market_api._margin_cache_ts), cap)
+        self.assertNotIn(markets[0], market_api._margin_cache)   # oldest evicted
+        self.assertNotIn(markets[1], market_api._margin_cache)
+        self.assertIn(markets[-1], market_api._margin_cache)
+
+    def test_terminal_cache_publishes_cache_entries_gauge(self):
+        """CR-02: the margin terminal cache publishes ``cache_entries{margin}``
+        on both the write and the hit path (out-of-lock), matching the
+        repo-wide convention (``stock_api._cache_store`` / BR-SA-26)."""
+        def _gauge():
+            return metrics.snapshot()['cache_entries'].get('margin')
+
+        with patch.object(market_api, 'fetch_json', return_value=self._OK_BODY):
+            market_api.fetch_margin('99')            # write -> 1
+            self.assertEqual(_gauge(), 1)
+            market_api.fetch_margin('99')            # hit   -> still 1
+            self.assertEqual(_gauge(), 1)
+
+        # LRU eviction keeps the gauge equal to the real (bounded) length.
+        cap = config.cache_policy('margin')['cache_max']
+        markets = tuple(str(i) for i in range(cap + 2))
+        with patch.object(market_api, 'VALID_MARKETS', markets), \
+                patch.object(market_api, 'fetch_json', return_value=self._OK_BODY):
+            for market in markets:
+                market_api.fetch_margin(market)
+        self.assertEqual(len(market_api._margin_cache), cap)
+        self.assertEqual(_gauge(), cap)
+
+    def test_failure_is_not_cached(self):
+        with patch.object(market_api, 'fetch_json',
+                          side_effect=FetchError('upstream_timeout')):
+            with self.assertRaises(FetchError):
+                market_api.fetch_margin('99')
+        self.assertNotIn('99', market_api._margin_cache)
+        self.assertNotIn('99', market_api._margin_cache_ts)
+
+    def test_no_data_payload_is_not_cached(self):
+        """A parsed-but-empty body degrades to `latest: None`; caching it would
+        pin the empty response for a whole TTL, so it must stay a miss."""
+        body = '{"status_code": 0, "data": {"date": [], "item": []}}'
+        with patch.object(market_api, 'fetch_json', return_value=body) as mocked:
+            market_api.fetch_margin('99')
+            market_api.fetch_margin('99')
+        self.assertEqual(mocked.call_count, 2)
+        self.assertNotIn('99', market_api._margin_cache)
+
+    def test_fetch_counter_counts_terminal_cache_misses_only(self):
+        def _fetch_total():
+            return metrics.snapshot().get('upstream_fetch_total', {}).get('margin', 0)
+
+        with patch.object(market_api, 'fetch_json', return_value=self._OK_BODY):
+            market_api.fetch_margin('99')            # miss -> +1
+            self.assertEqual(_fetch_total(), 1)
+            market_api.fetch_margin('99')            # hit  -> unchanged
+            self.assertEqual(_fetch_total(), 1)
+            market_api.fetch_margin('1')             # new key -> +1
+            self.assertEqual(_fetch_total(), 2)
 
 
 # ── cdp_engine ─────────────────────────────────────────────────────────────
