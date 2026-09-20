@@ -27,6 +27,13 @@ services:
       # 匿名 rw-p 映射 300→166、容器稳态 1.41GiB(93.98%)→1.259GiB(83.95%)。
       # 见 SAD §7.2 AR-18 / §9.17。
       - MALLOC_ARENA_MAX=2
+      # PRF-LAT-01（A/B 已证实）：连接池上限。默认 24 在高并发下成为排队瓶颈
+      # （20 客户端 × 20 worker 抢连接）。提到 48 后实测（压测 run 20260920-142456）：
+      # fundflow tier1000 avg 3.00→1.43s（−52%）、basic_info 4.08→3.08s（−25%）、
+      # ok_rate 100%（三次运行中最佳），且内存无变化。
+      # 注意：timeline 仍 12.1s/24.6s 未改善——其尾延迟由上游/CPU（单码 96KB JSON
+      # 解析）而非连接池支配，属已知容量边界（AC-E2 在合成 tier1000 极端负载下超线）。
+      - HTTP_POOL_MAX_PER_HOST=48
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
