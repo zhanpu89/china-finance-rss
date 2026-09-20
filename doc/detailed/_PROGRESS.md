@@ -37,6 +37,7 @@
 
 > **本清单是"仍开放项"的唯一入口**；各详设 §10 / SAD / PRD 内的登记为该条的**详细上下文**，两者冲突时**以本清单的"状态"为准**。
 > 登记日期 2026-09-18（集中登记轮）· **只改本文件**：未改代码 / 其他详设 / `doc/arch/` / `doc/prd/` / `API.md` / `README.md` / `.opencode/`；只增不删、不改历史变更块。
+> **追加登记（2026-09-20 · 内存 / 延迟 / 权限专项遗留轮）**：本轮新增 **A-8**、**B-5–B-9**、**C-4 / C-5**，并把 **A-2** 标 **✅ 已闭环**（AC-E4 吞吐 5/5 PASS）——同样**只改本文件**（未改代码 / 测试 / 其他详设 / `doc/arch/` / `doc/prd/` / `API.md` / `README.md` / `.opencode/`）；只增不删、不改历史变更块。
 > 状态图例：⬜ 开放 · ✅ 已闭环 / 已裁定 / 已防御。
 
 ### A 类 · 需实测或交易时段（清理动作对它们无效）
@@ -44,12 +45,13 @@
 | 标识 | 类型 | 为什么还没做（阻塞原因） | 触发 / 前置条件 | 承接地 | 建议承接方 |
 |------|------|------------------------|------------------|--------|-----------|
 | **A-1** ⬜ | 验收实测（AC-S3 模式 B 分档 P95） | 绝对分位数只能在**真实故障注入**下采集；解析式仅证明"高密度 ≤5s / 低密度 ≤10s"稳态可达 | 探测阶梯封顶 5s + `NEG_TTL=5s` 不变；**高/低密度分两轮采集、不得合并**（合并会被高密度样本覆盖） | PRD AC-S3 / SAD §2.3 D-1·§4.1·AR-9·AR-13·Q6 / `cache.md` BR-CACHE-22·§10#11 | tester（故障注入）+ 编排层校准 |
-| **A-2** ⬜ | 验收压测（AC-E4 吞吐） | 需 ≥100 req/s × 5min 混合读压测；"错误率 0 + 后 3min P99 劣化 ≤20%"无法由单测推出 | 压测环境；同期采集 `cache_hit_ratio` 观测项 | PRD AC-E4 / SAD §4.2·§8 E4·Q1 | tester（压测）+ 编排层 |
+| **A-2** ✅ | 验收压测（AC-E4 吞吐） | **✅ 已闭环（2026-09-20 实测，5/5 PASS）**——原口径（PRD `doc/prd/perf-stability-optimization.md:81`，**未改文本**）：≥100 req/s × 5min、错误率 0、后 3min P99 相对前 2min 基线劣化 ≤20%；实测吞吐 **200.0 req/s**、错误 **0 / 300000**、劣化比 **0.253 / 0.863 / 1.089 / 0.507 / 0.413**（最大 1.089 ≤ 1.2）；`cache_hit_ratio` 0.976–0.994、`http_503_total`=0、容器 RSS 528–558MiB。报告：`doc/tester/AC-E4_吞吐验证报告.md`（首轮）+ `doc/tester/AC-E4_尖峰因果与判据稳定性.md`（本轮）；harness：`tests/ac_e4_verify.py`、`tests/ac_e4_sweep_causality.py`、`tests/ac_e4_diag.py` | 压测环境；同期采集 `cache_hit_ratio` 观测项 | PRD AC-E4 / SAD §4.2·§8 E4·Q1 | tester（压测）+ 编排层 |
 | **A-3** ⬜ | 设计目标实测（**非 AC**） | `cache_hit_ratio ≥90%` 是 SAD 内部设计目标 / `/healthz` 观测项，待 P6c 实测 | 实测；**仅当 <84%** 才走 PRD 修订（不得以解析式越权改 PRD） | SAD §4.2·§2.6·AR-2·Q1 / `metrics.md` §10#2 | tester + 编排层 |
 | **A-4** ⬜ | 实测校准 | "慢而未死（需 6–10s）"上游频度 ↔ `_HISTORY_AGE=600s` 老化窗口相对占比未知；该窗口决定此类上游恢复延迟上界（≈600s） | 真实上游样本 / P6c 校准；`_PROBE_BUDGET_CAP`/`_HISTORY_AGE` 变动须连带重标 AC-S3 | SAD §2.3 D-1·§4.1·AR-9·AR-13 / PRD AC-S3 | tester + 编排层 |
 | **A-5** ⬜ | 运维变更动作 | 默认值下 CI 已覆盖；**一旦 env 覆盖即属运维变更、须重跑校准**（非当前待办） | 运维覆盖 `NEG_TTL` / `PROBE_TIMEOUT>5` / `_HISTORY_AGE`（<~120s）任一项时 | `config.md` §2.3 / `cache.md` §10#11·#18 / SAD AR-13 | 运维 + tester（重跑） |
 | **A-6** ⬜ | 验收实测（盘内终验） | PRD v0.6 已标"需在下一个交易时段补采"：AC-E10「盘中 4s 档端到端刷新周期」仅盘后 120s 等价条件直采；AC-A11/A12「交易时段连续多拍」仅单次/单窗口采样 | 下一个交易时段 | PRD §9.1 v0.6「追加待终验」·AC-E10 / AC-A11 / AC-A12 / SAD §8 | tester（盘中补采） |
 | **A-7** ⬜ | 运维决策 | 部署侧是否**强制设 `PUBLIC_BASE_URL`**（可选运营缓解：设后 feed 键恒为 5 条 path，消除 Host 派生键空间与本地生成放大）——README / 详设已给建议，未决策 | 部署决策；与 F8 引用计数修复不互斥（缓解非契约） | `server.md` BR-SRV-50 备注 / `README.md` §6.1·环境变量表 / SAD §2.7·§9.10 | 运维 + 编排层 |
+| **A-8** ⬜ | 验收实测（残余尖峰归因 · 3 个 60s 周期候选） | 本轮已**否证** `cache._CACHE_SWEEP_INTERVAL` / `_sweep_expired`（周期跟随实验 + 直接计时 p99=0.424ms + 放大上界 ≤0.167% + 阳性对照）；残余候选：① `HTTP_POOL_IDLE_TTL=60`（连接回收导致重连尾延迟）② `cdp_engine._heartbeat_interval()` 非交易时段=60s（15 个 CDP 页心跳）③ `stream.py` 分组清扫 60s（本轮 AC 未激活） | 需可注入 / 可观测的探针（**注意：编排层无通用执行权限，须由 tester 执行**） | `cache.md` §10 / `cdp_engine.md` / `stream.md` §10 | tester（注入计时）+ 编排层 |
 
 ### B 类 · 已登记为 §10 的改进建议（非漂移、非缺陷；做不做取决于价值判断）
 
@@ -59,6 +61,11 @@
 | **B-2** ⬜ | 契约面扩大（需单独决策） | `/healthz` 的 `feeds[]` 共 15 条，**未含** `/finance/timeline`、`/market/timeline`、`/ths/longhu`、`/stock/announcement`；补入属"只增"但会扩大 `feeds[]` 契约面（不做则该 4 端点在 `/healthz` 不可见） | 决定是否扩大契约面时 | `server.md` §10#6 / SAD §7.1 Q2·§2.6 | 编排层决策 + system-architect |
 | **B-3** ✅ | ~~改进建议~~ **已闭环** | SAD 侧已回填，**非仍开放** | — | SAD §2.6 计分板**已列** `upstream_fetch_total{domain}`（"D-6 补列"；SAD §9.3 记录该动作；`tech-stack.json` `architectureRules.metrics` 同步含该名） | 无（无需再处理；`metrics.md §10#5` 的"建议"文字为该条登记时点快照） |
 | **B-4** ⬜ | 判据细分建议 | `stream_slow_client_total` 现为「写路径异常退出 ∧ 队列非满」的上界估计（正常断开也走异常分支）；是否进一步区分 `BrokenPipe` 与 `socket.timeout` 待确认 | 决定是否细化指标时 | `stream.md` §10#4 / BR-STR-35 / SAD §2.5 C-3 | 编排层确认 + task-decomposer |
+| **B-5** ⬜ | 改进建议（标签枚举漂移） | `metrics.md` §3.2 `cache_entries` 标签枚举**缺 `depth`**（`stock_api._cache_store` 实际以 `key='depth'` 发布）；**疑似多列 `longhu`**（全仓代码未见 `key='longhu'` 写入，且 `longhu` 属 URL-cache-only 域） | 复核后补 `depth`、裁定 `longhu` 去留 | `metrics.md` §3.2 / `stock_api.md` | task-decomposer |
+| **B-6** ⬜ | 评审 P2 收尾（PRF-LAT-02） | **CR-07**：`tests/test_data_layer.py::test_terminal_cache_publishes_cache_entries_gauge` 的**命中分支断言不可证伪**（删掉命中路径的 `set_gauge` 后仍绿），建议在写入与命中之间注入 / 置脏长度使其必红；**CR-01**：margin 终端缓存命中返回**共享可变 payload 对象**（潜在污染；当前唯生产链只 `json.dumps`，无触发者，与 `stock_api` 同先例）；**CR-06**：终端缓存原语第 3 处重复（`stock_api` 多域 + `market_api` margin），**当前不宜上收 `cache.py`**（层隔离），登记为技术债 | 决定收尾时（CR-06 仅登记、不实施） | `market_api.md` §10 / `tests/` | code-developer + code-reviewer |
+| **B-7** ⬜ | 已知容量边界（AC-E2 合成高并发尾延迟） | `/stock/timeline` 在合成 tier1000（20 并发 × 50 码）实测 avg **12.1s** / max **24.6s**，超 AC-E2「单请求 ≤15s」。归因：**上游 / CPU 绑定**（单码 ~96KB JSON 解析），**非连接池**（`HTTP_POOL_MAX_PER_HOST` 24→48 无改善）。候选：① 降 `_MAX_BATCH_SIZE` 换取更短单请求 ② 为 timeline 设并发上限 ③ 登记为**已知容量边界**（合成极端负载） | 编排层决策后（选 ①② 需改码） | `stock_api.md` §10 / PRD AC-E2 / SAD §4.2 | 编排层决策 + code-developer（若选 ①②） |
+| **B-8** ⬜ | 判据定义澄清（PRD 级，**未改文本**） | AC-E4 判据窗口：5 次实测中 **4/5 次 A(前 2min) > B(后 3min)**，A 窗口波动 3.8×（6.60–25.15ms vs B 6.32–8.66ms）——A 覆盖冷启动瞬态，判据实际在度量「瞬态有多重」，**瞬态越轻越易 FAIL**（首轮唯一 FAIL 即 A「异常干净」）。建议：基线后移至 `[60,180]`、或 ≥3 次取中位数、或改用 5s 分桶 P99 中位数；**不建议降阈值** | 需 PRD 修订（**编排层不得代改**） | PRD §7 / §9 + `doc/prd/perf-stability-optimization.md:81` | **prd-writer + review-expert** |
+| **B-9** ⬜ | 权限治理待办（**需用户执行**） | `doc/deploy/permission-proposals.md` 的 **PROPOSAL-02**（把 `.opencode/scripts/*.sh` 两条通配收窄为 22 条逐文件白名单，堵「写脚本 + 通配执行」逃逸面）状态 `open`，待用户应用；同批可选：删除 `bash .opencode/project/scripts/*.sh *`（惰性通配，该目录当前不存在）；`self-evolve` 白名单含同类通配（需另行提案） | 用户在 `opencode.json` 应用（**仅用户可改**） | `doc/deploy/permission-proposals.md` / `opencode.json` | 用户 |
 
 ### C 类 · 已裁定不做 / 已知边界（**留痕：后续审计勿再作为未闭环上报**）
 
@@ -67,6 +74,8 @@
 | **C-1** | **已裁定：不实现** | 用户裁定 2026-09-18：`/stock/f10` 极少/几乎无调用 ⇒ 不设「仅单码/少量码」上限、不构成问题 | ✅ **已裁定不做**。`stock_api.md §10#10` 保留「当前未强制」为**事实陈述**（知情接受，非遗漏）；触发条件（若将来被大量调用）见该条裁定注 | `stock_api.md` §10#10 / 本文件「★ 台账收口：`REV-DES-21` 裁定关闭」 |
 | **C-2** | **已知边界（当前不可达）** | `cache.md` §10#29：`expires_at` 缺省 `0` 依赖非负时钟（`time.time() >= 0` 恒真） | ✅ **已知边界**。仅测试把时钟打桩为**负值**时才可能反转为命中并触发 `KeyError`；全仓测试时钟起点均为正 ⇒ 当前不可达 | `cache.md` §10#29 |
 | **C-3** | **已防御** | `cache.md` §10#30：真值非映射条目的读侧行为已由 `isinstance(..., dict)` 守卫防御（三处落点：`feed_cache_get_entry` / `feed_cache_put` 继承分支 / 共享 `_sweep_expired`） | ✅ **已防御**（v1.13 状态更正；原"登记不修"口径作废） | `cache.md` §10#30 / BR-CACHE-13 |
+| **C-4** ✅ | **已裁定：不实现** | 用户裁定 2026-09-20：**内存不再削缓存换空间**——不削 `timeline` 终端缓存（500）与共享 URL 缓存（`MAX_CACHE_SIZE=2000`）容量；**已知可再降空间**（终端缓存解析对象 ~200MB，timeline 单条对象数倍于原始 ~96KB）**保留不动**（换取命中率）。依据：内存已从 python **1.095GiB → 0.772GiB**、容器 **96.57% → 83.95%**；分配器层三次 A/B 确认地板（`MALLOC_ARENA_MAX=1` 仅 −22MiB 且有噪声；`PYTHONMALLOC=malloc` 零收益 + ok_rate 76.1% 已证伪） | ✅ **已裁定不做**。留痕：**勿再作为未闭环上报** | `config.md` §10#24 / `stock_api.md` §10#27 / `cache.md`（`MAX_CACHE_SIZE`） |
+| **C-5** ✅ | **已裁定：设计取舍** | P8-r1 遗留 **P1-2 / P1-4** 判为设计取舍：① 不设 `pool_max ≤ cache_max` 强制护栏（依据：`depth` / `f10` / `announcement` 现状即 2000 > 500，超出仅致 prefetch 回转浪费、非正确性问题）② 不在 unittest 中断言进程 RSS（内存护栏由压测脚本 + SAD AR-18 承担） | ✅ **已裁定不做**。留痕：**勿再作为未闭环上报** | `config.md` §10.1 / SAD AR-18 |
 
 ### D 类 · 本轮核实新发现的仍开放项（任务书未列，补入以便统一收口）
 
