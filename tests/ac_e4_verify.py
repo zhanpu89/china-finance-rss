@@ -298,6 +298,31 @@ def main():
     rep['windows'] = {'A_first2min': A, 'B_last3min': B,
                       'p99_ratio_B_over_A': ratio}
 
+    # Diagnostic (NON-AC) windows: drop the first 60s of warm-up/transient, then
+    # compare two equal-length steady-state windows.
+    C = window_stats(fres, 60, 180)
+    D = window_stats(fres, 180, a.formal_seconds)
+    rep['windows']['C_60_180'] = C
+    rep['windows']['D_180_300'] = D
+    rep['windows']['p99_ratio_D_over_C'] = (
+        round(D['p99_ms'] / C['p99_ms'], 4)
+        if C['p99_ms'] and D['p99_ms'] else None)
+
+    # 5 s-bucket P99 series: makes any ~60 s periodic tail spike visible inside
+    # the AC run itself (the previous diagnosis used 30 s buckets in diag.py).
+    buck = []
+    t = 0
+    while t * 5 < a.formal_seconds:
+        bs = [x for x in fres['samples'] if t * 5 <= x[0] < (t + 1) * 5]
+        bok = [x[1] for x in bs if x[2] == 200]
+        buck.append({'from_s': t * 5, 'n': len(bs),
+                     'errors': len(bs) - len(bok),
+                     'p50_ms': ms(pct(bok, .50)), 'p95_ms': ms(pct(bok, .95)),
+                     'p99_ms': ms(pct(bok, .99)),
+                     'max_ms': ms(max(bok, default=None))})
+        t += 1
+    rep['buckets_5s'] = buck
+
     rate = rep['formal']['rps_over_seconds']
     err_rate = rep['formal']['error_rate']
     passed = bool(rate >= 100 and err_rate == 0 and ratio is not None
@@ -333,6 +358,8 @@ def main():
           % (rep['formal']['errors'], err_rate * 100, d['checks']['errors_zero']))
     print('  P99 A  : %s ms | P99 B: %s ms | ratio %s (<=1.2: %s)'
           % (A['p99_ms'], B['p99_ms'], ratio, d['checks']['p99_drift_le_20pct']))
+    print('  DIAG (not AC): P99[60,180]=%s P99[180,300]=%s ratio=%s'
+          % (C['p99_ms'], D['p99_ms'], rep['windows']['p99_ratio_D_over_C']))
     print('  report : %s' % a.report_json)
     print('=' * 66)
 
