@@ -1491,15 +1491,32 @@ class MarketApiTests(unittest.TestCase):
     def test_terminal_cache_publishes_cache_entries_gauge(self):
         """CR-02: the margin terminal cache publishes ``cache_entries{margin}``
         on both the write and the hit path (out-of-lock), matching the
-        repo-wide convention (``stock_api._cache_store`` / BR-SA-26)."""
+        repo-wide convention (``stock_api._cache_store`` / BR-SA-26).
+
+        CR-07: the hit path's publish is verified by *call count* (surrogate
+        spy), not only by the gauge value — the write already leaves
+        ``cache_entries{margin} == 1``, so a bare value check could not detect
+        a hit that dropped its ``set_gauge``."""
         def _gauge():
             return metrics.snapshot()['cache_entries'].get('margin')
 
-        with patch.object(market_api, 'fetch_json', return_value=self._OK_BODY):
-            market_api.fetch_margin('99')            # write -> 1
+        real_set_gauge = metrics.set_gauge
+        publishes = []
+
+        def _spy_set_gauge(name, value, key=None):
+            if name == 'cache_entries' and key == 'margin':
+                publishes.append((name, value, key))
+            return real_set_gauge(name, value, key=key)
+
+        with patch.object(market_api, 'fetch_json', return_value=self._OK_BODY), \
+                patch.object(metrics, 'set_gauge', side_effect=_spy_set_gauge):
+            market_api.fetch_margin('99')            # write -> publish
             self.assertEqual(_gauge(), 1)
-            market_api.fetch_margin('99')            # hit   -> still 1
+            self.assertEqual(len(publishes), 1)
+            publishes.clear()                        # isolate the hit path
+            market_api.fetch_margin('99')            # hit   -> publishes again
             self.assertEqual(_gauge(), 1)
+            self.assertEqual(len(publishes), 1)
 
         # LRU eviction keeps the gauge equal to the real (bounded) length.
         cap = config.cache_policy('margin')['cache_max']
