@@ -329,7 +329,7 @@ Base URL: `http://localhost:8053`
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `market_sentiment` | object/null | 市场情绪：`{code, msg, data}`，`data` 含情绪评分 |
+| `market_sentiment` | object/null | 市场情绪：`{code, msg, data}`，`data` 含情绪评分（上游 `/v2/quote/a/web/dingpan` 盯盘接口的 `market_degree` 等） |
 | `advance_decline` | object/null | 涨跌家数：`{code, msg, data}`，`data` 含 `up`/`down`/`flat` 与占比 |
 | `articles` | object/null | 要闻文章列表（上游 `errno` 包裹） |
 | `live_refresh` | object/null | 实时刷新：`{code, msg, data}`，`data` 为 **码 → 涨跌幅（小数）** 映射（如 `{"sh000688": 0.0414}` = +4.14%） |

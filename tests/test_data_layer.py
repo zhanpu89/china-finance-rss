@@ -1561,6 +1561,22 @@ class MarketApiTests(unittest.TestCase):
 
 # ── cdp_engine ─────────────────────────────────────────────────────────────
 
+class RemapKeysTests(unittest.TestCase):
+    def test_dingpan_maps_to_market_sentiment(self):
+        data = {'https://x-quote.cls.cn/v2/quote/a/web/dingpan?app=CailianpressWeb&os=web&sv=8.7.9&sign=x': 'sentiment'}
+        mapped = cdp_engine.remap_keys(data)
+        self.assertEqual(mapped.get('market_sentiment'), 'sentiment')
+        self.assertNotIn('https://x-quote.cls.cn/v2/quote/a/web/dingpan?app=CailianpressWeb&os=web&sv=8.7.9&sign=x', mapped)
+
+    def test_emotion_still_maps_to_market_sentiment(self):
+        data = {'https://www.cls.cn/nodeapi/emotion?x=1': 'emo'}
+        mapped = cdp_engine.remap_keys(data)
+        self.assertEqual(mapped.get('market_sentiment'), 'emo')
+
+    def test_interceptor_captures_dingpan_url(self):
+        self.assertIn('dingpan', cdp_engine.INTERCEPTOR_JS)
+
+
 class PageDataTests(unittest.TestCase):
     def test_boundary_matrix(self):
         class _Raises:

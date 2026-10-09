@@ -155,7 +155,7 @@ def cdp_ready() -> bool:
 | `CDPPage.get_data()` | 不变 | 返回 always-dict（既有语义）——防御收敛在 `page_data` |
 | `CDPPage._heartbeat_interval()` | 不变 | **改调 `config._is_trading_hours()`**，删除本地时段复本 |
 | `_CHROME_RESTART_THROTTLE` | 不变（值） | **P7b 来源变更**：`= config.CDP_RESTART_THROTTLE`（config 注册，本模块不再 `os.getenv`）；`_last_chrome_restart` / `_chrome_restart_lock` 语义不变 |
-| `remap_keys` / `find_tab` / `execute_js` / `API_KEY_MAP` / `INTERCEPTOR_JS` | 不变 | — |
+| `remap_keys` / `find_tab` / `execute_js` / `API_KEY_MAP` / `INTERCEPTOR_JS` | 不变 | **新增 `dingpan` URL 模式**（上游看盘页市场情绪接口由 `/emotion` 改版为 `/v2/quote/a/web/dingpan`，映射同 `market_sentiment`）；既有模式与返回值语义不变 |
 | `_same_code(a, b) -> bool` | — | **P7b 新增**：用 `config.canonical_code` 归一后比较（无效码永不匹配） |
 | `CDPPage._fresh_secu_code_locked(now)` | — | **P7b 新增**：持 `self._lock` 时返回"未过 `_last_data_max_age` 的 `_last_data['basic_info'].data.secu_code`"，否则 `None`（**时钟缺失 = 陈旧**） |
 | `CDPPage._acquire_navigate_lock(timeout) -> bool` | — | **P7b 新增**：`_navigate_lock` 的**限时**获取；超时/t≤0 ⇒ `False`（降级而非无限 park） |

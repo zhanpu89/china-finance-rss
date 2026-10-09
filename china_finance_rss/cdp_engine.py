@@ -150,6 +150,7 @@ _publish_window()
 
 API_KEY_MAP = {
     'emotion': 'market_sentiment',
+    'dingpan': 'market_sentiment',   # 上游改版：市场情绪现走 /v2/quote/a/web/dingpan（盯盘）
     'articles': 'articles',
     'up_down': 'advance_decline',
     'tline': 'timeline',
@@ -194,7 +195,8 @@ window.__cdp_refetch = {};
 window.__cdp_ws = [];
 
 var _shouldCapture = function(url) {
-    return url.indexOf('emotion') > -1 || url.indexOf('articles') > -1 ||
+    return url.indexOf('emotion') > -1 || url.indexOf('dingpan') > -1 ||
+           url.indexOf('articles') > -1 ||
            url.indexOf('up_down') > -1 || url.indexOf('tline') > -1 ||
            url.indexOf('refresh') > -1 || url.indexOf('anchor') > -1 ||
            url.indexOf('basic') > -1 ||
@@ -476,7 +478,7 @@ class CDPPage:
     # Low-frequency keys: one-shot on page load, CDP re-fetches them — long TTL.
     KEY_TTL = 120
     KEY_TTL_OVERRIDES = {
-        'market_sentiment': 60,   # emotion — page refreshes ~15s
+        'market_sentiment': 60,   # dingpan/emotion — page refreshes itself
         'basic_info': 60,         # basic   — page refreshes ~15-50s
         'live_refresh': 60,       # refresh — page refreshes ~15s
         'timeline': 60,           # tline — page refreshes ~50s
