@@ -42,6 +42,7 @@ ENDPOINTS = {
 
 GLOBAL_ENDPOINTS = {
     'finance/market':     '/finance/market',
+    'finance/market_sentiment': '/finance/market_sentiment',
     'finance/timeline':   '/finance/timeline',
     'quotation/market':   '/quotation/market',
     'market/timeline':    '/market/timeline',
@@ -114,9 +115,19 @@ def check_endpoint(endpoint, code, data):
         elif result is False:
             errors.append('false result')
     elif endpoint == '/finance/market':
-        for key in ('advance_decline', 'articles', 'market_sentiment', 'anchor', 'live_refresh'):
+        for key in ('advance_decline', 'articles', 'anchor', 'live_refresh'):
             if key not in data:
                 errors.append(f'missing key: {key}')
+    elif endpoint == '/finance/market_sentiment':
+        # Upstream envelope passed through verbatim (MS-T2): {code, msg, data}
+        if not isinstance(data, dict):
+            errors.append(f'not dict: {type(data).__name__}')
+        else:
+            for key in ('code', 'data'):
+                if key not in data:
+                    errors.append(f'missing key: {key}')
+            if data.get('code', 200) != 200:    # business-level 200 (HTTP 200 checked above)
+                errors.append(f'envelope code != 200: {data.get("code")!r}')
     elif endpoint == '/finance/timeline':
         if not isinstance(data, dict):
             errors.append(f'not dict: {type(data).__name__}')

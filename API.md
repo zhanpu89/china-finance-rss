@@ -325,17 +325,35 @@ Base URL: `http://localhost:8053`
 
 - **CDP**: 是（依赖 Chrome CDP 持久页面）；CDP 不可用时各键为 `null`/缺省
 - **请求参数**: 无
-- **响应**：顶层键 `live_refresh` / `basic_info` / `anchor` / `advance_decline` / `market_sentiment` / `articles` / `stock_quote`；每键为上游原样包裹 `{code|errno, msg, data}`。
+- **响应**：顶层键 `live_refresh` / `basic_info` / `anchor` / `advance_decline` / `articles` / `stock_quote`；每键为上游原样包裹 `{code|errno, msg, data}`。
+- ⚠️ **`market_sentiment` 已拆为独立端点**（见下）；本端点成功体与降级体**均不再含**该键。
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `market_sentiment` | object/null | 市场情绪：`{code, msg, data}`，`data` 含情绪评分（上游 `/v2/quote/a/web/dingpan` 盯盘接口的 `market_degree` 等） |
 | `advance_decline` | object/null | 涨跌家数：`{code, msg, data}`，`data` 含 `up`/`down`/`flat` 与占比 |
 | `articles` | object/null | 要闻文章列表（上游 `errno` 包裹） |
 | `live_refresh` | object/null | 实时刷新：`{code, msg, data}`，`data` 为 **码 → 涨跌幅（小数）** 映射（如 `{"sh000688": 0.0414}` = +4.14%） |
 | `anchor` | object/null | 锚点/关注数据 |
 | `basic_info` | object/null | 基础指数信息（`data.sh_index`/`sz_index`/`cy_index` 等） |
 | `stock_quote` | object/null | 个股速览（上游 `data` 原样） |
+
+---
+
+### `GET /finance/market_sentiment` ⚡ 需要 Chrome CDP
+
+**财联社市场情绪** — 看盘面板的市场情绪指标（从 `/finance/market` 拆出的独立端点）。
+
+- **CDP**: 是（依赖 Chrome CDP 持久页面 `cls_finance`）；CDP 不可用 / 页面未初始化时返回 `{"error": …}`（恒 **HTTP 200**，绝不返回裸 `null`）
+- **请求参数**: 无
+- **响应**：上游 `market_sentiment` 包裹对象**原样透传** `{code, msg, data}`；`data` 含情绪评分 `market_degree`、两市余额 `shsz_balance`、涨跌比 `up_ratio`、指数条 `index_bar[]`（`secu_code`/`secu_name`/`last_px`/`change`/`change_px`/`change_color`）等（上游 `/v2/quote/a/web/dingpan` 盯盘接口）。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `code` | number | 上游状态码（200 = OK） |
+| `msg` | string | 上游消息 |
+| `data` | object | 情绪数据：`market_degree` / `shsz_balance` / `shsz_balance_change_px` / `up_ratio` / `up_open_ratio` / `profit_ratio` / `performance` / `index_bar[]` 等 |
+
+> 本端点 `Cache-Control: max-age` 跟随 `quote` 域（盘中 4s / 非盘 120s，见 §6.1）。
 
 ---
 
@@ -401,6 +419,60 @@ Base URL: `http://localhost:8053`
 | `.{plate_data}[].first_stock` | object | 领涨股：`{secu_code, secu_name, last_px, change(小数), tr(小数)}` |
 | `.{main_fund_diff}` | object | 主力资金榜：`{top_main_fund_diff: [...], last_main_fund_diff: [...]}`（各 3 条） |
 | `hot_plates` | array | 综合热门板块（`plate_data` 同构元素，6 条） |
+
+---
+
+### `GET /cls/up_pool`
+
+**财联社涨停池** — 涨停股列表。
+
+- **CDP**: 否（REST API，使用 CLS 签名，直连 `x-quote.cls.cn/quote/index/up_down_analysis`）
+- **请求参数**: 无
+- **响应**: `{"stocks": [...]}`；上游失败/异常降级为 `{"error": "<原因>"}`（**均 200**，N1 语义）。字段集合 = 上游 `data[i]` 原样透传。
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `stocks` | array | 涨停股列表 |
+| `stocks[].secu_code` | string | 股票代码（如 `sz002979`） |
+| `stocks[].secu_name` | string | 股票名称 |
+| `stocks[].change` | number | 涨跌幅（**小数**，`0.0999` = 9.99%） |
+| `stocks[].last_px` | number | 最新价 |
+| `stocks[].time` | string | 涨停时间（`YYYY-MM-DD HH:MM:SS`） |
+| `stocks[].up_reason` | string | 涨停原因（以 `|` 分隔的题材/概念；炸板池/跌停池多为 `''`） |
+| `stocks[].num_stocks` | number | 该池标的数（如涨停 72 家） |
+| `stocks[].plate` | array | 所属板块：`{secu_code, secu_name, change(小数)}` |
+| `stocks[].is_st` | number | 是否 ST（0/1） |
+| `stocks[].limit_up_days` | number | 连板天数（1 = 首板） |
+
+---
+
+### `GET /cls/continuous_up_pool`
+
+**财联社连板池** — 连续涨停股列表（响应 schema 同 `/cls/up_pool`）。
+
+- **CDP**: 否（REST API，使用 CLS 签名）
+- **请求参数**: 无
+- **响应**: `{"stocks": [...]}`；降级 `{"error": ...}`（均 200）。**字段集合与 `/cls/up_pool` 完全相同**（`limit_up_days ≥ 2`）。缓存域 `plate`，同 `/cls/hotplate` 族。
+
+---
+
+### `GET /cls/up_open_pool`
+
+**财联社炸板池** — 曾涨停但炸板（打开涨停）的股票列表（响应 schema 同 `/cls/up_pool`）。
+
+- **CDP**: 否（REST API，使用 CLS 签名）
+- **请求参数**: 无
+- **响应**: `{"stocks": [...]}`；降级 `{"error": ...}`（均 200）。**字段集合与 `/cls/up_pool` 完全相同**（`up_reason` 多为 `''`）。
+
+---
+
+### `GET /cls/down_pool`
+
+**财联社跌停池** — 跌停股列表（响应 schema 同 `/cls/up_pool`）。
+
+- **CDP**: 否（REST API，使用 CLS 签名）
+- **请求参数**: 无
+- **响应**: `{"stocks": [...]}`；降级 `{"error": ...}`（均 200）。**字段集合与 `/cls/up_pool` 完全相同**（`change ≤ -0.0999` 量级，`up_reason` 为 `''`）。
 
 ---
 
@@ -600,11 +672,11 @@ Base URL: `http://localhost:8053`
 
 | 数据域 | 端点示例 | 缓存 TTL（盘中 / 非盘中） | 数据特征 |
 |--------|---------|--------------------------|----------|
-| `quote`（**L0**） | `/stock/basic_info`（行情）/ `/stock/data`（详情） | **4s** / 120s | 实时行情 |
+| `quote`（**L0**） | `/stock/basic_info`（行情）/ `/stock/data`（详情）/ 5 面板（`/finance/market`·`/finance/timeline`·`/finance/market_sentiment`·`/quotation/market`·`/market/timeline`） | **4s** / 120s | 实时行情 |
 | `depth`（**L0**） | `/stock/basic_info` 的 `depth`（五档） | **4s** / 120s | 五档盘口 |
 | `fundflow`（L1） | `/stock/fundflow` | **8s** / 120s | 资金流向 |
 | `timeline`（L1） | `/stock/timeline` | **8s** / 120s | 分时 |
-| `plate`（L2） | `/cls/hotplate` `/finance/market` | **12s** / 120s | 板块轮动 |
+| `plate`（L2） | `/cls/hotplate` | **12s** / 120s | 板块轮动 |
 | `news_url` / `feed`（L3） | 5 个 RSS 源 | **30s** / 180s | 快讯 |
 | `announcement`（L3） | `/stock/announcement` | **30s** / 180s | 公告 |
 | `longhu`（L4） | `/ths/longhu` | 300s（日更） | 龙虎榜 |
@@ -622,14 +694,14 @@ Base URL: `http://localhost:8053`
 
 | 端点类别 | `Cache-Control` | `Vary` |
 |----------|-----------------|--------|
-| JSON 数据端点（批量 6 个 `/stock/*`、单体、4 面板） | `public, max-age=<该端点**所属域的 TTL**>`（与上表同源，随盘中/非盘中变化） | 有 gzip ⇒ `Accept-Encoding`；未设 `PUBLIC_BASE_URL` ⇒ 另加 `Host, X-Forwarded-Host, X-Forwarded-Proto` 且降为 `private` |
+| JSON 数据端点（批量 6 个 `/stock/*`、单体、5 面板） | `public, max-age=<该端点**所属域的 TTL**>`（与上表同源，随盘中/非盘中变化） | 有 gzip ⇒ `Accept-Encoding`；未设 `PUBLIC_BASE_URL` ⇒ 另加 `Host, X-Forwarded-Host, X-Forwarded-Proto` 且降为 `private` |
 | 5 个 RSS 源 | `public, max-age=30`（盘中）/ `180`（非盘）；未设 `PUBLIC_BASE_URL` 时 `private` | `Accept-Encoding`（+ 同上 Host 三件套）；另带弱 `ETag` / `Last-Modified`，见 §1 |
 | `/ths/longhu`、`/healthz` | **不带** `Cache-Control` | — |
 
 > 实测（非盘中、未设 `PUBLIC_BASE_URL`）：`/market/margin` → `public, max-age=600`；`/finance/market` → `public, max-age=120`；`/cls/telegraph` → `private, max-age=180` + `ETag` + `Last-Modified`；`/ths/longhu` → 无 `Cache-Control`。
 
 > ⚠️ 两个容易踩的点：
-> ① **4 面板（`/finance/market`、`/finance/timeline`、`/quotation/market`、`/market/timeline`）的 `max-age` 跟随 `quote` 域**（盘中 **4s** / 非盘 120s），**不是**固定值、也不是历史上那个面板默认域的 300s——**不要硬编码**，随盘中/非盘变化。
+> ① **5 面板（`/finance/market`、`/finance/timeline`、`/quotation/market`、`/market/timeline`、`/finance/market_sentiment`）的 `max-age` 跟随 `quote` 域**（盘中 **4s** / 非盘 120s），**不是**固定值、也不是历史上那个面板默认域的 300s——**不要硬编码**，随盘中/非盘变化。
 > ② 未设 `PUBLIC_BASE_URL` 时，服务端只能由请求 `Host` 回推对外 URL，故响应**刻意**降为 `private` 并多带一个 `Host` 的 `Vary`（否则一条伪造 `Host` 就能污染共享缓存）；生产环境**建议显式设置** `PUBLIC_BASE_URL`，以拿到可共享的 `public` 响应。
 
 ## 6.2 接入方是否需要再次缓存？
@@ -773,6 +845,7 @@ Base URL: `http://localhost:8053`
 | **`feeds[].status` 三处取值修正**：`/stock/data`、`/stock/basic_info` → `configured`（纯 REST）；`/stock/f10` → `requires_chrome_cdp` | §4 `/healthz` | 既有字段取值变更 |
 | **SSE 帧字段只增**：`items[code].quote` 可含 `depth`（五档盘口）+ 8 项元信息；内容未变不发帧 | §5 | 只增（消费方按需取键） |
 | **未设 `PUBLIC_BASE_URL` 时响应为 `private` 且多带 `Vary: Host, X-Forwarded-Host, X-Forwarded-Proto`** | 响应头 | 见 §6.1（生产建议显式设置该变量） |
+| **`market_sentiment` 拆为独立端点**：新增 `GET /finance/market_sentiment`（CDP，`quote` 域，上游 `{code,msg,data}` 原样透传）；`/finance/market` 成功体与降级体**均不再含** `market_sentiment` 键；`/healthz` `feeds[]` **19→20** | §3 市场数据 API / §4 `/healthz` | 新增端点 = 只增；`/finance/market` **去 1 字段**（该字段为近期新增、尚未冻结，属**回退**，端锁定 🟠） |
 
 ---
 

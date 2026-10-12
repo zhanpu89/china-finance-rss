@@ -202,7 +202,7 @@ _MAX_BATCH_SIZE = 50
 
 # Expected CDP data keys per page
 _FINANCE_EXPECTED_KEYS = frozenset({
-    'market_sentiment', 'articles', 'advance_decline',
+    'articles', 'advance_decline',
     'live_refresh', 'anchor', 'basic_info',
 })
 
@@ -223,6 +223,13 @@ _PLATE_INFO_URL = 'https://x-quote.cls.cn/web_quote/plate/info'
 _PLATE_STOCKS_URL = 'https://x-quote.cls.cn/web_quote/plate/stocks'
 _PLATE_INDUSTRY_URL = 'https://x-quote.cls.cn/web_quote/plate/industry'
 _PLATE_HEADERS = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.cls.cn/plate'}
+
+# CLS up/down analysis (涨停池 / 连板池 / 炸板池 / 跌停池 — direct REST, no CDP).
+_UP_DOWN_ANALYSIS_URL = 'https://x-quote.cls.cn/quote/index/up_down_analysis'
+_UP_DOWN_ANALYSIS_HEADERS = {
+    'User-Agent': 'Mozilla/5.0',
+    'Referer': 'https://www.cls.cn/finance',
+}
 
 _FUNDFLOW_BASE_URL = 'https://x-quote.cls.cn/quote/stock/fundflow'
 _FUNDFLOW_HEADERS = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.cls.cn/stock'}
@@ -377,7 +384,7 @@ DOMAIN_MATRIX = {
     'depth':        ('L0', 1.0, 1.0, 'dedup', 500),                   # 五档盘口 (与 quote 同拍)
     'fundflow':     ('L1', 1.0, 1.0, 'env:MAX_FUNDFLOW_POOL', 1000),
     'timeline':     ('L1', 1.0, 1.0, 'env:MAX_TIMELINE_POOL', 500),
-    'plate':        ('L2', 1.0, 1.0, 'fixed:200', 'n/a'),             # cls/hotplate, cls/plate (URL cache)
+    'plate':        ('L2', 1.0, 1.0, 'fixed:200', 'n/a'),             # cls/hotplate, cls/plate, 4 cls pools (URL cache)
     'news_url':     ('L3', 1.0, 1.0, 'n/a', 'n/a'),                   # 5 源 RSS URL (share cache{})
     'feed':         ('L3', 1.0, 1.0, 'fixed:100', 100),
     'announcement': ('L3', 1.0, 1.0, 'dedup', 500),

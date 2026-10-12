@@ -1,6 +1,6 @@
 # server.py 详细设计
 
-> **版本** v1.17 · **状态** 增量设计（★ v1.17 **溯源收口 + 引用时点约定**：上游 **PRD v0.9 → v0.10**（SAD v1.12 已对）；接口权威栏 **config v1.5 → v1.6 / cache v1.13 → v1.14 / metrics v1.7 → v1.8**、`stock_api.md` v1.3、**`market_api.md` v1.5 → v1.6**、**`cdp_engine.md` v1.2 → v1.3**、文末 `stream.md` v1.5；**无 BR 语义变更、无对外契约变更**；★ v1.16 事实性数值更正 + 溯源更正：4 面板 `max-age` 旧值 `8/120` → 现行 **`4/120`**（`quote` 于 v1.4 升 L0，`L1` 档位标注同步更正），全文件扫描共 **8 处**；上游 SAD v1.11 → v1.12；接口权威栏 `metrics.md` → v1.7 / `market_api.md` → v1.5 / 文末 `stream.md` → v1.5——**无 BR 语义变更、无对外契约变更**；★ v1.15 过时措辞更正 + 事实对齐：`feeds[].status` 同步落点 `API.md:499-511`；端锁定行 / §2.9.1 表尾注 / BR-SRV-22 / §9 / §10#7 措辞收口——**无 BR 语义变更、无对外契约变更**；★ v1.14 实现事实对齐：`SRV-T73` 超时余量（实测 15s）+ `join` 后 `is_alive` 断言已落地；溯源更正 **SAD v1.11 / PRD v0.9**；**P3a · RSS 条件请求 ETag / Last-Modified / 304**；P3a-r1 评审定向修 · P3a-r2 复审 P2 收口 · P7b 漂移回填 D-1/D-2 · **P8 对抗性盲审 F1–F7 契约化** · **P8 F8 契约化：feed 取数锁表有界收敛** · **P2-1 fail-safe 措辞收口 + 溯源更正** · **F8 并发变体测试契约（`SRV-T73`）+ `feed_fetch_acquire` 实现约束**；**最后一轮契约收口：`SRV-T73` 证伪面收窄 + 超时余量/线程结束断言**，**只增不改**）· **日期** 2026-09-18 · **作者/产出** task-decomposer
+> **版本** v1.20 · **状态** 增量设计（★ v1.20 **feeds 计数漂移修正（P7b-r1 · 2026-10-10）**：§3.1 `:720` 与 §5.1 `:1522` 的 `feeds` 计数由 **19 条 → 20 条**（v1.18 新增 `/finance/market_sentiment` 后漏改；代码事实：`_base_feed_entries` docstring = "20 healthz feed entries (5 RSS + 15 JSON/CDP)"，`server.py:1001-1046`）；**无 BR 语义变更、无对外契约变更**；★ v1.19 **计数收口（P3b 评审 P2-02 同批 · 2026-10-10）**：补 v1.18 漏改的**现行口径**计数——**8 处「4 面板/面板 4」→「5 面板」**（§1.5 `:102` / §2.1 `:177`·`:181` / §4.1 BR-SRV-1 `:803` / §4.6 BR-SRV-27 `:857` / §5.2 `:953` / §6.1 `:1835`·`:1843`）+ **3 处「18 JSON」→「19 JSON」**（§6.3 `:1877`；§9 `:2034` / §10#4 `:2088` 为验证额外发现）；**无 BR 语义变更、无对外契约变更**；★ v1.18 **market_sentiment 独立接口（P3a 详设增量 · 2026-10-10）**：新增 1 个 CDP JSON 端点 `GET /finance/market_sentiment`（shape=object；`_PANEL_HANDLERS` **4→5**、`_JSON_SHAPES` **18→19**、`_CACHE_AGE_DOMAINS` →`quote`、`feeds[]` **19→20**、首页 `json_apis` +1、`main()` 日志 +1）；`handle_finance_market` 剥离 `market_sentiment`（`data.pop` **且** `config._FINANCE_EXPECTED_KEYS` 删键，**两动作必须同时**）；**只增端点 + 从既有端点去 1 键**（端锁定 🟠；字段回退须 `API.md`/`README.md` 同步）。详设见 `doc/detailed/market_sentiment_独立接口.md`。**无其它 BR 语义变更**；**未改代码 / SAD / PRD / API.md / README.md / `.opencode`；`_PROGRESS.md` 同步。**；★ v1.17 **溯源收口 + 引用时点约定**：上游 **PRD v0.9 → v0.10**（SAD v1.12 已对）；接口权威栏 **config v1.5 → v1.6 / cache v1.13 → v1.14 / metrics v1.7 → v1.8**、`stock_api.md` v1.3、**`market_api.md` v1.5 → v1.6**、**`cdp_engine.md` v1.2 → v1.3**、文末 `stream.md` v1.5；**无 BR 语义变更、无对外契约变更**；★ v1.16 事实性数值更正 + 溯源更正：4 面板 `max-age` 旧值 `8/120` → 现行 **`4/120`**（`quote` 于 v1.4 升 L0，`L1` 档位标注同步更正），全文件扫描共 **8 处**；上游 SAD v1.11 → v1.12；接口权威栏 `metrics.md` → v1.7 / `market_api.md` → v1.5 / 文末 `stream.md` → v1.5——**无 BR 语义变更、无对外契约变更**；★ v1.15 过时措辞更正 + 事实对齐：`feeds[].status` 同步落点 `API.md:499-511`；端锁定行 / §2.9.1 表尾注 / BR-SRV-22 / §9 / §10#7 措辞收口——**无 BR 语义变更、无对外契约变更**；★ v1.14 实现事实对齐：`SRV-T73` 超时余量（实测 15s）+ `join` 后 `is_alive` 断言已落地；溯源更正 **SAD v1.11 / PRD v0.9**；**P3a · RSS 条件请求 ETag / Last-Modified / 304**；P3a-r1 评审定向修 · P3a-r2 复审 P2 收口 · P7b 漂移回填 D-1/D-2 · **P8 对抗性盲审 F1–F7 契约化** · **P8 F8 契约化：feed 取数锁表有界收敛** · **P2-1 fail-safe 措辞收口 + 溯源更正** · **F8 并发变体测试契约（`SRV-T73`）+ `feed_fetch_acquire` 实现约束**；**最后一轮契约收口：`SRV-T73` 证伪面收窄 + 超时余量/线程结束断言**，**只增不改**）· **日期** 2026-09-18 · **作者/产出** task-decomposer
 > **v1.17 变更（溯源收口 + 引用时点约定 · 只改文档，不改代码）**：① **【溯源收口】** 头部上游 **PRD v0.9 → v0.10**（SAD v1.12 已对）；「基础层/数据层接口权威」栏 **config v1.5 → v1.6 / cache v1.13 → v1.14 / metrics v1.7 → v1.8**（`stock_api.md` v1.3 维持）、**`market_api.md` v1.5 → v1.6**、**`cdp_engine.md` v1.2 → v1.3**（该处长期滞后：实测头部已 v1.3）；文末「共同构成」清单同步（config v1.6 / cache v1.14 / metrics v1.8 / stock_api v1.3 / market_api v1.6 / cdp_engine v1.3 / stream v1.5）。② **【引用时点约定（新增）】**「接口权威」栏（及文末「共同构成」清单）所列版本 = **本文最后一次同步时点的快照**；被引文档的**权威版本以其自身头部为准**——故该栏**落后一版不属漂移、无需每次追平**；**内容以被引文档为准，此栏仅用于定位**。**无 BR 语义变更 / 无对外契约变更 / 无接口变更**（v1.16 正文逐字保留）；**测试计数仍 75 / 偏差仍 45**；**未改代码 / SAD / PRD / API.md / README.md / `.opencode`；`_PROGRESS.md` 同步。**
 > **v1.16 变更（事实性数值更正 + 溯源更正 · 只改文档，不改代码）**：① **【事实性数值更正】4 CDP 面板的 `_cache_age` 旧值「`quote`（**L1**，**8/120**）」更正为「`quote`（**L0**，**4/120**）」**——依据 `_CACHE_AGE_DOMAINS` 把 4 面板（`/finance/market`、`/finance/timeline`、`/quotation/market`、`/market/timeline`）映射 `quote` 域，而 `config.DOMAIN_MATRIX` 的 `quote` 自 **v1.4 起升 L0** ⇒ `cache_policy('quote')['ttl']` = **盘中 4s / 非盘 120s**（实测旁证：非盘 `/finance/market` → `Cache-Control: public, max-age=120`；对外口径 `API.md` §6.1 `:619-631`）。**全文件扫描后共 8 处更正**：**`8/120` 数值 6 处**（§4.2 `BR-SRV-8b` / §5.8 `/stock/*` 行 / §5.8 面板行 / §8 `SRV-T43` / §10#22 / §11#8）+ **`L1` 档位误标 1 处**（§3.3 `_CACHE_AGE_DOMAINS` 注释）+ **面板旧兜底值 1 处**（§8 `SRV-T16`「面板 == 300」→「== `cache_policy('quote')['ttl']`（现行 4/120）」）；§5.8 表 `/stock/data`·`/stock/basic_info`（`quote` 域）与 `/stock/fundflow`·`/stock/timeline`（仍 L1）**拆为两行**以消歧。**v1.2 变更块 ⑦（`L1`）为历史快照，原文保留并加 v1.16 更正注（只增不删）。** ② **【溯源更正】** 头部上游 **SAD v1.11 → v1.12**（SAD v1.12 §9.12 已把面板 `max-age` 写准为 **4/120**）；接口权威栏同步本批：`metrics.md` **v1.6 → v1.7**、`market_api.md` **v1.3 → v1.5**、文末 `stream.md` **v1.4 → v1.5**。**无 BR 语义变更**（`quote` 档位本就是 L0，本次是让文字追上事实）/ **无对外契约变更 / 无接口变更 / 测试计数仍 75 / 偏差仍 45**；**未改代码 / PRD / API.md / README.md / `.opencode`；`stream.md` → v1.5、`metrics.md` → v1.7、`market_api.md` → v1.5、`_PROGRESS.md` 同步。**
 > **v1.15 变更（过时措辞更正 + 事实对齐 · 只改文档，不改代码）**：把 `doc/detailed/` 中**已过时**的「待编排层批准/同步」措辞，按**已发生的同步事实**更正为**已批准/已同步**——① **【头部端锁定行】** `feeds[].status` 取值修正〔待编排层批准/同步〕→ **✅ 已批准并同步（`API.md:499-511`）**；② **【§2.9.1 表尾注】**「同步权归编排层（本设计只落目标值 + §10#7 登记）」→ **✅ 已由编排层同步（`API.md:499-511`）**；变更日志已完成，删去"须走变更日志 + API.md 同步"的待办语气；③ **【BR-SRV-22】**（§4.5）「`feeds[].status` 取值修正按 §2.9.1（须编排层批准）」→ **✅ 已批准并同步（`API.md` §4 healthz 表 `:499-511`）**；④ **【§9 AC 追溯行】**「契约同步待编排层」→ **✅ 已完成（`API.md:499-511`）**；⑤ **【§10#7】**「须编排层批准 / 同步范围 = healthz 负载 + 首页 CDP 列 + API.md」→ **✅ 已批准并同步（`API.md:499-511`；三处同步完成）**。**无 BR 语义变更 / 无对外契约变更 / 无接口变更 / 测试计数仍 75 / 偏差仍 45**；**未改代码 / SAD / PRD / API.md / README.md / `.opencode`；`stream.md` → v1.4、`_PROGRESS.md` 同步。**
@@ -26,13 +26,13 @@
 > 基础层/数据层接口权威：`config.md` **v1.6**（★ v1.6：溯源更正 SAD v1.12 / PRD v0.10；无接口/常量/行为变更；★ v1.17 溯源收口：原记 v1.5） · `cache.md` **v1.14**（★ v1.17 溯源收口：原记 v1.13；v1.5 新增 `feed_cache_get_entry`；v1.6 扩 T-CACHE-32 负例 + 溯源；v1.7 标注 T-CACHE-32 已实现；v1.8 / F1+F5：feed 条目 +`fingerprint`/`last_modified`、`feed_cache_put` 返回写入条目；★ **v1.9 / F8：`feed_fetch_acquire`/`feed_fetch_release` 引用计数原语 + 双检措辞更正为 `feed_cache_get_entry`**；★ **v1.10 / P2-1：`last_modified` 读取 `.get(..., None)` fail-safe（legacy 条目 ⇒ `None` ⇒ 不发 `Last-Modified`、禁用 IMS）+ 溯源 PRD v0.8**；★ **v1.11：读侧 fail-safe 补全（缺 `xml` ⇒ 视同 miss；`time`/`expires_at` 以 `.get` 读取）+ `acquire` 先判空实现约束 + T-CACHE-36**；★ **v1.12：`''` 边界写死（合法但空 ⇒ 照常命中）+ 残缺降级 `log.warning` 去重（BR-CACHE-36）+ §10#29/#30 边界登记**；★ **v1.13：`_feed_degraded_warned`/`_warn_feed_degraded_once` 实现注（按原因去重）+ §10#30 改「已防御」（三处 `isinstance` 守卫）+ `_sweep_expired` 跳过非映射 + 溯源 SAD v1.11/PRD v0.9**）· `metrics.md` **v1.8**（★ v1.17 溯源收口：原记 v1.7；★ v1.4 / F3：注册 `http_304_total` → 20 名；★ v1.5：修正"`metrics.py` 零代码变更"自检句 + 溯源更新；★ v1.6：溯源更正 SAD v1.11 / PRD v0.9；★ v1.7：§3.2 owner 列补 `market_api`）· `stock_api.md` v1.3 · `market_api.md` **v1.6**（★ v1.17 溯源收口：原记 v1.5） · `cdp_engine.md` **v1.3**（★ v1.17 溯源收口：原记 v1.2；实测头部已 v1.3，为长期滞后项）
 > ★ **引用时点约定**：上列「接口权威」版本 = **本文最后一次同步时点的快照**；被引文档的**权威版本以其自身头部为准**——故该栏**落后一版不属漂移、无需每次追平**；**内容以被引文档为准，此栏仅用于定位**。
 > 跨模块约定（已锁定）：`doc/detailed/_PROGRESS.md` §B
-> 端锁定 🟠 STABLE（**不改路由、不改 API 签名**；仅 `/healthz` 只增字段 + `feeds[].status` 取值修正〔**✅ 已批准并同步：`API.md:499-511`**〕）
+> 端锁定 🟠 STABLE（★ v1.18：**新增 1 路由** `/finance/market_sentiment` + `/finance/market` **去 1 字段**〔字段为昨日新增、尚未对外冻结，属回退〕；其余**不改既有路由 / 不改 API 签名**；`/healthz` 只增字段 + `feeds[].status` 取值修正〔**✅ 已批准并同步：`API.md:499-511`**〕）
 
 ## 1. 模块职责与边界
 
 ### 1.1 职责（13 条）
 
-1. **路由分发（唯一入口）**：`RSSHandler._handle_request` 分派 `14 个 JSON 分支 + 5 个 RSS + / + /opml.xml + /healthz`；**shape 由 `_JSON_SHAPES` 路由表派生**（SAD §2.4「由路由表派生 shape、不写死数字」）。
+1. **路由分发（唯一入口）**：`RSSHandler._handle_request` 分派 `19 个 JSON 分支 + 5 个 RSS + / + /opml.xml + /healthz`；**shape 由 `_JSON_SHAPES` 路由表派生**（SAD §2.4「由路由表派生 shape、不写死数字」）。
 2. **统一异常边界 `_guard(fn, *, shape, ...)`**：任何 handler 异常**不冒泡**（R1），按 `shape ∈ {batch, object, rss, text}` 产出结构化降级体。
 3. **feed 缓存防击穿 + 双检**：`_get_or_fetch_feed` 只保留 **per-键** `_feed_fetch_locks[cache_key]` 锁；LRU / TTL / 清扫**全部委托** `cache.feed_cache_get_entry/feed_cache_put`（缓存机制归缓存层，裁决 #3）。★ **v1.10 / F8**：该锁表**不再直接读写**，改经 cache 层原语 `feed_fetch_acquire(cache_key)` / `feed_fetch_release(cache_key)`（`cache.md` BR-CACHE-35）——**引用计数归零即回收**，锁表规模收敛于**并发在飞的键数**（非累计见过的键数；BR-SRV-50）。
 4. **plate 三档 stagger 派生**（SAD §2.1 D-7 **明令保留**）：`_plate_ttls()` 从 `cache_policy('plate')['ttl']` 派生 `_STAGGER = max(3, ttl // 4)` 与三档 offset，**不得**把三块压成同一 TTL。
@@ -99,7 +99,7 @@ cdp_engine: 仅依赖 config/metrics；server 调用其函数（config.cdp_engin
 | `cache.FetchError` | 不单点 catch（由 `_guard` 兜底）：RSS → `rss` shape；其它 → 各自 shape |
 | `stock_api.handle_cls_*(codes, deadline=None, dropped=0) -> dict` | `_handle_stock_batch` 传 `dropped`（**不重复组装**，`_PROGRESS.md` §B 锁定） |
 | `market_api.handle_margin(market='99') -> dict` | 签名不变（调用点零改动） |
-| `cdp_engine.page_data(page) -> dict \| None` | 4 面板 handler 防御取数（A 类）；`timeline` 键缺失 → error 客体（**禁止裸 `null`**，R18 旁支） |
+| `cdp_engine.page_data(page) -> dict \| None` | 5 面板 handler 防御取数（A 类）；`timeline` 键缺失 → error 客体（**禁止裸 `null`**，R18 旁支） |
 | `cdp_engine.restart_window_snapshot() -> dict` | healthz `cdp` 字段 |
 | `cdp_engine.watchdog_restart_skip_reason(now=None) -> str \| None` | `_cdp_memory_watchdog` 的**唯一**决策；仅返回 `None` 时调 `full_chrome_restart()` |
 | `metrics.incr(name, n=1, key=None)` / `metrics.set_gauge` / `metrics.snapshot()` | `http_503_total` / `healthz_stale_total` / `healthz_inflight` / healthz `metrics` 字段 |
@@ -123,8 +123,9 @@ paths:
       responses:
         '200': {description: 健康（可能含 stale:true 的降级快照）}
         '503': {description: "body 缺 status / 含 error / status=='degraded'（★ v1.2：不再仅判 degraded；均计 http_503_total）"}
-  '/finance/market':                  {get: {responses: {'200': {description: 'object（含真实数据）或降级体 {"error": "Chrome CDP not available…"}（★ v1.3 / N1：降级体亦 200）'}}}}   # shape=object · CDP A 类
+  '/finance/market':                  {get: {responses: {'200': {description: 'object（含真实数据）或降级体 {"error": "Chrome CDP not available…"}（★ v1.3 / N1：降级体亦 200）'}}}}   # shape=object · CDP A 类；★ v1.18：成功体不再含 market_sentiment（已拆独立端点）
   '/finance/timeline':                {get: {responses: {'200': {description: 'object（timeline 缺失 → {"error":...}，仍 200）'}}}}  # shape=object · CDP A 类
+  '/finance/market_sentiment':        {get: {responses: {'200': {description: 'object（market_sentiment 原样）或降级体 {"error": "..."}（均 200）'}}}}  # shape=object · CDP A 类 ★ v1.18 新增
   '/quotation/market':                {get: {responses: {'200': {description: object}}}}   # shape=object · CDP A 类
   '/market/timeline':                 {get: {responses: {'200': {description: object}}}}   # shape=object · CDP A 类
   '/cls/hotplate':                    {get: {responses: {'200': {description: 'object（分区 error 客体；三分区全失败 → 顶层补 error，**仍 200**）'}}}}  # shape=object
@@ -173,11 +174,11 @@ paths:
 | 未知路径 | `404` + 文本说明 |
 | 过载（主端口 inflight 达上限） | `503` + `{"error":"server busy"}`，**立即、不排队**（**真实 503 之一**） |
 | 流端口连接数 ≥ `MAX_STREAM_CONNS`(100) | `503` + `{"error":"too many stream connections"}`（`stream._serve_sse`；**真实 503 之二**） |
-| **业务端点降级**（4 面板 `{'error':…}` / `/cls/hotplate` 全分区失败 / `/market/margin` `_error` / guard 捕获异常后的 `{'error':…}` / `/cls/plate` 分区降级 / batch 逐码 `null`） | **`200` + 结构化降级体** ★ v1.3（**N1 回退**：状态码**不由 payload 内容决定**；`_send_json_shape` 恒 200，降级体**可缓存**——按域 TTL 拿 `Cache-Control: public, max-age=<domain ttl>`） |
+| **业务端点降级**（5 面板 `{'error':…}` / `/cls/hotplate` 全分区失败 / `/market/margin` `_error` / guard 捕获异常后的 `{'error':…}` / `/cls/plate` 分区降级 / batch 逐码 `null`） | **`200` + 结构化降级体** ★ v1.3（**N1 回退**：状态码**不由 payload 内容决定**；`_send_json_shape` 恒 200，降级体**可缓存**——按域 TTL 拿 `Cache-Control: public, max-age=<domain ttl>`） |
 | `/healthz` body 缺 `status` / 含 `error` / `status=='degraded'` | `503` ★ v1.2（计 `http_503_total`）。**该 503 属 healthz 端点自身语义，不构成业务端点先例**（v1.3） |
 | 上游**部分**失败（批量） | `200`；批量 → 逐码 `null` ∧ `_errors[code]`；单体 → error 客体；RSS → 降级 feed |
 | **RSS 条件请求命中**（`If-None-Match` 弱比较匹配 / `If-Modified-Since ≥ Last-Modified`）★ v1.5 | **`304`**（由 `_send_not_modified` 生成）：**无 body**、**无 `Content-Encoding`**、无 `Content-Length`；**带 `ETag` + `Cache-Control` + `Vary`**；**不写 feed 缓存**；`HEAD` 同（BR-SRV-41） |
-| CDP 不可用（面板 4） | `200` + `{"error":"…"}`（★ v1.3：降级体亦 200）；`/stock/f10` → `200` 逐码 `null` ∧ `_errors[code]='cdp_unavailable'`（**非** error 客体） |
+| CDP 不可用（面板 5） | `200` + `{"error":"…"}`（★ v1.3：降级体亦 200）；`/stock/f10` → `200` 逐码 `null` ∧ `_errors[code]='cdp_unavailable'`（**非** error 客体） |
 | handler 抛异常（guard 捕获） | `200`；`object`/`text` → `{'error': str(exc)}`（`/healthz` 例外 → 503） |
 
 ### 2.2 `_JSON_SHAPES`（shape 派生表，**唯一权威**）
@@ -185,19 +186,21 @@ paths:
 ```python
 _SHAPES = frozenset({'batch', 'object', 'rss', 'text'})
 
-# 14 个 JSON 分支 → shape。新增端点必须在此登记，否则 _handle_request 走 404。
+# 19 个 JSON 分支 → shape。新增端点必须在此登记，否则 _handle_request 走 404。
 _JSON_SHAPES = {
     '/finance/market': 'object', '/finance/timeline': 'object',
+    '/finance/market_sentiment': 'object',                       # ★ v1.18 新增
     '/quotation/market': 'object', '/market/timeline': 'object',
     '/stock/data': 'batch', '/stock/fundflow': 'batch', '/stock/timeline': 'batch',
     '/stock/f10': 'batch', '/stock/basic_info': 'batch', '/stock/announcement': 'batch',
     '/cls/hotplate': 'object', '/cls/plate': 'object',
     '/ths/longhu': 'text', '/market/margin': 'object',
 }
-assert len(_JSON_SHAPES) == 14      # 结构护栏：再次漏数即导入期失败（修 P1-6 的复发）
+assert len(_JSON_SHAPES) == 19      # 结构护栏：再次漏数即导入期失败（修 P1-6 的复发）★ v1.18：18 → 19
 
 # ★ v1.2：路由由表驱动，shape 一律从 _JSON_SHAPES 读（不再写死字面量）
 _PANEL_HANDLERS = {'/finance/market': handle_finance_market,
+                   '/finance/market_sentiment': handle_finance_market_sentiment,   # ★ v1.18：4 → 5
                    '/finance/timeline': handle_finance_timeline,
                    '/quotation/market': handle_cls_quotation,
                    '/market/timeline': handle_market_timeline}
@@ -210,11 +213,11 @@ assert _JSON_DISPATCHED_PATHS == frozenset(_JSON_SHAPES)
 ```
 
 - **`_send_json_shape(path, fn, ...)`（v1.2；★ v1.3 / N1 简化）**：`payload = _guard(fn, shape=_JSON_SHAPES[path])` → `_send_json(payload, write_body=..., cache=cache)`（**恒 200**，状态码**不**按 payload 内容判定）；**路由不再自行发明 shape 字面量**。v1.2 的 `_json_payload_has_data` 分支与 `503` 判定**已删除**（降级体恢复可缓存）。
-- **分组视图**（供代码阅读，不参与运行；**表内合计必须 == 14**）：
-  - `object`（**7，表内**）：4 面板 + `/cls/hotplate` + `/cls/plate` + `/market/margin`
+- **分组视图**（供代码阅读，不参与运行；**表内合计必须 == 19**）：
+  - `object`（**12，表内**）：4 面板 + `/finance/market_sentiment` + `/cls/hotplate` + `/cls/plate` + 4 CLS 池（`/cls/up_pool`·`/cls/continuous_up_pool`·`/cls/up_open_pool`·`/cls/down_pool`）+ `/market/margin`
   - `batch`（6）：`/stock/*`
   - `text`（1）：`/ths/longhu`
-  - **`/healthz` 复用 `object` shape 但 `≠` 在 `_JSON_SHAPES` 内**（见 §2.6；把它加进表 ⇒ `assert len(_JSON_SHAPES) == 14` 导入期失败）
+  - **`/healthz` 复用 `object` shape 但 `≠` 在 `_JSON_SHAPES` 内**（见 §2.6；把它加进表 ⇒ `assert len(_JSON_SHAPES) == 19` 导入期失败）
   - `rss`（5）：`ROUTES` 的 5 个路径（不在 `_JSON_SHAPES` 中，由 `_serve_feed` 使用）
 - `_handle_stock_batch` **断言** `_JSON_SHAPES[path] == 'batch'`（`assert`，导入/调用期暴露误配）。
 
@@ -420,8 +423,9 @@ class BoundedThreadPoolServer(ThreadingHTTPServer):
 
 | # | 路径 | handler | shape | 说明 |
 |---|------|---------|-------|------|
-| 1 | `/finance/market` | `handle_finance_market(feed_url=None)` | object | CDP A；`page_data(page)` 防御取数 |
+| 1 | `/finance/market` | `handle_finance_market(feed_url=None)` | object | CDP A；`page_data(page)` 防御取数；★ v1.18：剥离 `market_sentiment`（`data.pop`） |
 | 2 | `/finance/timeline` | `handle_finance_timeline()` | object | CDP A；`timeline is None → {'error':'timeline unavailable'}`（**禁止裸 null**） |
+| 2′ | `/finance/market_sentiment` | `handle_finance_market_sentiment()` | object | ★ v1.18 CDP A；`market_sentiment is None → {'error':'market_sentiment unavailable'}`（**禁止裸 null**） |
 | 3 | `/quotation/market` | `handle_cls_quotation(feed_url=None)` | object | CDP A |
 | 4 | `/market/timeline` | `handle_market_timeline()` | object | CDP A；同上禁止裸 null |
 | 5 | `/stock/data` | `handle_cls_stock_batch`（stock_api） | batch | 无 pool/无终点缓存 |
@@ -430,18 +434,20 @@ class BoundedThreadPoolServer(ThreadingHTTPServer):
 | 8 | `/stock/f10` | `handle_cls_f10` | batch | CDP A′（`_errors='cdp_unavailable'`） |
 | 9 | `/stock/basic_info` | `handle_cls_basic_infos` | batch | — |
 | 10 | `/stock/announcement` | `handle_cls_announcement` | batch | — |
-| 11 | `/cls/hotplate` | `handle_cls_hotplate(feed_url=None)` | object | **≤3 并发**；分区 error 客体 + **全分区失败补顶层 `error`**；3 档 stagger |
-| 12 | `/cls/plate` | `handle_cls_plate(code)` | object | **≤3 并发**；3 档 stagger；缺 code 在路由层 400 |
-| 13 | `/ths/longhu` | `handle_ths_longhu()` | text | GBK × **2 URL 并发**走 `fetch_json` |
-| 14 | `/market/margin` | `handle_margin(market)`（market_api） | object | 签名不变 |
-| 15–19 | 5 RSS | `handle_cls_telegraph` / `handle_eastmoney_kuaixun` / `handle_ths_kuaixun` / `handle_jin10_flash` / `handle_wallstreetcn_live`（均 `(feed_url=None)`） | rss | `ROUTES` 表 |
+| 11–14 | 4 CLS 池（`/cls/up_pool`·`/cls/continuous_up_pool`·`/cls/up_open_pool`·`/cls/down_pool`） | `handle_cls_pool(pool_type)` | object | 表驱动（`_POOL_HANDLERS`）；单 URL 直连；`data` 非 list ⇒ fail-loud（P1-02） |
+| 15 | `/cls/hotplate` | `handle_cls_hotplate(feed_url=None)` | object | **≤3 并发**；分区 error 客体 + **全分区失败补顶层 `error`**；3 档 stagger |
+| 16 | `/cls/plate` | `handle_cls_plate(code)` | object | **≤3 并发**；3 档 stagger；缺 code 在路由层 400 |
+| 17 | `/ths/longhu` | `handle_ths_longhu()` | text | GBK × **2 URL 并发**走 `fetch_json` |
+| 18 | `/market/margin` | `handle_margin(market)`（market_api） | object | 签名不变 |
+| 19–23 | 5 RSS | `handle_cls_telegraph` / `handle_eastmoney_kuaixun` / `handle_ths_kuaixun` / `handle_jin10_flash` / `handle_wallstreetcn_live`（均 `(feed_url=None)`） | rss | `ROUTES` 表 |
 
 **本模块 handler 的既有签名（仅内部实现变化，签名不变）**
 
 | 签名 | 变化 |
 |------|------|
-| `handle_finance_market(feed_url=None) -> dict` | 内部：`data = cdp_engine.page_data(page)`；`None → {'error':'Finance page not initialized.'}`；拿到 dict 后 `ws_raw = data.pop('__ws__', None)` / `data.pop('timeline', None)` 合法（已判定 dict） |
+| `handle_finance_market(feed_url=None) -> dict` | 内部：`data = cdp_engine.page_data(page)`；`None → {'error':'Finance page not initialized.'}`；拿到 dict 后 `ws_raw = data.pop('__ws__', None)` / `data.pop('timeline', None)` / ★ v1.18 `data.pop('market_sentiment', None)` 合法（已判定 dict） |
 | `handle_finance_timeline() -> dict` | 内部：`data = page_data(page)`；`None → {'error': …}`；`tl = data.get('timeline')`；`tl is None → {'error': 'timeline unavailable'}`（**修 R18 旁支**） |
+| `handle_finance_market_sentiment() -> dict` | ★ v1.18 新增：`data = page_data(page)`；`None → {'error':'Finance page not initialized.'}`；`ms = data.get('market_sentiment')`；`ms is None → {'error':'market_sentiment unavailable'}`（**修 R18**）；成功**原样透传** |
 | `handle_market_timeline() -> dict` | 同 `handle_finance_timeline`（页面 = `cls_quotation`） |
 | `handle_cls_quotation(feed_url=None) -> dict` | 同 `handle_finance_market`（无 `__ws__`） |
 | `handle_cls_hotplate(feed_url=None) -> dict` | `ttl = base + stagger × idx`（§2.9）；3 分区经 `_fetch_concurrent` **≤3 并发**（SAD §4.1）；分区 error 客体 + 全失败补顶层 `error`（BR-SRV-31） |
@@ -458,7 +464,7 @@ def _policy_snapshot() -> dict:
     """{domain: cache_policy(domain)}，domain 枚举自 config.DOMAIN_MATRIX（sorted）。"""
 
 def _base_feed_entries(base_url) -> list[dict]:
-    """healthz feeds[] 的 15 个基础条目（5 RSS + 10 JSON/CDP），status 取 §2.9.1 表。"""
+    """healthz feeds[] 的 20 个基础条目（5 RSS + 15 JSON/CDP），status 取 §2.9.1 表。"""
 
 def _remember_health_snapshot(payload) -> None:
     """深拷贝（json round-trip，不用 copy 模块）后存入 _health_last_snapshot。"""
@@ -553,7 +559,7 @@ def _fetch_concurrent(specs) -> dict:
 
 ```python
 _SHAPES = frozenset({'batch', 'object', 'rss', 'text'})
-_JSON_SHAPES = {...}                     # §2.2，14 项
+_JSON_SHAPES = {...}                     # §2.2，18 项
 _DEFAULT_AGE_DOMAIN = 'f10'              # _cache_age 未登记路径的兜底域（L4、factor 1.0 ⇒ 恒 300，见 §10#2）
 _LHBTABLE_URL     = 'https://data.10jqka.com.cn/ifmarket/lhbtable'
 _LHBTABLE_HEADERS = {'User-Agent': '…Chrome/120.0.0.0 Safari/537.36',
@@ -588,6 +594,7 @@ _FEED_KEY_SEP     = '\x00'                # ★ v1.9 / F2：feed 缓存键 path/
 |------|------------|----------------|------------------|
 | `/cls/telegraph` `/eastmoney/kuaixun` `/ths/kuaixun` `/jin10/flash` `/wallstreetcn/live` | configured | `configured`（不变） | B |
 | `/finance/market` | requires_chrome_cdp | `requires_chrome_cdp`（不变） | A |
+| `/finance/market_sentiment` | （新增） | `requires_chrome_cdp` | A（★ v1.18 新增条目，feeds 19→20） |
 | `/quotation/market` | requires_chrome_cdp | `requires_chrome_cdp`（不变） | A |
 | `/stock/data` | requires_chrome_cdp | **`configured`** ★修正 | B |
 | `/stock/fundflow` | configured | `configured`（不变） | B |
@@ -710,7 +717,7 @@ healthz_payload:
                                      #   （guard 捕获异常时体为 {'error': …}，无 status ⇒ 503，不再假健康）
   cache_ttl: <int>                   # 既有；★取值改 cache_policy('feed')['ttl']（盘中 30 / 非盘中 180）
   request_timeout: <int>             # 既有；REQUEST_TIMEOUT（10）
-  feeds:                             # 既有；15 条，字段集合不变
+  feeds:                             # 既有；20 条，字段集合不变
     - name: <str>                    # 既有
       path: <str>                    # 既有
       url: <str>                     # 既有（base_url + path）
@@ -754,10 +761,11 @@ ROUTES:                                          # 既有，5 个 RSS
   '/cls/telegraph': {handler: handle_cls_telegraph, name: 'CLS Telegraph (财联社电报)', title: 财联社电报,
                      link: 'https://www.cls.cn/telegraph', description: 财联社实时快讯}
   '/eastmoney/kuaixun': {...}  '/ths/kuaixun': {...}  '/jin10/flash': {...}  '/wallstreetcn/live': {...}
-_JSON_SHAPES:                                    # §2.2，14 项（object×8 / batch×6 / text×1）
+_JSON_SHAPES:                                    # §2.2，19 项（object×12 / batch×6 / text×1）★ v1.18：18→19
 _SHAPES: [batch, object, rss, text]
 _CACHE_AGE_DOMAINS:                              # ★ 新增：_cache_age 的 path → domain 映射（唯一权威）
   '/finance/market': quote    '/finance/timeline': quote        # ★ v1.2：面板 = 实时行情面（**非** 300）；★ v1.16 更正档位：quote 于 v1.4 升 L0（现行 4/120，原写 L1 系旧值）
+  '/finance/market_sentiment': quote                            # ★ v1.18 新增（与 /finance/timeline 同族）
   '/quotation/market': quote  '/market/timeline': quote         # ★ v1.2
   '/stock/data': quote        '/stock/basic_info': quote
   '/stock/fundflow': fundflow '/stock/timeline': timeline
@@ -792,7 +800,7 @@ _max_inflight: MAX_INFLIGHT if max_inflight is None else max_inflight
 
 | 编号 | 规则 | 依据 |
 |------|------|------|
-| **BR-SRV-1** | 分发顺序（固定）：`/` → `/opml.xml` → `/healthz` → `_JSON_SHAPES` 的 `batch` 六分支 → `object` 分支（4 面板 + hotplate + plate + margin）→ `text`（longhu）→ `ROUTES`（rss）→ `send_error(404)`。**顺序即优先级**，不得重排 | 现状 + §2.2 |
+| **BR-SRV-1** | 分发顺序（固定）：`/` → `/opml.xml` → `/healthz` → `_JSON_SHAPES` 的 `batch` 六分支 → `object` 分支（5 面板 + 4 CLS 池（`/cls/up_pool`·`/cls/continuous_up_pool`·`/cls/up_open_pool`·`/cls/down_pool`）+ hotplate + plate + margin）→ `text`（longhu）→ `ROUTES`（rss）→ `send_error(404)`。**顺序即优先级**，不得重排 | 现状 + §2.2 |
 | **BR-SRV-2** | `shape` **只**从 `_JSON_SHAPES` 派生；任何新增 JSON 分支未登记 → 走 404（**不静默当 object**） | SAD §2.4（P1-6 防复发） |
 | **BR-SRV-3** | `_guard` 捕获 `Exception`（非 `BaseException`）；`batch` 异常 ⇒ 全码 `null` + `_errors[code]='upstream_error'`；`object`/`text` ⇒ `{'error': str(exc)}`；`rss` ⇒ `generate_error_rss`。**任何 handler 异常都不得穿透 `do_GET`/`do_HEAD`** | R1 / AC-S1 |
 | **BR-SRV-4** | `_guard` **不吞**写入阶段断连异常（写入在 guard 之后）；`do_GET`/`do_HEAD` 以 `except OSError` 吞掉（★ v1.2 由 `BrokenPipeError`/`ConnectionResetError` 扩为 `OSError`，含 `TimeoutError`/流端口 parity） | 现状保留（v1.2 扩容） |
@@ -846,7 +854,7 @@ _max_inflight: MAX_INFLIGHT if max_inflight is None else max_inflight
 |------|------|------|
 | **BR-SRV-25** | inflight 达 `MAX_INFLIGHT` ⇒ **立即 503**（`{"error":"server busy"}`）+ `metrics.incr('http_503_total')`；**不排队**、不等待；撤销负载后 5s 内恢复 200（无残留准入） | AC-E8 / S5 |
 | **BR-SRV-26** | `_cdp_memory_watchdog`：`time.sleep(CDP_RESTART_INTERVAL)` → `reason = cdp_engine.watchdog_restart_skip_reason()`；`reason is not None` ⇒ `log.info('…skipped (%s)', reason)` + `continue`（**本轮跳过、顺延下一周期、不累积**）；否则 `log.info(...)` + `full_chrome_restart()`；`except Exception` 仅日志 | ADR-012 / R19 |
-| **BR-SRV-27** | 4 面板 handler（A 类）**只经** `cdp_engine.page_data(page)` 取数；`None` ⇒ `{'error': …}`；`timeline` 键为 `None` ⇒ `{'error': 'timeline unavailable'}`（**禁止裸 `null`**）；**删除**对 `page.get_data()` 的直接 `.pop/.get` 链 | R18 / AC-S4 |
+| **BR-SRV-27** | 5 面板 handler（A 类）**只经** `cdp_engine.page_data(page)` 取数；`None` ⇒ `{'error': …}`；`timeline` 键为 `None` ⇒ `{'error': 'timeline unavailable'}`（**禁止裸 `null`**）；**删除**对 `page.get_data()` 的直接 `.pop/.get` 链 | R18 / AC-S4 |
 | **BR-SRV-28** | 5 个 RSS handler 的 `ttl` 一律 `cache_policy('news_url')['ttl']`；`fetch_json` 调用点**签名零改动**（`encoding` 默认 utf-8） | ADR-001 / `cache.md` §2.6#1–#5 |
 | **BR-SRV-29** | 启动日志的 `Cache TTL` 读 `cache_policy('feed')['ttl']`（删 `CACHE_TTL` 后不得留断链）；`main()` 中 `_cdp_memory_watchdog` 依赖的 import 与 `config.cdp_engine` 槽语义不变 | 现状 + Q3 |
 | **BR-SRV-30** | `/cls/hotplate`（3 分区）、`/cls/plate`（3 段）、`/ths/longhu`（2 URL）的多上游请求**一律**经 `_get_fanout_executor()`（`max_workers=_FANOUT_MAX_WORKERS=3`）**≤3 并发展开**；单端点耗时 = `max(单次取数)` 而非 `sum`，上界 = 一次 `fetch_json` ≤ `REQUEST_TIMEOUT`(10s) ⇒ **单请求 ≤15s（AC-E2）**。**禁止**多上游串行累加（SAD §4.1 明令本轮修） | SAD §4.1 / **AC-E2**（修 P1-2） |
@@ -942,7 +950,7 @@ def _handle_request(self, write_body=True):
                         json.dumps(payload, ensure_ascii=False, indent=2),
                         cache=False, write_body=write_body); return
 
-    # ── 4 面板（object）— handler 与 shape 均取自派发表 ────────
+    # ── 5 面板（object）— handler 与 shape 均取自派发表 ────────
     if path in _PANEL_HANDLERS:
         self._send_json_shape(path, _PANEL_HANDLERS[path], write_body=write_body); return
 
@@ -951,7 +959,7 @@ def _handle_request(self, write_body=True):
         self._handle_stock_batch(parsed, _STOCK_BATCH_HANDLERS[path],
                                  write_body=write_body, path=path); return
 
-    # ── 其余 4 个 JSON 分支 ─────────────────────────────────────
+    # ── 其余 8 个 JSON 分支（4 CLS 池 + hotplate + plate + longhu + margin）─
     if path == '/cls/hotplate':
         self._send_json_shape(path, handle_cls_hotplate, write_body=write_body); return
     if path == '/cls/plate':
@@ -982,7 +990,7 @@ def _handle_request(self, write_body=True):
 ```
 
 - `_STOCK_BATCH_HANDLERS` 与 `_JSON_SHAPES` 的 `batch` 六项**必须同集合**（`assert ...`，导入期）；`_JSON_DISPATCHED_PATHS == frozenset(_JSON_SHAPES)` 亦为导入期断言（新增表项必须有分支）。
-- `_send_json(data, write_body=True, cache=True)`（★ v1.3：**无 `status` 形参**，恒 200）；`_send_json_shape` 是 7 个 object JSON 分支的唯一出口（shape 从表读；**恒 200 + 原样降级体，且 `cache=cache` ⇒ 降级体按域 TTL 可缓存**）；`/ths/longhu` 仍走 `_send_text`（text shape，`cache=False`）。
+- `_send_json(data, write_body=True, cache=True)`（★ v1.3：**无 `status` 形参**，恒 200）；`_send_json_shape` 是 11 个 object JSON 分支的唯一出口（shape 从表读；**恒 200 + 原样降级体，且 `cache=cache` ⇒ 降级体按域 TTL 可缓存**）；`/ths/longhu` 仍走 `_send_text`（text shape，`cache=False`）。
 
 ### 5.3 `_handle_stock_batch`（dropped 注入）
 
@@ -1511,7 +1519,7 @@ def _remember_health_snapshot(payload):
 
 
 def build_health_payload(base_url, check_sources=False):
-    feeds = _base_feed_entries(base_url)                              # 15 条（§2.9.1 修正后 status）
+    feeds = _base_feed_entries(base_url)                              # 20 条（§2.9.1 修正后 status）
     status = 'ok'
 
     if check_sources:
@@ -1790,7 +1798,7 @@ def _send_error(self, msg, write_body=True):                             # ★ �
 | `/market/margin` | L4（300） | **600 / 600**（变更） | 与 margin 域 TTL 对齐 |
 | `/ths/longhu` | L4（300） | 300（不变） | longhu 域 |
 | 5 RSS | L3（30 / 180） | 30 / 180（不变） | ★ **v1.9 / F4：`feed` 域**（原 `news_url`；数值不变、只换 authority）；★ v1.5：同一 max-age 亦用于 304（与 200 同值），并新增 `ETag`/`Last-Modified` 校验器；★ v1.9 / F1：`Last-Modified` = 表示变更时刻 |
-| **面板 4**（`/finance/market` `/finance/timeline` `/quotation/market` `/market/timeline`） | L4（300） | **4 / 120**（★ v1.2 变更；★ v1.16 更正：`quote` 于 v1.4 升 L0 ⇒ 8/120 → 4/120） | 注册到 `quote` 域（实时行情面，**不再**落 300s 兜底） |
+| **面板 5**（`/finance/market` `/finance/timeline` `/quotation/market` `/market/timeline` `/finance/market_sentiment`） | L4（300） | **4 / 120**（★ v1.2 变更；★ v1.16 更正：`quote` 于 v1.4 升 L0 ⇒ 8/120 → 4/120；★ v1.18：`/finance/market_sentiment` 并入） | 注册到 `quote` 域（实时行情面，**不再**落 300s 兜底） |
 | `/healthz` / `/` / `/opml.xml` | L4（300） | 300（不变） | `_DEFAULT_AGE_DOMAIN='f10'`（L4 恒 300）；未登记路径现仅此三项 |
 | 请求派生 Host（`PUBLIC_BASE_URL` 未设）的 feed/opml | `public` | **`private` + `Vary`**（★ v1.2） | S2-3 防共享缓存串号 |
 
@@ -1824,7 +1832,7 @@ def _send_error(self, msg, write_body=True):                             # ★ �
 | 未知路径 | 兜底 | 404 | 文本 | — |
 | 过载（inflight ≥ `MAX_INFLIGHT`） | `process_request` | 503 | `{"error":"server busy"}` | `http_503_total++`（**真实 503 ①**） |
 | 流端口连接数 ≥ `MAX_STREAM_CONNS` | `stream._serve_sse` | 503 | `{"error":"too many stream connections"}` | `http_503_total++`（**真实 503 ②**，见 `stream.md`） |
-| **业务端点降级体**（4 面板 / hotplate 全失败 / margin `_error` / guard 捕获体 / plate 分区降级） | `_guard` → `_send_json_shape` | **200** ★ v1.3（N1 回退） | payload 原样（含 `{'error':…}` / `_error` 客体）；`_send_json_shape` 以 `cache=True` 发送 ⇒ **按域 TTL 可缓存** | — |
+| **业务端点降级体**（5 面板 / hotplate 全失败 / margin `_error` / guard 捕获体 / plate 分区降级） | `_guard` → `_send_json_shape` | **200** ★ v1.3（N1 回退） | payload 原样（含 `{'error':…}` / `_error` 客体）；`_send_json_shape` 以 `cache=True` 发送 ⇒ **按域 TTL 可缓存** | — |
 | `/healthz` body 缺 `status` 或含 `error` | `_handle_request` | **503** ★ v1.2（**healthz 自身语义**） | payload 原样 | `http_503_total++`（**真实 503 ③**） |
 | 上游失败（批量） | handler → `_errors` | 200 | 逐码 `null` ∧ `_errors[code] ∈ KINDS` | `upstream_fail_total{kind}`（stock_api/cache） |
 | 上游失败（单体/面板/工具） | handler 返回 error 客体 | 200 | `{"error": …}` 或 `_error` 枚举（margin） | 同上 |
@@ -1832,7 +1840,7 @@ def _send_error(self, msg, write_body=True):                             # ★ �
 | 上游失败（`/cls/hotplate` 部分分区） | handler 仅失败分区 | 200 | 失败分区为 `{'error':…}`，其余正常；**无顶层 `error`**、无 `hot_plates` | 同上 |
 | 上游失败（RSS） | `rss` shape | 200 | `generate_error_rss`（合法 feed + 诊断 item） | 同上；★ v1.9 / F1：`last_modified=None` ⇒ 不发 `Last-Modified` |
 | **RSS 条件请求命中（5 feed）** ★ v1.5 | `_send_not_modified` | **304** | 无 body / 无 `Content-Encoding`/`Content-Length`/`Content-Type`；带 `ETag`+`Cache-Control`+`Vary` | ★ v1.9 / F3：`http_304_total++`（**每次 304 单点计数**） |
-| CDP 不可用（面板 4） | `page_data → None` | **200** ★ v1.3（N1 回退） | `{"error":"…"}` | — |
+| CDP 不可用（面板 5） | `page_data → None` | **200** ★ v1.3（N1 回退） | `{"error":"…"}` | — |
 | CDP 不可用（`/stock/f10`） | `FetchError('cdp_unavailable')` | 200 | 逐码 `null` ∧ `_errors[code]='cdp_unavailable'` | `upstream_fail_total{cdp_unavailable}` |
 | healthz 准入失败 | `_health_sem.acquire` | 200 或 503（依 `payload['status']`） | 上次快照 + `stale:true` | `healthz_stale_total++` |
 | healthz 单源超时 | `_run_health_checks` | 200/503 | `feeds[].status='timeout'` + `error='timeout'`，`status='degraded'` | — |
@@ -1866,7 +1874,7 @@ def _send_error(self, msg, write_body=True):                             # ★ �
 
 | 端点 | 是否受 `_guard` 保护 | 说明 |
 |------|--------------------|------|
-| 14 个 JSON 分支 | ✅ | `batch`/`object`/`text` 三 shape |
+| 19 个 JSON 分支 | ✅ | `batch`/`object`/`text` 三 shape |
 | 5 个 RSS | ✅ | `rss` shape |
 | `/healthz` | ✅（额外加固） | `object` shape（SAD 未强制，但 healthz 自身必须总函数） |
 | `/`、`/opml.xml` | ❌（**不纳入**） | 纯内存字符串拼接（无 IO、无外部数据），AC-S1 的注入故障（上游超时/非法响应/CDP 无数据）不可达；登记见 §10#4 |
@@ -1934,8 +1942,8 @@ def _send_error(self, msg, write_body=True):                             # ★ �
 
 | 用例 | 步骤 / 断言（精确） | 覆盖 AC |
 |------|-------------------|---------|
-| **SRV-T1** `_JSON_SHAPES` 完整且 =14 | `assert len(_JSON_SHAPES) == 14`；`{p for p,s in _JSON_SHAPES.items() if s=='batch'} == set(_STOCK_BATCH_HANDLERS)`；`_SHAPES == {'batch','object','rss','text'}` | S1（防漏数复发） |
-| **SRV-T2** guard 全覆盖矩阵 | 对 14 分支 + 5 RSS 逐个 patch handler 抛 `RuntimeError('boom')` ⇒ 断言：batch 分支返回 `{<每个请求码>: None, '_errors': {code:'upstream_error'}, …}`（含 `_truncated/_dropped_count` 若 dropped>0）；object/text 分支 `{'error':'boom'}`；RSS 分支为合法 XML（`ET.fromstring` 可解析）且含诊断 item；**进程存活、无异常冒泡** | **S1 / A5 / S4** |
+| **SRV-T1** `_JSON_SHAPES` 完整且 =19 | `assert len(_JSON_SHAPES) == 19`（★ v1.18：18→19）；`{p for p,s in _JSON_SHAPES.items() if s=='batch'} == set(_STOCK_BATCH_HANDLERS)`；`_SHAPES == {'batch','object','rss','text'}` | S1（防漏数复发） |
+| **SRV-T2** guard 全覆盖矩阵 | 对 19 分支 + 5 RSS 逐个 patch handler 抛 `RuntimeError('boom')` ⇒ 断言：batch 分支返回 `{<每个请求码>: None, '_errors': {code:'upstream_error'}, …}`（含 `_truncated/_dropped_count` 若 dropped>0）；object/text 分支 `{'error':'boom'}`；RSS 分支为合法 XML（`ET.fromstring` 可解析）且含诊断 item；**进程存活、无异常冒泡** | **S1 / A5 / S4** |
 | **SRV-T3** guard 不吞 KeyboardInterrupt | patch handler 抛 `KeyboardInterrupt` ⇒ 异常**穿透**（`assertRaises`） | S1（边界口径） |
 | **SRV-T4** 批量保留键（dropped 注入） | 70 码请求（patch handler 记录 `dropped` 实参）⇒ handler 收到 `codes` 长度 50、`dropped==20`；响应含 `_truncated is True` ∧ `_dropped_count == 20`；**50 码时两键均不存在** | **A9** |
 | **SRV-T5** 批量 handler 不被重复组装 | patch `build_batch_response`（计数）⇒ 仅由 handler 调用（server 直调计数 == 0）；`_guard` 仅在**异常**时调用 1 次 | A9 / 职责边界 |
@@ -1958,10 +1966,11 @@ def _send_error(self, msg, write_body=True):                             # ★ �
 | **SRV-T22** healthz 不污染业务池 + 队列有界 | 10 并发 `?check=1`（上游慢 5s）+ 同时业务请求 ⇒ 业务 P95 劣化 ≤50%；`server.executor` 无 healthz 任务；**`_health_executor._work_queue.qsize() ≤ 20`**（= 5 批 × 5 源 − 5 worker） | **S8** |
 | **SRV-T23** healthz 准入失败不刷快照 | 先成功一次（快照 A）→ 再并发占满 → stale 返回 A；期间 `_health_last_snapshot` 仍为 A（未被 stale 体覆盖） | S8 / §10#5 |
 | **SRV-T24** healthz 总函数 | patch `build_health_payload` 抛异常 ⇒ `/healthz` 返回 **503** `{'error':…}`（★ v1.3 更正：v1.2 起不再假 200；非 500/断连），且**不写回快照**；与 `SRV-T37` 同源 | S1 |
-| **SRV-T25** feeds[].status 修正 | `_base_feed_entries`：`/stock/data`→`configured`、`/stock/basic_info`→`configured`、`/stock/f10`→`requires_chrome_cdp`；`/finance/market` 保持 `requires_chrome_cdp`；`/market/margin` `configured`；条目数 == 15 | S4（标注修正）/ Q2 |
+| **SRV-T25** feeds[].status 修正 | `_base_feed_entries`：`/stock/data`→`configured`、`/stock/basic_info`→`configured`、`/stock/f10`→`requires_chrome_cdp`；`/finance/market` 保持 `requires_chrome_cdp`；`/finance/market_sentiment`（★ v1.18 新增）`requires_chrome_cdp`；`/market/margin` `configured`；条目数 == 20（★ v1.18：19→20） | S4（标注修正）/ Q2 |
 | **SRV-T26** 首页 CDP 列 | `_serve_index` HTML 中 `/stock/data` 与 `/stock/basic_info` 行不含 `CDP` 标签；`/stock/f10` 行含 `CDP` 标签 | S4 / Q2 |
 | **SRV-T27** watchdog 委派 | patch `watchdog_restart_skip_reason` 返回 `'trading_hours'` ⇒ `full_chrome_restart` **未被调用**且日志含原因；返回 `None` ⇒ 调用 1 次；`full_chrome_restart` 抛异常 ⇒ 线程存活（`except` 兜底） | **S4 / S9 / R19** |
 | **SRV-T28** 面板 A 类降级 + timeline 旁支 | `page_data→None` ⇒ `{'error':…}`（4 端点）；`page_data→{'basic_info':{...}}`（无 timeline）⇒ `/finance/timeline`、`/market/timeline` 返回 `{'error':'timeline unavailable'}`（**非** `None`，**非**裸 `null`） | **S4 / S1 / R18** |
+| **SRV-T74**（★ v1.18）`/finance/market_sentiment` 独立端点 | `page_data→{'market_sentiment':{...}}` ⇒ `handle_finance_market_sentiment()` 原样透传；`page_data→{'basic_info':{...}}`（无键）⇒ `{'error':'market_sentiment unavailable'}`（**非**裸 `null`，R18）；CDP 未就绪 ⇒ error 客体；`_CACHE_AGE_DOMAINS` → `quote`；HTTP 分发恒 200（N1）；**且 `handle_finance_market()` 结果不含 `market_sentiment`**（剥离两动作，详见 `market_sentiment_独立接口.md` MS-T1..T11） | **S4 / S1 / R18 / N1** |
 | **SRV-T29** f10 A′ 形状 | `config.cdp_engine = None` ⇒ `/stock/f10?code=sh600519` 返回 `{'sh600519': None, '_errors': {'sh600519':'cdp_unavailable'}}`（**非** error 客体） | **S4 A′** |
 | **SRV-T30** RSS 不丢不重 | 上游 50 条 ⇒ feed 含 50 item、guid 无重复；间隔 2×TTL 后再次请求仍含全部条目（TTL 用 `cache_policy('feed')['ttl']`） | **A8** |
 | **SRV-T31** 存量用例回归 | `test_server.py`：`test_handle_cls_hotplate_returns_three_plate_keys` / `..._includes_hot_plates` / `test_handle_cls_plate_returns_info_stocks_industry` / `test_healthz_payload_includes_hotplate_endpoint` / `test_healthz_includes_market_endpoints` / `test_transform_margin_*` / `test_handle_margin_error_returns_degraded` / `test_generate_opml_*` 全绿 | PRD §9（存量基线） |
@@ -2022,8 +2031,8 @@ def _send_error(self, msg, write_body=True):                             # ★ �
 
 | 本模块设计点（§） | 覆盖 AC |
 |------------------|---------|
-| `_guard(shape)` 覆盖 14 JSON + 5 RSS + `/healthz`（§2.3 / §5.1 / §5.2） | **S1**（主承载）/ **A5** / R1 |
-| shape 由 `_JSON_SHAPES` 派生 + `assert len==14`（§2.2） | **S1**（防漏数复发）/ A5 |
+| `_guard(shape)` 覆盖 19 JSON + 5 RSS + `/healthz`（§2.3 / §5.1 / §5.2） | **S1**（主承载）/ **A5** / R1 |
+| shape 由 `_JSON_SHAPES` 派生 + `assert len==18`（§2.2） | **S1**（防漏数复发）/ A5 |
 | `_handle_stock_batch` 计算并透传 `dropped`（§2.4 / §5.3） | **A9** / R4 |
 | feed 双检 + per-键 锁 + TTL 接 `cache_policy('feed')`（§2.5 / §5.4） | **A8** / **A3**（承诺=行为）/ R3 / ★ v1.10：锁表有界（BR-SRV-50）/ **AC-S9** |
 | `_cache_age()` / healthz `cache_ttl` 接 policy（§5.8 / §5.6） | **A3 / A8** / R16 |
@@ -2076,9 +2085,9 @@ def _send_error(self, msg, write_body=True):                             # ★ �
 | 1 | **longhu 上游 URL/headers 的归属** | `config.md` §2.4「保留（不动）」表登记了 `_*_BASE_URL`/`_*_HEADERS`，但**未含** longhu 两 URL（★ v1.17：原写「`config.md` v1.1」，按「引用时点约定」不再绑定版本号）；现状为 `server.py` 内联 `Request(...)` 字面量 | 提取为 **`server.py` 模块级常量** `_LHBTABLE_URL`/`_LHBTABLE_HEADERS`/`_LONGHU_PAGE_URL`/`_LONGHU_PAGE_HEADERS`，**不上收 config** | `config.md` 已评审冻结，新增 config 常量须与 `config.md` 同 change-set（会造成跨文档返工）；本模块内常量可满足"消除 `urlopen` 直连"的 R15 目标。**建议编排层后续把该域常量上收 config 并同批改 `config.md`** |
 | 2 | `_cache_age()` 未登记路径的兜底 | SAD §3 server 行只说"`_cache_age()` 改读 policy" | 未登记路径（4 面板 / `/healthz` / `/` / `/opml.xml`）→ `_DEFAULT_AGE_DOMAIN='f10'`（L4、factor 1.0 ⇒ **恒 300**，与现状逐字等价） | `DOMAIN_MATRIX` 无"面板/CDP"域，且新增域须改 `config.md`；用 L4 域承载可保证 **0 行为变更**且无裸 TTL 字面量。**登记：该域选择不表达业务语义，仅为口径连续** |
 | 3 | `_send_error` 增 `write_body` 形参 | SAD 未提 | `_send_error(self, msg, write_body=True)`，调用点透传 | 现状 `_send_error` 硬编码 `write_body=True`，**HEAD 请求的 400 会写体**（HTTP 语义瑕疵）；属 R1"边界"范围内的最小修正。非契约变更（内部方法） |
-| 4 | `_guard` 覆盖范围 | SAD §2.4：`_guard` 覆盖**全部 14 个 JSON 分支** + `rss` + `text` | **扩展为 14 JSON + 5 RSS + `/healthz`**；`/`、`/opml.xml` **显式排除** | ① healthz 自身必须总函数（AC-S1 的"全端点"口径）；② `/`、`/opml.xml` 为纯内存拼接、无外部数据，AC-S1 的注入故障不可达。属**超集**而非偏离 |
+| 4 | `_guard` 覆盖范围 | SAD §2.4：`_guard` 覆盖**全部 14 个 JSON 分支** + `rss` + `text` | **扩展为 19 JSON + 5 RSS + `/healthz`**；`/`、`/opml.xml` **显式排除** | ① healthz 自身必须总函数（AC-S1 的"全端点"口径）；② `/`、`/opml.xml` 为纯内存拼接、无外部数据，AC-S1 的注入故障不可达。属**超集**而非偏离 |
 | 5 | 准入失败且**从无快照**时的响应 | SAD §2.6：`return 上次快照 + {"stale": true}`（隐含必有快照） | 若 `_health_last_snapshot is None` → 返回**本次零上游体 + `status='degraded'`** + `stale:true`（HTTP 503） | 进程启动后首个 `?check=1` 即被并发占满时，"上次快照"不存在；返回可解析体优于 `None`/500。**登记：SAD 未定义该边界** |
-| 6 | `feeds[]` 的端点覆盖 | SAD §7.1 Q2 只列 3 处 `status` 修正 | 保持现状 15 条（**不新增** `/finance/timeline`、`/market/timeline`、`/ths/longhu`、`/stock/announcement`） | 现状 healthz `feeds[]` 未含这 4 个端点（既有 gap，非本次引入）；新增条目属"只增"但会扩大 `feeds[]` 契约面，**建议编排层单独决策**。**登记为已知缺口**（AC-S4 的端点验证不依赖 healthz 列表） |
+| 6 | `feeds[]` 的端点覆盖 | SAD §7.1 Q2 只列 3 处 `status` 修正 | 保持现状 20 条（含 4 CLS 池新增 + ★ v1.18 `/finance/market_sentiment`；**不新增** `/finance/timeline`、`/market/timeline`、`/ths/longhu`、`/stock/announcement`） | 现状 healthz `feeds[]` 未含这 4 个端点（既有 gap，非本次引入）；新增条目属"只增"但会扩大 `feeds[]` 契约面，**建议编排层单独决策**。**登记为已知缺口**（AC-S4 的端点验证不依赖 healthz 列表） |
 | 7 | `feeds[].status` 取值修正（3 处） | SAD §2.6 Q2：属**改既有字段取值**（≠"只增不改"），须编排层批准 | **✅ 已批准并同步**：目标值已落地 + `API.md:499-511` 已列取值与逐端点说明（**同步范围 = healthz 负载 + 首页 CDP 列 + API.md**，三处均已同步） | AC-S4 归类的直接前提（`/stock/data`→B、`/stock/basic_info`→B、`/stock/f10`→A′）；SAD 只输出目标值，契约修改权在编排层（已行使） |
 | 8 | healthz 执行器的线程名/预算常量 | SAD 只给 `max_workers=5`、整体 10s、单源 3s | 落 `thread_name_prefix='healthz'` + `_HEALTH_TOTAL_BUDGET=10.0`/`_HEALTH_SOURCE_BUDGET=3.0`/`_HEALTH_POLL=0.25` | 实现细化；AC-S9 的线程总账 +5 与 `MAX_HEALTH_INFLIGHT` 一致 |
 | 9 | `_run_health_checks` 的 `pending` 判定方式 | SAD 只说 `as_completed(timeout=10)` | 改用 `wait(..., FIRST_COMPLETED)` 轮询（`_HEALTH_POLL=0.25`）以**能实现"单源 3s"**（`as_completed` 只在 future 完成时 yield，无法对未完成源判超时）；**并按各 future 的 `submitted_at` 实现"每源独立 3s"、整体 10s 独立闸**（修 P2-2） | 行为对齐 SAD 的两级预算；时间复杂度 5 源 × 40 轮，可忽略 |
@@ -2118,6 +2127,7 @@ def _send_error(self, msg, write_body=True):                             # ★ �
 | 43 | **★ F6：HTTP/1.0 304 不发 `Content-Length`、EOF 收尾（v1.9；BR-SRV-49）** | RFC 9110 §15.4.5/§8.6 | 保持不发（不写 `Content-Length: 0`）；**本轮不升 `protocol_version`/keep-alive** | §10#36 已给三条依据；本版**如实登记权衡**：中间件对"无长度 304 的 EOF 收尾"处理为**理论风险**，`http.client` 已实测通过（T47/T62）。升 HTTP/1.1 出范围（BR-SRV-44） |
 | 44 | **★ F8：feed 取数锁表有界化（v1.10；BR-SRV-50 / `cache.md` BR-CACHE-35）** | SAD/PRD 未定义 feed per-键 锁表生命周期；`系统_代码评审报告_001.md` TS-4 曾因"`pop` 与持锁线程竞态 ⇒ 双抓"**移除 `pop`** ⇒ v1.9 前只增不减 | `_get_or_fetch_feed` 改经 `feed_fetch_acquire/release`（`try…finally` 保证异常也释放）；`release` 归零即**两表同删**；引用计数不变式 + 正确性论证 + 有界性结论入 BR-SRV-50；补 `SRV-T71/T72` + `cache.md` `T-CACHE-35` | **F2 把键空间从 5 条固定 path 变成 `path × 请求派生 base_url`**，`_valid_host_header`（`server.py:591`）**只校验格式、不校验归属** ⇒ 任意合法主机名可造新键：① 锁表**永久内存增长**（每键 ~300–450 B，外部可无界触发 ⇒ OOM）；② 键数超 `feed_cache` 上限 100 后每个新 Host 必 miss ⇒ `generate_rss`+sha256、LRU 抖动（**只放大本地 CPU，上游仍被 URL 级缓存兜住**）。**归零前 `pop` 会重演 TS-4 双抓** ⇒ 必须引用计数 |
 | 45 | **★ v1.12：F8 并发变体测试契约（`SRV-T73`）+ `acquire` 先判空实现约束** | SAD/PRD 未定义 feed 锁表并发上界测试；`cache.py::feed_fetch_acquire` 现用 `setdefault(key, threading.Lock())`（每次调用先构造 `Lock` 再丢弃） | ① 新增独立可测用例 **`SRV-T73`**（K 个不同 Host 键**同时在飞**：在飞期间 `1 <= len(_feed_fetch_locks) <= K` **且两表相等**；返回后两表均 `0`）；`SRV-T71` 收敛为**纯串行**（编号不删）。② `acquire` 契约补**实现约束**：**先 `get` 判空、仅 `None` 时建 `Lock`**（命中路径零分配，语义不变；`cache.md` BR-CACHE-35 同步） | **P2-2 / 覆盖缺口**：v1.10 契约承诺了"并发 K 个不同 Host 同时在飞 ⇒ 在飞期间 `len <= K`"，但 `SRV-T71` 仅做**串行** N=50 ⇒ 承诺未实现、无回归网；`setdefault` 的每次构造属**无谓分配**（命中路径本可零分配）。两者均**不改变可观测行为**（前者补测试、后者仅去分配）。**★ v1.13 更正（`SRV-T73` 证伪面收窄 + 超时余量）**：`T73` 的取数桩**从不抛异常** ⇒ **不能**证伪"`release` 不在 `finally`"（成功路径上"`with` 后裸 `release`"与"`finally release`"等价；该变异归 **`SRV-T72`** 异常路径）；**`T73` 的证伪面 = 「按累计增长 / 两表（`_feed_fetch_locks` 与 `_feed_fetch_refs`）不同步 / 上界 > K」**，其 **「两表相等 + 在飞上界 + 归零」三条断言不变**。另：等待放行 / `join` 超时**建议 ≥10s**（原 5s 在极端调度下有**伪红**风险），并在 `join` 后 `assertFalse(t.is_alive())` |
+| 46 | **★ v1.18：`market_sentiment` 独立端点 + `/finance/market` 去键（P3a 详设增量 · 2026-10-10）** | 需求来自任务书（`/finance/market` 的 `market_sentiment` 拆独立接口）；SAD/PRD 无对应条目 | 新增 `GET /finance/market_sentiment`（`_PANEL_HANDLERS` 4→5 / `_JSON_SHAPES` 18→19 / `_CACHE_AGE_DOMAINS`→`quote` / `feeds[]` 19→20 / 首页 `json_apis` +1 / `main()` 日志 +1）；`handle_finance_market` **剥离** `market_sentiment`（`data.pop` **且** `config._FINANCE_EXPECTED_KEYS` 删键，**两动作必须同时**——否则经 `_fill_missing` 该键仍出现）；`/finance/market` 去键属**字段回退**（昨日新增、未冻结） | 详设见 `doc/detailed/market_sentiment_独立接口.md`（R1–R10 / RG1–RG7 / MS-T1..T16）。**新增 1 路由 + 去 1 字段**，端锁定 🟠；`feeds[]` 计数与 `_JSON_SHAPES` 断言同步（否则测试红）。**本 agent 不改 SAD/PRD/API.md/README.md**（`>>DOC_SYNC:` 已标记） |
 
 ---
 
@@ -2125,16 +2135,16 @@ def _send_error(self, msg, write_body=True):                             # ★ �
 
 - [x] 无 `{例:` 占位符；`_JSON_SHAPES`/healthz schema/`_cache_age` 映射/plate TTL 均为**实值**
 - [x] §3 为 `yaml` 代码块（healthz schema / health 状态 / 路由与 shape / 服务类状态）
-- [x] 路由表精确：14 JSON（逐一列名 + shape）+ 5 RSS + `/` + `/opml.xml` + `/healthz`；无增删路径
+- [x] 路由表精确：19 JSON（逐一列名 + shape；★ v1.18 +`/finance/market_sentiment`）+ 5 RSS + `/` + `/opml.xml` + `/healthz`；无其它增删路径
 - [x] `_guard` 四 shape 语义与降级体逐一钉死；异常兜底范围（含显式排除项）声明
 - [x] 业务规则编号 BR-SRV-1..**50**，伪代码直接引用编号（BR-SRV-30/31 为 v1.1 新增；v1.2 新增 5b/5c/8b/32/33；v1.4 新增 34/35；v1.5 新增 36–44；**★ v1.9 / F1–F6 新增 45–49 + 改写 38**；**★ v1.10 / F8 新增 50 + 补正 45 的放大风险论证**；★ v1.12 在 **BR-SRV-50 内补 `acquire` 实现约束**（不新增编号））
 - [x] 关键流程伪代码齐备：分发 / `_guard` / 批量截断 / feed 双检 / **`_fetch_concurrent` 扇出** / plate stagger / longhu GBK / healthz 准入（`_HealthBatch`） / 过载 503 / watchdog / **★ v1.5 条件请求（`_feed_etag` / `_not_modified` / `_send_not_modified`）**
 - [x] 错误处理矩阵（400/404/503/200-error/200-值域/304 + hotplate 全/部分分区）+ 降级分层 + **8 条**可断言不变式（★ v1.5 新增 #8）
 - [x] 并发安全：锁清单 + 锁序（`_feed_fetch_locks_lock → per-键 lock`，★ v1.10 / F8 经 `feed_fetch_acquire/release`；metrics 永远最内层）+ 热点开销 + 并发正确性依据；★ v1.5：条件请求**零新锁**；★ v1.10：锁表有界（BR-SRV-50）
-- [x] 测试要点 **75 条**映射 PRD AC（v1.1 新增 T34/T35；v1.2 新增 T36–T43；v1.4 新增 T44–T45；v1.5 新增 T46–T60；v1.6 / C7 补 `T52b`/`T56b`/`T61`/`T62` → 64 条；**★ v1.9 / F7 新增 `T63..T70` → 72 条，并改写 `T55`**；**★ v1.10 / F8 新增 `T71`/`T72` → 74 条**；**★ v1.12 新增 `T73`（并发在飞 K 键上界 + 两表同步）→ 75 条，并改写 `T71`（纯串行，编号不删）**）；回归用例逐条列名（含 **2 条**跨模块交叉引用必改 + **★ v1.8 5 条 server_http 打桩迁移** + **★ v1.9 / F1–F5 5 条打桩/契约迁移**，见 §10.1）
+- [x] 测试要点 **76 条**映射 PRD AC（v1.1 新增 T34/T35；v1.2 新增 T36–T43；v1.4 新增 T44–T45；v1.5 新增 T46–T60；v1.6 / C7 补 `T52b`/`T56b`/`T61`/`T62` → 64 条；**★ v1.9 / F7 新增 `T63..T70` → 72 条，并改写 `T55`**；**★ v1.10 / F8 新增 `T71`/`T72` → 74 条**；**★ v1.12 新增 `T73` → 75 条**；**★ v1.18 新增 `T74`（`/finance/market_sentiment` 独立端点）→ 76 条**）；回归用例逐条列名（含 **2 条**跨模块交叉引用必改 + **★ v1.8 5 条 server_http 打桩迁移** + **★ v1.9 / F1–F5 5 条打桩/契约迁移**，见 §10.1）
 - [x] AC 追溯：S1/A5/A8/A9/**E2**/E8/E9/S4/S5/S7/S8/S10 主承载，A3/E6/A6 协同项已注明；**v1.2 增 S2-5/S2-3/P1-6；★ v1.5 增 本专项 R1**
 - [x] 与基础层/数据层接口逐项对齐（`cache_policy`/`feed_cache_get|put`/★ **`feed_cache_get_entry`**/`build_batch_response`/`page_data`/`restart_window_snapshot`/`watchdog_restart_skip_reason`/`metrics`）
-- [x] 偏差 **45 项**全部登记（**不改 SAD / 不改 PRD / 不改 config.md**；★ v1.5 新增 #32–#37；**★ v1.9 新增 #38–#43**；**★ v1.10 / F8 新增 #44**；**★ v1.12 新增 #45**）
+- [x] 偏差 **46 项**全部登记（**不改 SAD / 不改 PRD / 不改 config.md**；★ v1.5 新增 #32–#37；**★ v1.9 新增 #38–#43**；**★ v1.10 / F8 新增 #44**；**★ v1.12 新增 #45**；**★ v1.18 新增 #46**）
 - [x] **v1.4**：gzip 协商 `_accepts_gzip` + `Vary: Accept-Encoding`（BR-SRV-34 / §1.1#11 / §5.8 / §6.2#7 / T44）；`main()` 预热 `warm_transport`（BR-SRV-35 / §1.1#12 / §5.9 / T45）；线程账 +9
 - [x] **v1.5（P3a · RSS 条件请求）**：ETag 弱校验器（规范化剔除 `lastBuildDate`/`ttl`，**严禁裸哈希**）· Last-Modified = 缓存条目 `time`（新访问器 `feed_cache_get_entry`）· 304 组成（无 body/无 `Content-Encoding`/无 `Content-Length`，带 `ETag`+`Cache-Control`+`Vary`，不写缓存）· 条件头优先级（INM > IMS，支持 `*`/多值/`W/`，非法日期头忽略）· RSS `<ttl>`（分钟，位置与 ETag 影响）· 出范围项（BR-SRV-36..44 / §5.4 / §5.8 头清单 / §6.2#8 / T46–T60 / §10#32–#37 / §11.5）
 - [x] **v1.5（只增不改核对）**：200 既有头与体、`Vary`/`private` 反投毒、业务降级恒 200、路由/方法、`feed_cache_get` 签名**全部未变**；新增仅 2 个可选形参 + 1 个方法 + 1 个访问器 + 1 个 `generate_rss` 可选形参
@@ -2148,6 +2158,8 @@ def _send_error(self, msg, write_body=True):                             # ★ �
 - [x] **v1.3（N1 回退）**：业务端点降级 = `200 + error 体`（§1.1#9 / §2.1 yaml + 状态表 / §2.2 `_send_json_shape` / §2.9 `_json_payload_has_data` 删除 / §2.10 / §4.1 BR-SRV-5b / §5.2 注 + §5.8 伪代码 / §6.1 / §9 / §10#18·#24·#29 / §11.3）；`_send_json` 无 `status`；`http_503_total` 计数点 3；降级体可缓存
 - [x] **v1.3（N1 回退）**：`/healthz` 的 503 明确为**端点自身语义**（BR-SRV-21 / §5.2 / §6.1 / §9 / §10#29），不构成业务端点先例
 - [x] **v1.17（溯源收口 + 引用时点约定）**：头部上游 **PRD v0.9 → v0.10**（SAD v1.12 已对）；接口权威栏 **config v1.5 → v1.6 / cache v1.13 → v1.14 / metrics v1.7 → v1.8**、`stock_api.md` v1.3、**`market_api.md` v1.5 → v1.6**、**`cdp_engine.md` v1.2 → v1.3**（长期滞后项）、文末 `stream.md` v1.5；新增「引用时点约定」——接口权威栏 = 本文最后同步时点快照、**落后一版不属漂移**，内容以被引文档头部为准。**无 BR 语义变更 / 无对外契约变更 / 无接口变更；测试仍 75、偏差仍 45**；**未改代码 / SAD / PRD / API.md / README.md / `.opencode`**
+- [x] **v1.18（market_sentiment 独立接口 · P3a 详设增量 · 2026-10-10）**：新增 `GET /finance/market_sentiment`（CDP A 类，shape=object）——`_PANEL_HANDLERS` **4→5**、`_JSON_SHAPES` **18→19**、`_CACHE_AGE_DOMAINS` → `quote`、`feeds[]` **19→20**、首页 `json_apis` +1、`main()` 日志 +1；`handle_finance_market` **剥离** `market_sentiment`（`data.pop` **且** `config._FINANCE_EXPECTED_KEYS` 删键，**两动作必须同时**）；§1.1/§2.1/§2.2/§2.8/§2.9/§2.9.1/§3.3/§5.8/§8/§9/§10#46/§11 同步；端锁定 🟠（新增 1 路由 + 去 1 字段）。详设见 `doc/detailed/market_sentiment_独立接口.md`。**测试 75 → 76（新增 `SRV-T74`）/ 偏差 45 → 46**；**未改代码 / SAD / PRD / API.md / README.md / `.opencode`；`_PROGRESS.md` 同步**
+- [x] **v1.19（计数收口 · P3b 评审 P2-02 同批修复 · 2026-10-10）**：补 v1.18 漏改的**现行口径**计数——**8 处「4 面板」/「面板 4」→「5 面板」**（§1.5 接口对齐表 `:102` / §2.1 状态语义表 `:177`·`:181` / §4.1 BR-SRV-1 分发顺序 `:803` / §4.6 BR-SRV-27 `:857` / §5.2 分发伪代码注释 `:953` / §6.1 错误表 `:1835`·`:1843`）+ **3 处「18 JSON」→「19 JSON」**（§6.3 异常兜底范围声明 `:1877`；§9 `:2034` / §10#4 `:2088` 为验证额外发现）。历史变更块（v1.2/v1.16 等）中的「4 面板」为历史快照、**原文保留**；§8 `SRV-T28`/`SRV-T43` 的「4 端点/4 面板」为**测试作用域**表述（新端点由 `SRV-T74` 覆盖），不改。**无 BR 语义变更 / 无对外契约变更 / 无接口变更；测试仍 76、偏差仍 46**；**未改代码 / SAD / PRD / API.md / README.md / `.opencode`；`_PROGRESS.md` 同步**
 
 ### 11.1 v1.2 契约同步对照（P7b · 以代码为准）
 
@@ -2242,6 +2254,8 @@ def _send_error(self, msg, write_body=True):                             # ★ �
 > **★ v1.6 / C2 迁移清单计数口径（P1-02 闭环；★ v1.8 / D-1 由 4 → 5）**：`test_server_http.py` 的**打桩迁移共 5 条**，逐条为——**①** `FeedDoubleCheckTests:315` 打桩目标 `feed_cache_get` → `feed_cache_get_entry`；**②** `FeedDoubleCheckTests:331` 同上；**③** `BaseUrlHardeningTests`（2 方法）`_get_or_fetch_feed` 桩返回 2-tuple `('<rss/>', None)`；**④** `BaseUrlHardeningTests`（2 方法）**补 `h.headers = {}`**（或 patch `_not_modified`）；**⑤** `GuardTests::test_rss_degrade_is_valid_feed`（:80）**直接调 `_guard(shape='rss')` 须按 2-tuple 解包 + 断言 `last_modified is None`**（★ v1.8 / D-1 补登——v1.5 §11 自检的"三条"与 v1.6 的"4 条"**均漏列**该唯一绕过 `_serve_feed` 直接调 `_guard` 的存量用例）。综合口径：**本版更正为 5 条**（见 §11）。
 
 > 本文档与 `config.md` **v1.6** / `cache.md` **v1.14** / `metrics.md` **v1.8** / `stock_api.md` v1.3 / `market_api.md` **v1.6** / `cdp_engine.md` **v1.3** / `stream.md` **v1.5** 共同构成 P6c 优化专项的模块级详设（★ v1.17 溯源收口；**本清单为快照——版本以各文档头部为准，落后一版不属漂移，见头部「引用时点约定」**）；**server.py 的编码可与 stream.md 并行**（二者无共享文件的写冲突：server 仅延迟 import stream 的 `push_loop`/`run_stream_server`）。
+>
+> **v1.19 修订（计数收口 · P3b 评审 P2-02 同批修复 · 只改文档，不改代码）**：补 v1.18 漏改的**现行口径**计数——**8 处「4 面板」/「面板 4」→「5 面板」**（§1.5 `:102` / §2.1 `:177`·`:181` / §4.1 BR-SRV-1 `:803` / §4.6 BR-SRV-27 `:857` / §5.2 `:953` / §6.1 `:1835`·`:1843`）+ **3 处「18 JSON」→「19 JSON」**（§6.3 `:1877`；§9 `:2034` / §10#4 `:2088` 为验证额外发现）。历史变更块（v1.2/v1.16 等）的「4 面板」为历史快照、**原文保留**；§8 `SRV-T28`/`SRV-T43` 的「4 端点/4 面板」为**测试作用域**（新端点由 `SRV-T74` 覆盖）、不改。**无 BR 语义变更 / 无对外契约变更 / 无接口变更；测试仍 76、偏差仍 46**；**未改代码 / SAD / PRD / API.md / README.md / `.opencode`；`_PROGRESS.md` 同步。**
 >
 > **v1.17 修订（溯源收口 + 引用时点约定 · 只改文档，不改代码）**：头部上游 **PRD v0.9 → v0.10**（SAD v1.12 已对）；接口权威栏 **`config.md` v1.5 → v1.6 / `cache.md` v1.13 → v1.14 / `metrics.md` v1.7 → v1.8**、`stock_api.md` v1.3、**`market_api.md` v1.5 → v1.6**、**`cdp_engine.md` v1.2 → v1.3**（长期滞后，实测头部已 v1.3）、文末 `stream.md` v1.5；新增**引用时点约定**。**无 BR 语义变更 / 无对外契约变更 / 无接口变更；测试仍 75、偏差仍 45。**
 >

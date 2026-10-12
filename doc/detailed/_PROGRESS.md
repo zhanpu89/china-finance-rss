@@ -5,6 +5,10 @@
 
 ## 当前状态
 
+- **本次（P3a · 财联社 4 池独立接口详设 · 2026-10-10 · 只增文档）**：新增 `doc/detailed/cls_pools.md` **v1.0.0**（🆕）——4 个独立 REST 端点（`/cls/up_pool` 涨停池 / `/cls/continuous_up_pool` 连板池 / `/cls/up_open_pool` 炸板池 / `/cls/down_pool` 跌停池），单函数 `handle_cls_pool(pool_type)` + `_POOL_HANDLERS` 表驱动分发 + `_send_json_shape` 降级（N1: 200 + error body）；上游 `x-quote.cls.cn/quote/index/up_down_analysis`（`way=last_px` 定案，`plate` 域 TTL）；**13 个注册点 R1–R13** + **14 用例**。**只写 `doc/detailed/`（+本文件）**；未改代码 / 测试 / `API.md` / `README.md`。**`>>SCOPE:`** 任务书注册点清单漏列 `tests/test_server_http.py:510`/`:521`（feeds 计数 15→19），本详设补列为 **R12/R13**（见 `cls_pools.md` §10#2）。详见下方「★ P3a · 财联社 4 池独立接口详设」。
+- **本次（P3a · market_sentiment 独立接口详设 + P8 5×P2 修复规格 · 2026-10-10 · 只增文档）**：新增 `doc/detailed/market_sentiment_独立接口.md` **v1.0.0**（🆕）——`/finance/market` 的 `market_sentiment` 拆为独立端点 `GET /finance/market_sentiment`（CDP A 类；`handle_finance_market_sentiment` 与 `handle_finance_timeline` 逐行同型，`None → {'error':'market_sentiment unavailable'}` R18）；**剥离两动作必须同时**（`handle_finance_market` `data.pop('market_sentiment', None)` **且** `config._FINANCE_EXPECTED_KEYS` 删键——否则经 `cache._fill_missing` 该键仍现，详见详设 §2.3）；**7 注册点 RG1–RG7**（`_JSON_SHAPES` **18→19** / `_PANEL_HANDLERS` **4→5** / `_CACHE_AGE_DOMAINS`→**`quote`** / `_JSON_DISPATCHED_PATHS` 自动 / `feeds[]` **19→20** / 首页 `json_apis` +1 / `main()` 日志 +1）+ **16 用例**（MS-T1..T11 新端点 + MS-T12..T16 = B-01..B-05）；**裁决**：`_CACHE_AGE_DOMAINS` 域 = `quote`（详设 §10#1）、B-01 skip 风格 = `@unittest.skipUnless(os.getenv('CLS_INTEGRATION'), ...)`（详设 §10#2）。**同步更新 `doc/detailed/server.md` → v1.18**（增量登记新端点 + 计数变更：§1.1 / §2.1 路由表 / §2.2 `_JSON_SHAPES`+assert+`_PANEL_HANDLERS` / §2.8 handler 清单 / §2.9 docstring / §2.9.1 feeds 表 / §3.3 结构 / §5.8 cache-age / §8 `SRV-T74` / §9 / §10#46 / §11；端锁定 🟠）。**只写 `doc/detailed/`**；未改代码 / 测试 / `API.md` / `README.md` / `.opencode`。**`>>DOC_SYNC:`**（`API.md` / `README.md` / 可选 SAD）见 `market_sentiment_独立接口.md` §12 末。
+- **本次（P3b 评审闭环 · market_sentiment 独立接口详设修复 · 2026-10-10 · 只改文档）**：`market_sentiment_独立接口.md` → **v1.0.1**（闭环 `doc/review/market_sentiment_详细设计评审_专家版.md` REV-DES-20261010-002，⚠️ 有条件通过 P0×0 / P1×1 / P2×5）：**P1-01** §2.3 语义表按 `cache.py:1155-1161` 实际语义重写（只删 expected ⇒ **原值**、只 pop ⇒ **`None`**、两动作齐做 ⇒ 键不在）+ §1.1 职责 3 值方向显式化 + **MS-T9(a) 断言方向纠正**（"键不在" → `assertIn` + `assertEqual(原值)`；对正确实现全绿、对任一单动作回归必红）；**P2-1** §2.5 补登 `stress_all.py:117` 键清单移除 `market_sentiment`（只登记、不落实现）；**P2-2** `server.md` → **v1.19**（8 处「4 面板/面板 4」→「5 面板」+ 3 处「18 JSON」→「19 JSON」——评审清单 9 处 + 验证额外 2 处 §9 `:2034`/§10#4 `:2088`；**评审行 7 的 `server.md:1286` 实为 `server.py:1286`**——该处为分发代码注释，登记为代码漂移、由 code-developer 在 P5a 处理）；**P2-3** DOC_SYNC 补 `cdp_engine.md` `:751/:752`「A 类 4 端点」→5；**P2-4** DOC_SYNC 补全 SAD 计数落点（`:71-72`/`:114`/`:441`/`:560`/`:804`）；**P2-5** MS-T15 双向表述补全（真实源码必不命中 + 合成串必命中/旧正则必不命中）。**只改 `doc/detailed/`（+本文件）**；未改代码 / 测试 / `API.md` / `README.md` / `doc/arch/SAD.md` / `cdp_engine.md`。**`>>DOC_SYNC:`** 见 `market_sentiment_独立接口.md` §12 末（含 `cdp_engine.md` / `SAD.md` / `stress_all.py` / `server.py` 补登）。
+- **本次（P7b 契约同步 · 漂移回填 · 2026-10-10 · 只改文档）**：`doc/detailed/cdp_engine.md` → **v1.5**（§9 AC 追溯矩阵 `:751`「CDP 降级路径 A 4 / A′ 1」→「A 5 / A′ 1」、`:752`「A 类 4 端点逐条验证」→「A 类 5 端点」——随 `market_sentiment` 独立端点增量 A 类 4→5，`/finance/market_sentiment` 属 A 类；**CDP 层零改动**——`API_KEY_MAP`/`_shouldCapture`/TTL 早已就绪）；`doc/detailed/config.md` → **v1.15**（§3.1 `DOMAIN_MATRIX` 的 `plate` 行注释补 `4 cls pools`，镜像 `config.py:387`）。**无 BR / 契约语义变更**；`config.md` **无 `_FINANCE_EXPECTED_KEYS` 枚举**（`frozenset` 6→5 键删 `market_sentiment` 在本文档无落点，无需同步）；**未改代码 / 测试 / `API.md` / `README.md` / `SAD.md` / `.opencode`**。
 - ★ **未决项单点入口**：仍开放的未决项（A/B/C/D 四类）已集中登记于下方「**★ 未决项（后续处理 · 单点入口）**」——该节是"仍开放项"的**唯一入口**，各详设 §10 / SAD / PRD 内的登记仅为该条详细上下文，**两者冲突时以该节"状态"为准**。
 - 批次 1：**基础层三模块**（config / cache / metrics）→ ✅ 完成（均 v1.1）
 - 批次 2：**数据层三模块**（stock_api / market_api / cdp_engine）→ ✅ 完成（均 **v1.1**，已按评审修订）
@@ -1262,3 +1266,60 @@
 - ✅ `market_api.md`：**现行有效正文**已无「margin 不消费 `cache_max`」——§3.3/§10#10 的旧口径均标注「★ v1.8 更正 / 已被 PRF-LAT-02 推翻」。
 - ✅ `metrics.md`：`upstream_fetch_total` 无「URL 缓存命中亦计数（上界）」**现行有效**表述——已由 v1.10 明确为「终端缓存 miss 计一次」，旧口径仅存于 v1.2–v1.9 历史块。
 - ⇒ 三份详设的**现行有效正文**口径一致，**无残留矛盾**。
+
+## ★ P3a · 财联社 4 池独立接口详设（`cls_pools.md` v1.0.0 · 2026-10-10 · 只增文档）
+
+> 范围：**新增** `doc/detailed/cls_pools.md` + **只改**本文件（「当前状态」+ 本节）。**未改代码 / 测试 / `doc/arch/` / `doc/prd/` / `API.md` / `README.md` / `.opencode/`**。
+> 需求：从 `https://www.cls.cn/finance` 看盘页把「涨停池 / 连板池 / 炸板池 / 跌停池」4 tab 分离为 4 个独立 HTTP JSON 接口，遵循系统现有风格（零依赖 `http.server`、`handle_*` 纯函数、`_JSON_SHAPES` 路由表、`fetch_json` + `cls_sign_params` 签名、TTL 缓存）。
+
+### 1. 交付
+
+| 项 | 内容 |
+|----|------|
+| 新文档 | `doc/detailed/cls_pools.md` **v1.0.0**（🆕 新建；独立成文，理由见该文档 §10#3） |
+| 端点 | `/cls/up_pool`（涨停池）· `/cls/continuous_up_pool`（连板池）· `/cls/up_open_pool`（炸板池）· `/cls/down_pool`（跌停池） |
+| 代码形态 | 单函数 `handle_cls_pool(pool_type) -> dict` + `_POOL_HANDLERS = {路径: type}`（仿 `_PANEL_HANDLERS` 表驱动）+ 分发分支走 `_send_json_shape` |
+| 上游 | `https://x-quote.cls.cn/quote/index/up_down_analysis`；headers `{UA: Mozilla/5.0, Referer: https://www.cls.cn/finance}`；params `{app,os,sv,type,way=last_px,rever=1}+sign` |
+| 缓存域 | 4 路径 → `'plate'`（与 hotplate 同族；TTL = `cache_policy('plate')['ttl']`） |
+
+### 2. 注册点清单（R1–R13，一个不漏）
+
+| # | 文件:行 | 现状 → 目标 |
+|---|---------|-------------|
+| R1 | `config.py:219` 附近 | 新增 `_UP_DOWN_ANALYSIS_URL` / `_UP_DOWN_ANALYSIS_HEADERS` |
+| R2 | `server.py:40-45` import | 并入 2 常量 |
+| R3 | `server.py:482` `_JSON_SHAPES` | 14 → 18 条 |
+| R4 | `server.py:490` `assert … == 14` | → 18 |
+| R5 | `server.py:505` 附近 | 新增 `_POOL_HANDLERS`（+ `_POOL_TYPES`） |
+| R6 | `server.py:514` `_JSON_DISPATCHED_PATHS` | 并入 4 路径（`\| set(_POOL_HANDLERS)`） |
+| R7 | `server.py:522` `_CACHE_AGE_DOMAINS` | 4 路径 → `'plate'` |
+| R8 | `server.py:1230` 分发区 | 新增 `if path in _POOL_HANDLERS:` 分支 |
+| R9 | `server.py:932` `feeds.extend` | +4 条（`status='configured'`） |
+| R10 | `server.py:923` docstring | `15` → `19`（非阻断） |
+| R11 | `tests/test_server_http.py:47` | `14` → `18` |
+| **R12** | `tests/test_server_http.py:510` | `15` → `19`（**任务书漏列**） |
+| **R13** | `tests/test_server_http.py:521` | `15` → `19`（**任务书漏列**） |
+
+### 3. Step 2.5 链式推导（7 规则）
+
+| 规则 | 结论 |
+|------|------|
+| 规则零（需求缺口） | 4 tab → 4 端点**完整覆盖** ⇒ **无补充接口** |
+| 规则一（读写配对） | 全 `GET`（读）；无写配对 |
+| 规则二（状态机） | 无状态实体；「成功 `{'stocks':…}` / 降级 `{'error':…}`」二值（穷举封闭） |
+| 规则三（跨模块依赖） | `server → config`（2 常量 + `cache_policy('plate')`）/ `server → utils`（`cls_sign_params`）/ `server → cache`（`fetch_json`）——均既有方向、无环 |
+| 规则四（数据生命周期） | 无持久化；URL 缓存条目由 cache 层按 `plate` 域 TTL 管理 |
+| 规则五（异步流程） | 无异步 / 无任务状态 / 无死信 |
+| 规则六（权限 / 隔离） | 无鉴权 / 无多租户；不改 `layerIsolation` |
+
+### 4. ⚠️ `>>SCOPE:` 偏差（如实报告）
+
+1. **任务书注册点清单漏列 2 处**：`tests/test_server_http.py:510`（`len(payload['feeds']) == 15`）与 `:521`（`len(entries) == 15`）——4 条 `feeds[]` 新增使总数 15 → 19，**照任务书 7 项施工该两处断言必红**。本详设**补列为 R12/R13**（`cls_pools.md` §10#2）。**未改测试**（只写详设）。
+2. **无专属 PRD AC**：本增量需求来自任务书原文，`doc/prd/perf-stability-optimization.md` 无对应 AC；本详设按原文承接（AC 追溯映射既有约束），**建议编排层 / system-architect 决定是否回填 SAD/PRD**。
+3. **对外文档同步（out of scope）**：`API.md` / `README.md` 端点清单需补 4 条 —— 本 agent 未碰，**`>>DOC_SYNC: API.md, README.md → 新增 4 个 /cls/* 池端点`** 供编排层承接。
+
+### 5. 待办 / 下游
+
+- **下游**：`code-developer` 按 `cls_pools.md` §2.5（R1–R13）施工；**先读 `server.py:337 handle_cls_hotplate` + `server.py:482-535`**，命名 / 分层 / 异常风格与之一致。
+- **评审**：建议 `review-expert` 对 `cls_pools.md` 出详设评审（本文件登记为「待评审」）。
+- **本文件状态**：`cls_pools.md` = **v1.0.0（🟡 草稿 / 待评审）**。

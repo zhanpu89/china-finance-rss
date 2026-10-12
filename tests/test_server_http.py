@@ -14,15 +14,18 @@ land, importing `china_finance_rss.server` raises ImportError.
 
 import gzip
 import http.client
+import inspect
 import json
+import os
 import re
+import socket
 import threading
 import time
 import unittest
 from collections import OrderedDict
 from email.utils import formatdate, parsedate_to_datetime
-from unittest.mock import patch
-from urllib.parse import urlparse
+from unittest.mock import Mock, patch
+from urllib.parse import urlparse, parse_qs
 from xml.etree import ElementTree as ET
 
 from china_finance_rss import cache as cache_mod
@@ -44,7 +47,7 @@ from china_finance_rss.server import (
 class ShapeTableTests(unittest.TestCase):
     def test_json_shapes_complete_and_consistent(self):
         self.assertEqual(srv._SHAPES, frozenset({'batch', 'object', 'rss', 'text'}))
-        self.assertEqual(len(srv._JSON_SHAPES), 14)
+        self.assertEqual(len(srv._JSON_SHAPES), 19)
         self.assertEqual(
             {p for p, s in srv._JSON_SHAPES.items() if s == 'batch'},
             set(srv._STOCK_BATCH_HANDLERS))
@@ -237,6 +240,412 @@ class HotplateFailureShapeTests(unittest.TestCase):
         self.assertNotIn('error', res)
 
 
+class ClsPoolTests(unittest.TestCase):
+    """POOL-T1..T9 / T12..T14 + review P1-01 / P1-02: the 4 CLS pool endpoints.
+
+    Direct REST (no CDP): a signed `up_down_analysis` URL through the shared
+    `fetch_json`, `way=last_px`, plate-domain TTL.  Stubs are module-level
+    (`china_finance_rss.server.fetch_json`) — no network, no external fixture.
+    """
+
+    PATHS = ('/cls/up_pool', '/cls/continuous_up_pool',
+             '/cls/up_open_pool', '/cls/down_pool')
+
+    @staticmethod
+    def _fake_fetch(payload, captured=None):
+        def fake(url, headers=None, ttl=None, encoding=None):
+            if captured is not None:
+                captured.append({'url': url, 'headers': headers, 'ttl': ttl})
+            return json.dumps(payload)
+        return fake
+
+    def test_pool_paths_registered_in_the_shape_tables(self):
+        """POOL-T1/T2/T14: one table is the authority for path → type."""
+        self.assertEqual(srv._POOL_HANDLERS, {
+            '/cls/up_pool': 'up_pool',
+            '/cls/continuous_up_pool': 'continuous_up_pool',
+            '/cls/up_open_pool': 'up_open_pool',
+            '/cls/down_pool': 'down_pool',
+        })
+        self.assertEqual(srv._POOL_TYPES, frozenset(srv._POOL_HANDLERS.values()))
+        for path in self.PATHS:
+            self.assertEqual(srv._JSON_SHAPES[path], 'object', path)
+            self.assertIn(path, srv._JSON_DISPATCHED_PATHS, path)
+            self.assertEqual(srv._CACHE_AGE_DOMAINS[path], 'plate', path)
+
+    def test_success_passes_data_through_and_signs_the_url(self):
+        """POOL-T3/T4/T5: signed URL contract + headers + plate TTL + stocks."""
+        captured = []
+        payload = {'code': 200, 'msg': '',
+                   'data': [{'secu_code': 'sh600519', 'secu_name': '贵州茅台'}]}
+        with patch.object(srv, 'fetch_json',
+                          side_effect=self._fake_fetch(payload, captured)):
+            result = srv.handle_cls_pool('up_pool')
+        self.assertEqual(result, {'stocks': payload['data']})
+        self.assertEqual(len(captured), 1)
+        call = captured[0]
+        self.assertTrue(call['url'].startswith(srv._UP_DOWN_ANALYSIS_URL + '?'))
+        self.assertIn('type=up_pool', call['url'])
+        self.assertIn('way=last_px', call['url'])
+        self.assertNotIn('change_px', call['url'])
+        self.assertIn('rever=1', call['url'])
+        self.assertIn('app=CailianpressWeb', call['url'])
+        self.assertEqual(call['headers'], config._UP_DOWN_ANALYSIS_HEADERS)
+        self.assertEqual(call['ttl'], cache_policy('plate')['ttl'])   # BR-POOL-3
+
+    def test_pool_handler_has_no_bare_ttl_literal(self):
+        """POOL-T4 (static half) / MS-T15 (B-04) [双向]: BR-POOL-3 forbids bare
+        `ttl=12` / `ttl=120` literals — the handler's only TTL source must be
+        `cache_policy('plate')['ttl']`.
+
+        ① The real source must NOT match `ttl=\\s*\\d+` (it reads
+        `ttl=cache_policy('plate')['ttl']`, `=` followed by a letter ⇒ correctly
+        allowed, not a bypass). ② Any synthetic bare literal MUST match the new
+        guard, and the old `12`-only regex must MISS `30`/`60`/`300` — that
+        false negative is what B-04 fixed."""
+        source = inspect.getsource(srv.handle_cls_pool)
+        self.assertIsNone(re.search(r'ttl=\s*\d+', source),
+                          'bare TTL literal in handle_cls_pool')
+        self.assertIn("cache_policy('plate')", source)
+        for literal in ('ttl=30', 'ttl=60', 'ttl=300'):
+            self.assertIsNotNone(re.search(r'ttl=\s*\d+', literal), literal)
+            self.assertIsNone(re.search(r'ttl=\s*12\d*', literal),
+                              f'old guard already caught {literal}?')
+
+    def test_sign_covers_exactly_the_specified_params_and_is_stable(self):
+        """POOL-T5: sign = cls_sign_params({app,os,sv,type,way,rever}) and two
+        calls over the same params agree (BR-POOL-5, sign untouched)."""
+        captured = []
+        with patch.object(srv, 'fetch_json',
+                          side_effect=self._fake_fetch({'code': 200, 'data': []},
+                                                       captured)):
+            srv.handle_cls_pool('down_pool')
+            srv.handle_cls_pool('down_pool')
+        query = parse_qs(urlparse(captured[0]['url']).query)
+        expected = utils_mod.cls_sign_params({
+            'app': 'CailianpressWeb', 'os': 'web', 'sv': '8.7.9',
+            'type': 'down_pool', 'way': 'last_px', 'rever': 1,
+        })
+        self.assertEqual(query['sign'], [expected])
+        self.assertEqual(captured[0]['url'], captured[1]['url'])
+
+    def test_upstream_business_failure_is_an_error_body(self):
+        """POOL-T6: code != 200 (e.g. 9000 from a wrong `way`) ⇒ error."""
+        with patch.object(srv, 'fetch_json',
+                          side_effect=self._fake_fetch({'code': 9000,
+                                                        'msg': 'param error'})):
+            self.assertEqual(srv.handle_cls_pool('up_pool'),
+                             {'error': 'param error'})
+        with patch.object(srv, 'fetch_json',
+                          side_effect=self._fake_fetch({'code': 9000, 'msg': ''})):
+            self.assertEqual(srv.handle_cls_pool('up_pool'),
+                             {'error': 'upstream_error'})
+
+    def test_fetch_or_decode_failure_degrades_without_raising(self):
+        """POOL-T7: FetchError / bad JSON / non-dict envelope ⇒ error dict."""
+        saved = dict(srv._pool_fetch_warned_at)
+        srv._pool_fetch_warned_at.clear()   # hermetic: don't leak warn-table state
+
+        def boom(url, headers=None, ttl=None, encoding=None):
+            raise FetchError('upstream_timeout')
+        try:
+            with patch.object(srv, 'fetch_json', side_effect=boom):
+                result = srv.handle_cls_pool('up_pool')
+            self.assertEqual(set(result), {'error'})
+            with patch.object(srv, 'fetch_json',
+                              return_value='<html>not json</html>'):
+                result = srv.handle_cls_pool('up_pool')
+            self.assertEqual(set(result), {'error'})
+            with patch.object(srv, 'fetch_json', return_value='[]'):
+                self.assertEqual(srv.handle_cls_pool('up_pool'),
+                                 {'error': 'malformed upstream response'})
+        finally:
+            srv._pool_fetch_warned_at.clear()               # restore run-order state
+            srv._pool_fetch_warned_at.update(saved)
+
+    def test_fetch_failure_logs_a_warning_before_degrading(self):
+        """MS-T13 (B-02): the all-capturing except path must leave a
+        server-side trace — a 200-with-error body alone hides upstream
+        format/type drift (the shape path already logs; this is its twin)."""
+        saved = dict(srv._pool_fetch_warned_at)
+        srv._pool_fetch_warned_at.clear()   # hermetic: independent of run order
+
+        def boom(url, headers=None, ttl=None, encoding=None):
+            raise FetchError('upstream_timeout')
+        try:
+            with patch.object(srv, 'fetch_json', side_effect=boom):
+                with self.assertLogs('server', level='WARNING') as logs:
+                    result = srv.handle_cls_pool('up_pool')
+            self.assertEqual(set(result), {'error'})
+            self.assertTrue(any('cls pool' in line and 'fetch failed' in line
+                                for line in logs.output), logs.output)
+        finally:
+            srv._pool_fetch_warned_at.clear()               # restore run-order state
+            srv._pool_fetch_warned_at.update(saved)
+
+    def test_fetch_failure_warning_is_rate_limited(self):
+        """P2-5 (B-02 放大): the negative cache re-raises the same failure for
+        EVERY request inside its window, so the warning must be deduped per
+        pool — the first failure logs, an identical failure inside the window
+        is silent, an expired window logs again, and the error body is
+        byte-identical either way (contract untouched)."""
+        saved = dict(srv._pool_fetch_warned_at)
+        srv._pool_fetch_warned_at.clear()       # hermetic: independent of run order
+
+        exc = FetchError('upstream_timeout')
+
+        def boom(url, headers=None, ttl=None, encoding=None):
+            raise exc
+        try:
+            with patch.object(srv, 'fetch_json', side_effect=boom):
+                with self.assertLogs('server', level='WARNING') as cm:
+                    first = srv.handle_cls_pool('up_pool')
+                # derive the expected message from the injected exception, not
+                # a string literal — a `FetchError.__str__` format change keeps
+                # this assertion (and the expiry seed below) in lock-step.
+                self.assertTrue(any('cls pool' in line and str(exc) in line
+                                    for line in cm.output), cm.output)
+                with self.assertNoLogs('server', level='WARNING'):
+                    repeat = srv.handle_cls_pool('up_pool')      # inside the window
+                # window expired ⇒ the signal comes back (state-only, no sleep).
+                # Seed with the SAME message the handler will produce so the
+                # expiry path is exercised — a mismatched message would re-log
+                # via the changed-message shortcut and mask an expiry regression.
+                srv._pool_fetch_warned_at['up_pool'] = (
+                    time.time() - srv._POOL_FETCH_WARN_GAP - 1, str(exc))
+                with self.assertLogs('server', level='WARNING'):
+                    expired = srv.handle_cls_pool('up_pool')
+            self.assertEqual(first, repeat)
+            self.assertEqual(first, expired)
+            self.assertEqual(set(first), {'error'})
+        finally:
+            srv._pool_fetch_warned_at.clear()                   # restore run-order state
+            srv._pool_fetch_warned_at.update(saved)
+
+    def test_non_string_upstream_msg_is_normalised_to_str(self):
+        """MS-T14 (B-03): every `error` value this handler emits is a str —
+        a non-string `msg` must not leak through as an int (type drift for
+        consumers doing string operations)."""
+        with patch.object(srv, 'fetch_json',
+                          side_effect=self._fake_fetch({'code': 9000, 'msg': 123})):
+            result = srv.handle_cls_pool('up_pool')
+        self.assertEqual(result, {'error': '123'})
+        self.assertIsInstance(result['error'], str)
+
+    def test_plate_domain_comment_lists_the_four_pools(self):
+        """MS-T16 (B-05): the DOMAIN_MATRIX['plate'] inline comment is the
+        tuning authority's impact note — it must name all 4 pool consumers."""
+        self.assertRegex(inspect.getsource(config), r"'plate':.*4 cls pools")
+
+    def test_empty_list_is_success_but_non_list_data_fails_loud(self):
+        """POOL-T8 + P1-02: `data: []` ⇒ `{'stocks': []}` (a legal empty pool,
+        no error key); a dict / absent `data` — the shape `/cls/plate` uses —
+        must surface as an error instead of a silently empty pool."""
+        with patch.object(srv, 'fetch_json',
+                          side_effect=self._fake_fetch({'code': 200, 'data': []})):
+            self.assertEqual(srv.handle_cls_pool('up_pool'), {'stocks': []})
+        for data in ({'stocks': [{'secu_code': 'sh600519'}]}, None):
+            with patch.object(srv, 'fetch_json',
+                              side_effect=self._fake_fetch({'code': 200,
+                                                            'data': data})):
+                with self.assertLogs('server', level='WARNING'):
+                    result = srv.handle_cls_pool('up_pool')
+            self.assertEqual(
+                result,
+                {'error': 'upstream data shape unexpected: '
+                          + type(data).__name__})
+
+    def test_enum_gate_rejects_bad_and_unhashable_types_without_fetching(self):
+        """POOL-T9 + P1-01: a non-str / non-hashable pool_type returns an error
+        dict (the frozenset lookup must never raise TypeError) and the network
+        is never touched."""
+        for bad in ('bogus', '', None, ['up_pool'], {'x': 1}, {'up_pool'}):
+            with patch.object(srv, 'fetch_json') as fetch:
+                result = srv.handle_cls_pool(bad)
+            self.assertEqual(set(result), {'error'}, repr(bad))
+            fetch.assert_not_called()
+
+    def test_cache_age_resolves_the_plate_domain(self):
+        """POOL-T12: max-age and fetch TTL share the plate policy domain."""
+        h = RSSHandler.__new__(RSSHandler)
+        for path in self.PATHS:
+            h.path = path
+            self.assertEqual(h._cache_age(), cache_policy('plate')['ttl'], path)
+
+    def test_healthz_feeds_list_all_four_pools_as_configured(self):
+        """POOL-T13: the pools are visible in /healthz's feed index."""
+        entries = {e['path']: e for e in _base_feed_entries('http://x')}
+        for path in self.PATHS:
+            self.assertEqual(entries[path]['status'], 'configured', path)
+            self.assertEqual(entries[path]['url'], 'http://x' + path, path)
+
+    def test_index_page_lists_all_four_pools(self):
+        """The `/` endpoint table mirrors _JSON_SHAPES — the pools stay
+        discoverable next to /cls/hotplate and /cls/plate."""
+        h = RSSHandler.__new__(RSSHandler)
+        captured = {}
+        h._send_text = lambda *a, **k: captured.setdefault('body', a[2])
+        h._serve_index()
+        for path in self.PATHS:
+            self.assertIn(path, captured['body'], path)
+
+
+class MarketSentimentTests(unittest.TestCase):
+    """MS-T1..T11: GET /finance/market_sentiment + the /finance/market strip.
+
+    Same stubbing style as the pool tests: patch `cdp_engine` / `page_data`
+    at the server-module boundary — no Chrome, no network.
+    """
+
+    ENVELOPE = {'code': 200, 'msg': '', 'data': {'market_degree': 88}}
+
+    @staticmethod
+    def _engine(ready=True, page='fake-page'):
+        engine = Mock()
+        engine.ready = ready
+        engine.get_page.return_value = page
+        return engine
+
+    def _call(self, page_data_value):
+        with patch.object(srv, 'cdp_engine', self._engine()), \
+             patch.object(srv, 'page_data', return_value=page_data_value):
+            return srv.handle_finance_market_sentiment()
+
+    def test_registered_in_the_shape_and_dispatch_tables(self):
+        """MS-T1: shape + handler + dispatch set + counts (R1 / R4 / RG1·RG2·RG4)."""
+        self.assertEqual(srv._JSON_SHAPES['/finance/market_sentiment'], 'object')
+        self.assertIs(srv._PANEL_HANDLERS['/finance/market_sentiment'],
+                      srv.handle_finance_market_sentiment)
+        self.assertIn('/finance/market_sentiment', srv._JSON_DISPATCHED_PATHS)
+        self.assertEqual(len(srv._JSON_SHAPES), 19)
+        self.assertEqual(len(srv._PANEL_HANDLERS), 5)
+        self.assertEqual(srv._CACHE_AGE_DOMAINS['/finance/market_sentiment'],
+                         'quote')                       # MS-T7 / R6 / RG3
+
+    def test_success_returns_the_upstream_object_verbatim(self):
+        """MS-T2: same object, no copy / rename / default fill (R5)."""
+        result = self._call({'market_sentiment': self.ENVELOPE,
+                             'basic_info': {'x': 1}})
+        self.assertIs(result, self.ENVELOPE)
+        self.assertEqual(result, self.ENVELOPE)
+
+    def test_cdp_unavailable_is_an_error_body(self):
+        """MS-T3: CDP gate before any page access (R3)."""
+        expected = {'error': 'Chrome CDP not available. See README.'}
+        with patch.object(srv, 'cdp_engine', None):
+            self.assertEqual(srv.handle_finance_market_sentiment(), expected)
+        with patch.object(srv, 'cdp_engine', self._engine(ready=False)):
+            self.assertEqual(srv.handle_finance_market_sentiment(), expected)
+
+    def test_page_data_none_degrades(self):
+        """MS-T4: `page_data` is None ⇒ page not initialized (R3)."""
+        self.assertEqual(self._call(None),
+                         {'error': 'Finance page not initialized.'})
+
+    def test_missing_key_never_returns_bare_null(self):
+        """MS-T5: absent key ⇒ an error client, never a bare `null` (R18)."""
+        result = self._call({'basic_info': {}})
+        self.assertIsNotNone(result)
+        self.assertEqual(result, {'error': 'market_sentiment unavailable'})
+
+    def test_index_page_lists_the_endpoint(self):
+        """MS-T11 (RG6): the web index stays the discoverability surface."""
+        h = RSSHandler.__new__(RSSHandler)
+        captured = {}
+        h._send_text = lambda *a, **k: captured.setdefault('body', a[2])
+        h._serve_index()
+        self.assertIn('/finance/market_sentiment', captured['body'])
+
+    def test_finance_market_strips_market_sentiment(self):
+        """MS-T8: with both strip actions in place the key is gone from
+        /finance/market while the rest of the contract survives (R2 / R9)."""
+        data = {'market_sentiment': self.ENVELOPE, 'articles': [],
+                'advance_decline': {}, 'live_refresh': [], 'anchor': {},
+                'basic_info': {}, 'timeline': [], '__ws__': [['x']]}
+        with patch.object(srv, 'cdp_engine', self._engine()), \
+             patch.object(srv, 'page_data', return_value=data):
+            result = srv.handle_finance_market()
+        self.assertNotIn('market_sentiment', result)
+        self.assertIn('articles', result)
+
+    def test_strip_requires_pop_and_expected_removal_together(self):
+        """MS-T9: `_fill_missing`'s two loops make each single action a *wrong*
+        observable — (a) drop-expected-only fills the ORIGINAL value back,
+        (b) pop-only pads None, (c) both ⇒ the key is gone (R2)."""
+        data = {'market_sentiment': self.ENVELOPE, 'articles': []}
+        expected_now = config._FINANCE_EXPECTED_KEYS        # action ② applied
+        expected_no_action2 = expected_now | {'market_sentiment'}
+        self.assertNotIn('market_sentiment', expected_now)
+
+        a = {}                                              # (a) 仅删 expected
+        srv._fill_missing(a, data, expected_now)
+        self.assertIn('market_sentiment', a)
+        self.assertEqual(a['market_sentiment'], self.ENVELOPE)
+
+        data_minus = {k: v for k, v in data.items()
+                      if k != 'market_sentiment'}           # (b) 仅 pop
+        b = {}
+        srv._fill_missing(b, data_minus, expected_no_action2)
+        self.assertIn('market_sentiment', b)
+        self.assertIsNone(b['market_sentiment'])
+
+        c = {}                                              # (c) 两动作齐做
+        srv._fill_missing(c, data_minus, expected_now)
+        self.assertNotIn('market_sentiment', c)
+
+
+@unittest.skipUnless(os.getenv('CLS_INTEGRATION'),
+                     'set CLS_INTEGRATION=1 to smoke the pools vs the real upstream')
+class ClsPoolIntegrationTests(unittest.TestCase):
+    """MS-T12 (B-01): each of the 4 pool endpoints vs the REAL upstream.
+
+    The unit suite stubs `fetch_json` everywhere, so `type` / `way` / `data`
+    contract drift on the upstream side is invisible to the default gate.
+    Opt-in (CLS_INTEGRATION=1), default-skipped, and asserting only the stable
+    contract: HTTP 200 + a list `stocks` — no upstream-specific values.
+    """
+
+    PATHS = ('/cls/up_pool', '/cls/continuous_up_pool',
+             '/cls/up_open_pool', '/cls/down_pool')
+
+    @classmethod
+    def setUpClass(cls):
+        cls.srv = BoundedThreadPoolServer(('127.0.0.1', 0), RSSHandler,
+                                          max_workers=2)
+        cls.srv.daemon_threads = True
+        threading.Thread(target=cls.srv.serve_forever, daemon=True).start()
+        cls.port = cls.srv.server_port
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.srv.shutdown()
+        cls.srv.server_close()
+
+    def _assert_pool(self, path):
+        conn = http.client.HTTPConnection('127.0.0.1', self.port, timeout=60)
+        conn.request('GET', path)
+        resp = conn.getresponse()
+        body = resp.read()
+        status = resp.status
+        conn.close()
+        self.assertEqual(status, 200, path)
+        payload = json.loads(body)
+        self.assertNotIn('error', payload, path)
+        self.assertIsInstance(payload['stocks'], list, path)
+
+    def test_up_pool_against_real_upstream(self):
+        self._assert_pool('/cls/up_pool')
+
+    def test_continuous_up_pool_against_real_upstream(self):
+        self._assert_pool('/cls/continuous_up_pool')
+
+    def test_up_open_pool_against_real_upstream(self):
+        self._assert_pool('/cls/up_open_pool')
+
+    def test_down_pool_against_real_upstream(self):
+        self._assert_pool('/cls/down_pool')
+
+
 class LonghuTests(unittest.TestCase):
     """BR-SRV-9 / R15: both upstreams via fetch_json(encoding='gbk') + L4 TTL."""
 
@@ -399,9 +808,10 @@ class CacheAgeTests(unittest.TestCase):
             self.assertEqual(h._cache_age(), cache_policy(domain)['ttl'], path)
 
     def test_realtime_panels_use_quote_domain(self):
-        """P2: the 4 CDP panels are real-time surfaces, not the 300s default."""
+        """P2: the 5 CDP panels are real-time surfaces, not the 300s default."""
         h = RSSHandler.__new__(RSSHandler)
         for path in ('/finance/market', '/finance/timeline',
+                     '/finance/market_sentiment',
                      '/quotation/market', '/market/timeline'):
             h.path = path
             self.assertEqual(h._cache_age(), cache_policy('quote')['ttl'], path)
@@ -507,7 +917,7 @@ class HealthPayloadTests(unittest.TestCase):
         self.assertNotIn('stale', payload)
         self.assertEqual(payload['cache_ttl'], cache_policy('feed')['ttl'])
         self.assertEqual(payload['request_timeout'], config.REQUEST_TIMEOUT)
-        self.assertEqual(len(payload['feeds']), 15)
+        self.assertEqual(len(payload['feeds']), 20)
         for entry in payload['feeds']:
             self.assertTrue({'name', 'path', 'url', 'status'} <= set(entry))
             self.assertNotIn('items', entry)      # check=0 never fetches
@@ -518,11 +928,13 @@ class HealthPayloadTests(unittest.TestCase):
     def test_feed_status_corrections(self):
         entries = {e['path']: e['status']
                    for e in _base_feed_entries('http://x')}
-        self.assertEqual(len(entries), 15)
+        self.assertEqual(len(entries), 20)
         self.assertEqual(entries['/stock/data'], 'configured')
         self.assertEqual(entries['/stock/basic_info'], 'configured')
         self.assertEqual(entries['/stock/f10'], 'requires_chrome_cdp')
         self.assertEqual(entries['/finance/market'], 'requires_chrome_cdp')
+        self.assertEqual(entries['/finance/market_sentiment'],
+                         'requires_chrome_cdp')          # MS-T10 / R7
         self.assertEqual(entries['/quotation/market'], 'requires_chrome_cdp')
         self.assertEqual(entries['/market/margin'], 'configured')
         self.assertEqual(entries['/cls/telegraph'], 'configured')
@@ -564,6 +976,9 @@ class HttpSemanticsTests(unittest.TestCase):
     """SRV-T33: HEAD writes no body on the 200/400/404 branches, and the
     `market` enum is enforced at the routing boundary (P1-1)."""
 
+    POOL_PATHS = ('/cls/up_pool', '/cls/continuous_up_pool',
+                  '/cls/up_open_pool', '/cls/down_pool')
+
     @classmethod
     def setUpClass(cls):
         cls.srv = BoundedThreadPoolServer(('127.0.0.1', 0), RSSHandler,
@@ -587,12 +1002,16 @@ class HttpSemanticsTests(unittest.TestCase):
         return status, body
 
     def test_head_writes_no_body(self):
+        # P2-6: no `body == b''` assertion — `http.client` zeroes its read
+        # length for HEAD (RFC 9112 §9.3.2), so it can never fail (same
+        # vacuous trap MS-T11 removed). The wire-level no-body guarantee on
+        # 200/400/404 is MS-T11b's job (raw socket); here we pin the status
+        # routing only.
         for path, expected in (('/', 200),
                                ('/market/margin?market=bogus', 400),
                                ('/nope', 404)):
-            status, body = self._req('HEAD', path)
+            status, _ = self._req('HEAD', path)
             self.assertEqual(status, expected, path)
-            self.assertEqual(body, b'', path)
 
     def test_invalid_market_is_400_without_reaching_the_handler(self):
         status, body = self._req('GET', '/market/margin?market=1%3Ffoo%3Dbar')
@@ -643,6 +1062,93 @@ class HttpSemanticsTests(unittest.TestCase):
             status, body = self._req('GET', '/finance/market')
         self.assertEqual(status, 200)
 
+    def test_market_sentiment_dispatches_200_in_success_and_degrade(self):
+        """MS-T6: the new panel rides the REAL dispatch table (table + shape
+        from `_JSON_SHAPES`, not a patched handler) — 200 + the upstream
+        object on success, 200 + error body on degrade, neither moving the
+        real-503 counter (N1)."""
+        envelope = {'code': 200, 'msg': '', 'data': {'market_degree': 88}}
+        engine = Mock()
+        engine.ready = True
+        engine.get_page.return_value = 'fake-page'
+        before = srv.metrics.snapshot()['http_503_total']
+        with patch.object(srv, 'cdp_engine', engine), \
+             patch.object(srv, 'page_data',
+                          return_value={'market_sentiment': envelope}):
+            status, body = self._req('GET', '/finance/market_sentiment')
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body), envelope)
+        with patch.object(srv, 'cdp_engine', engine), \
+             patch.object(srv, 'page_data', return_value=None):
+            status, body = self._req('GET', '/finance/market_sentiment')
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body),
+                         {'error': 'Finance page not initialized.'})
+        self.assertEqual(srv.metrics.snapshot()['http_503_total'], before)
+
+    def test_head_on_market_sentiment_writes_no_body(self):
+        """MS-T11: HEAD is served by the same dispatch branch — 200.
+
+        P2-6: no `body == b''` assertion here — `http.client` zeroes its
+        read length for HEAD (RFC 9112 §9.3.2), so it can never fail.  The
+        wire-level no-body guarantee is MS-T11b's job (raw socket).
+        """
+        status, _ = self._req('HEAD', '/finance/market_sentiment')
+        self.assertEqual(status, 200)
+
+    def _raw_exchange(self, method, path):
+        """Raw-socket round-trip returning (head, body) — the bytes on the wire.
+
+        `http.client` zeroes its read length for HEAD (RFC 9112 §9.3.2), so
+        `resp.read()` answers b'' even when the server really did write a body:
+        any no-body assertion built on it cannot fail.  Only the socket shows
+        the truth.  The server speaks HTTP/1.0 (close-delimited), so
+        read-until-EOF is deterministic.
+        """
+        conn = socket.create_connection(('127.0.0.1', self.port), timeout=5)
+        try:
+            conn.sendall(
+                f'{method} {path} HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n'.encode())
+            buf = b''
+            while True:
+                try:
+                    chunk = conn.recv(65536)
+                except socket.timeout:
+                    break
+                if not chunk:
+                    break
+                buf += chunk
+        finally:
+            conn.close()
+        head, _, body = buf.partition(b'\r\n\r\n')
+        return head, body
+
+    def test_head_body_never_reaches_the_wire(self):
+        """MS-T11b (tester 补) [逆向]: HEAD 的「无 body」必须在线上可证伪。
+
+        MS-T11 / SRV-T33 用 `http.client` 断言 `body == b''` —— client 对 HEAD 把读取
+        长度归零，**服务器真写了 body 它也返回 b''**，该断言被架空（把
+        `do_HEAD` 改成 `write_body=True`，18 条 HttpSemanticsTests 仍全绿，
+        而线上确有 54 字节 body）。本用例改读裸 socket，并先用 GET 自证这条
+        读法确实读得到 body（否则本用例自身也是空断言），再断言 HEAD 线上
+        0 字节、而头部仍按 GET 口径给出非零 Content-Length。
+        P5a-r2 (P2-1): 400 分支一并纳入裸 socket 循环——`/market/margin?market=bogus`
+        在路由边界 400（早于 handler），其「线上无 body」保证原先零覆盖。
+        """
+        _, get_body = self._raw_exchange('GET', '/finance/market_sentiment')
+        self.assertTrue(get_body, 'raw reader must see a GET body first')
+        for path, expected in (('/finance/market_sentiment', 200),
+                               ('/', 200),
+                               ('/market/margin?market=bogus', 400),
+                               ('/nope', 404)):
+            head, body = self._raw_exchange('HEAD', path)
+            self.assertTrue(head.startswith(
+                f'HTTP/1.0 {expected}'.encode()), (path, head[:40]))
+            self.assertEqual(body, b'', path)
+            if path == '/finance/market_sentiment':   # headers stay GET-shaped
+                cl = re.search(br'Content-Length: (\d+)', head)
+                self.assertTrue(cl and int(cl.group(1)) > 0, head)
+
     def test_hotplate_all_partitions_failing_is_200_with_error_body(self):
         def boom(url, headers=None, ttl=None, encoding=None):
             raise RuntimeError('upstream down')
@@ -668,6 +1174,53 @@ class HttpSemanticsTests(unittest.TestCase):
         before = srv.metrics.snapshot()['http_503_total']
         with patch.dict(srv._PANEL_HANDLERS, {'/finance/market': boom}):
             status, body = self._req('GET', '/finance/market')
+        self.assertEqual(status, 200)
+        self.assertIn('error', json.loads(body))
+        self.assertEqual(srv.metrics.snapshot()['http_503_total'], before)
+
+    def test_all_four_pool_paths_dispatch_to_200_with_stocks(self):
+        """POOL-T10: every registered pool path answers 200 + {'stocks': ...}."""
+        payload = {'code': 200, 'msg': '', 'data': [{'secu_code': 'sh600519'}]}
+        with patch.object(srv, 'fetch_json',
+                          side_effect=lambda *a, **k: json.dumps(payload)):
+            for path in self.POOL_PATHS:
+                status, body = self._req('GET', path)
+                self.assertEqual(status, 200, path)
+                self.assertEqual(json.loads(body)['stocks'],
+                                 payload['data'], path)
+
+    def test_pool_upstream_failure_is_200_with_error_body(self):
+        """POOL-T11 / N1: a dead upstream degrades to 200 + error and does not
+        move the real-503 counter."""
+        saved = dict(srv._pool_fetch_warned_at)
+        srv._pool_fetch_warned_at.clear()   # hermetic: don't leak warn-table state
+
+        def boom(url, headers=None, ttl=None, encoding=None):
+            raise RuntimeError('upstream down')
+        before = srv.metrics.snapshot()['http_503_total']
+        try:
+            with patch.object(srv, 'fetch_json', side_effect=boom):
+                for path in self.POOL_PATHS:
+                    status, body = self._req('GET', path)
+                    self.assertEqual(status, 200, path)
+                    self.assertIn('error', json.loads(body), path)
+            self.assertEqual(srv.metrics.snapshot()['http_503_total'], before)
+        finally:
+            srv._pool_fetch_warned_at.clear()               # restore run-order state
+            srv._pool_fetch_warned_at.update(saved)
+
+    def test_unregistered_pool_like_path_is_404(self):
+        """BR-SRV-2: only the 4 registered pool paths leave the 404 fallthrough."""
+        status, _ = self._req('GET', '/cls/up_open')
+        self.assertEqual(status, 404)
+
+    def test_pool_guard_captures_a_raising_handler(self):
+        """P2-07: even a handler that raises (unreachable by design — it is a
+        total function) degrades to 200 + error via `_guard`."""
+        before = srv.metrics.snapshot()['http_503_total']
+        with patch.object(srv, 'handle_cls_pool',
+                          side_effect=RuntimeError('boom')):
+            status, body = self._req('GET', '/cls/up_pool')
         self.assertEqual(status, 200)
         self.assertIn('error', json.loads(body))
         self.assertEqual(srv.metrics.snapshot()['http_503_total'], before)

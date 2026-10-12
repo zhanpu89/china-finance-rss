@@ -1820,6 +1820,53 @@ class LastDataEvictionTests(unittest.TestCase):
         self.assertEqual(set(page._key_last_seen), set(page._last_data))
 
 
+class SharedPageCopySemanticsTests(unittest.TestCase):
+    """P2-4: `get_data` hands every caller a fresh dict — the shared-page
+    invariant behind `/finance/market`'s in-place `pop` not poisoning its
+    sibling `/finance/market_sentiment`.
+
+    `handle_finance_market` does `data.pop('market_sentiment', None)` on
+    whatever `page_data` returned; that is only harmless while `get_data`
+    builds a NEW `merged` dict per call (cdp_engine.py).  Were it ever
+    "optimised" to return the shared cache, the pop would delete the key
+    from the page itself and the sibling endpoint would answer
+    `market_sentiment unavailable` on every later request.  Drives the REAL
+    `page_data` → `get_data` (no stubbing), so the shared-dict mutation
+    turns both tests red.
+    """
+
+    def _page(self):
+        page = cdp_engine.CDPPage.__new__(cdp_engine.CDPPage)
+        page.cache = {'market_sentiment': {'code': 200, 'data': {}},
+                      'articles': [], '__ws__': [['x']]}
+        page._last_data = {'timeline': [{'i': 1}]}
+        page._last_data_ts = {'timeline': time.time()}
+        page._last_data_max_age = 600          # __init__'s default; entry is fresh
+        page._lock = threading.Lock()
+        return page
+
+    def test_each_read_is_a_distinct_dict(self):
+        page = self._page()
+        first = cdp_engine.page_data(page)
+        second = cdp_engine.page_data(page)
+        self.assertIsNot(first, second)             # new object per call
+        self.assertIsNot(first, page.cache)         # never the live cache
+        self.assertIsNot(first, page._last_data)    # nor the fill source
+
+    def test_pop_on_one_read_does_not_reach_the_next(self):
+        page = self._page()
+        first = cdp_engine.page_data(page)
+        # the three keys handle_finance_market pops in place:
+        first.pop('market_sentiment', None)
+        first.pop('timeline', None)
+        first.pop('__ws__', None)
+        second = cdp_engine.page_data(page)
+        self.assertIn('market_sentiment', second)   # sibling endpoint's key
+        self.assertIn('timeline', second)
+        self.assertIn('market_sentiment', page.cache)   # sources untouched
+        self.assertIn('timeline', page._last_data)
+
+
 # ── Scheduled-refresh freshness floor (quote 相位耦合修复) ──────────────────
 
 class RefreshEpochTerminalCacheTests(unittest.TestCase):

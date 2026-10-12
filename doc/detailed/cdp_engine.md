@@ -1,6 +1,7 @@
 # cdp_engine.py 详细设计
 
-> **版本** v1.4 · **状态** 已契约同步（★ v1.4：**溯源收口 + 引用时点约定**——上游 **SAD v1.12 / PRD v0.10**、基础层接口权威 **config v1.6 / metrics v1.8**；**无 BR 语义变更、无对外契约变更**；P7b 传输层批次：以 `china_finance_rss/cdp_engine.py` 实现为准回写）· **日期** 2026-09-18 · **作者/产出** task-decomposer
+> **版本** v1.5 · **状态** 已契约同步（★ v1.5：**A 类端点计数同步（P7b 漂移回填 · 2026-10-10）**——§9 AC 追溯矩阵 `:751`「CDP 降级路径 A 4 / A′ 1」→「A 5 / A′ 1」、`:752`「A 类 4 端点逐条验证」→「A 类 5 端点」（随 `market_sentiment` 独立端点增量：A 类 4→5，`/finance/market_sentiment` 属 A 类；**CDP 层零改动**——`API_KEY_MAP`/`_shouldCapture`/`KEY_TTL_OVERRIDES` 早已就绪）；**无 BR 语义变更、无对外契约变更**；★ v1.4：**溯源收口 + 引用时点约定**——上游 **SAD v1.12 / PRD v0.10**、基础层接口权威 **config v1.6 / metrics v1.8**；**无 BR 语义变更、无对外契约变更**；P7b 传输层批次：以 `china_finance_rss/cdp_engine.py` 实现为准回写）· **日期** 2026-10-10 · **作者/产出** task-decomposer
+> **v1.5 变更（A 类端点计数同步 · P7b 漂移回填 · 2026-10-10 · 只改文档，不改代码）**：§9 AC 追溯矩阵 `:751`「**AC-S4**（CDP 降级路径 A 4 / A′ 1）」→「A 5 / A′ 1」、`:752`「**AC-S4**（A 类 4 端点逐条验证）」→「A 类 5 端点」——随 `market_sentiment` 独立端点增量（`/finance/market_sentiment` 属 A 类，A 类 4→5）。**CDP 层零改动**（`API_KEY_MAP`/`_shouldCapture`/`KEY_TTL_OVERRIDES` 早已就绪，见 `market_sentiment_独立接口.md` §2.4）；**无 BR 语义变更 / 无对外契约变更 / 无接口变更**；**未改代码 / 测试 / SAD / PRD / API.md / README.md / `.opencode`**。
 > **v1.4 变更（溯源收口 + 引用时点约定 · 只改文档，不改代码）**：① **【溯源收口】** 头部上游 **SAD v1.3 → v1.12 / PRD v0.3 → v0.10**；「基础层接口权威」栏 **config v1.1 → v1.6 / metrics v1.1 → v1.8**（均指向**现行版本**；`cache.md` 与本模块无接口、不列版本）。② **【引用时点约定（新增）】**「接口权威」栏所列版本 = **本文最后一次同步时点的快照**；被引文档的**权威版本以其自身头部为准**——故该栏**落后一版不属漂移、无需每次追平**；**内容以被引文档为准，此栏仅用于定位**。**本模块的代码 / 契约形态 / BR / 测试编号 / 偏差零变更**（v1.3 正文逐字保留）；**未改代码 / SAD / PRD / API.md / README.md / `.opencode`；`_PROGRESS.md` 同步。**
 > **v1.3 变更（以代码为准）**：① `/proc/{pid}/cmdline` 读取改为 `with open(...)`（**修复每次探测泄漏一个 fd**）——`_chrome_pids_by_flag` 逐 PID 读 cmdline，旧写法在 OOM 循环/高频 watch 下会耗尽进程 fd；② 补记 `_chrome_pids_by_flag`/`_kill_chrome_on_port` 的防御面（`/proc` 不可读、PID 竞态消失、`pkill` 兜底）。**§2/§3/§4 的 P7b 口径（窗口终态保证 / `_last_data_ts` 老化 / 对称淘汰 / 限时导航锁 / `CDP_RESTART_THROTTLE` 源自 config）不变。**
 > 本版（v1.2 P7b 契约同步，**只改文档、不改代码**）：① `get_data` 以 `_last_data_ts` 老化（**时钟缺失 = 陈旧**）；`_reconnect` 同时清 `_last_data`/`_last_data_ts`；② `navigate_stock` 快路径与锁后兜底改用带 max-age 的 `_fresh_secu_code_locked`，导航锁 `acquire(timeout)` 限时；③ 新增 `_evict_stalest_last_data_locked`（硬上限淘汰**同步清** `_last_data_ts`/`_key_last_seen`/`_api_urls`）；④ 重启窗口**异常兜底**（`ensure_chrome`/`full_chrome_restart` 必然收口终态）；⑤ `CDP_RESTART_THROTTLE` 改由 config 注册；⑥ **§2.1 A′ 收口**：`fetch_cls_f10` 五出口全部 `cdp_unavailable`（含"有数据但不匹配"），修正 v1.1 `REV-DES-18` 的 `None` 例外。
@@ -748,8 +749,8 @@ def _chrome_pids_by_flag(flag):
 | 本模块设计点 | 覆盖 AC |
 |-------------|---------|
 | `page_data` 唯一防御入口 + 总函数（BR-CDP-1/2） | **AC-S1**（全端点异常兜底）/ **R18** |
-| A 类 error 客体 / A′ 逐码 `cdp_unavailable` 的信号源（BR-CDP-3） | **AC-S4**（CDP 降级路径 A 4 / A′ 1）/ **AC-A5** |
-| `timeline` 缺失不返回裸 null（§6） | **AC-S4**（A 类 4 端点逐条验证）/ R18 旁支 |
+| A 类 error 客体 / A′ 逐码 `cdp_unavailable` 的信号源（BR-CDP-3） | **AC-S4**（CDP 降级路径 A 5 / A′ 1）/ **AC-A5** |
+| `timeline` 缺失不返回裸 null（§6） | **AC-S4**（A 类 5 端点逐条验证）/ R18 旁支 |
 | 重启窗口状态机 + 幂等迁移（BR-CDP-4/5） | **AC-S10**（`cdp_restart_window`）/ **R19** |
 | 盘中避让（BR-CDP-6） | **AC-S4**（降级可验证）/ **R19** / ADR-012 |
 | 节流/back-to-back 保护保留（BR-CDP-7） | R19（不制造额外无数据窗口） |
@@ -817,3 +818,4 @@ def _chrome_pids_by_flag(flag):
 | v1.2 | 2026-09-16 | **P7b 契约同步（以 `cdp_engine.py` 实现为准）**：`get_data` 以 `_last_data_ts` 老化（缺失=陈旧）·`_reconnect` 双表同清·`_evict_stalest_last_data_locked` 对称清理·`navigate_stock` max-age 快路径/锁后兜底/限时导航锁·`_same_code` 归一·重启窗口异常兜底（终态保证）·`CDP_RESTART_THROTTLE` 改由 config 注册·**A′ 收口为五出口全 `cdp_unavailable`**（修正 REV-DES-18）。新增 BR-CDP-13..19、CDP-T14..T19、§10#11..15。**未改代码** |
 | v1.3 | 2026-09-17 | **P7b 传输层批次契约同步（以 `cdp_engine.py` 实现为准）**：`_chrome_pids_by_flag` 的 `/proc/{pid}/cmdline` 改 `with open(...)`（**修复 fd 泄漏**）·补记 `/proc` 不可读/PID 竞态/pkill 兜底防御面。新增 BR-CDP-20、CDP-T20、§2.7、§5.8、§10#16。**未改代码** |
 | v1.4 | 2026-09-18 | **溯源收口 + 引用时点约定（只改文档）**：头部上游 **SAD v1.3 → v1.12 / PRD v0.3 → v0.10**；基础层接口权威 **config v1.1 → v1.6 / metrics v1.1 → v1.8**（指向现行版本）；新增「引用时点约定」——接口权威栏 = 本文最后同步时点快照，**落后一版不属漂移**，内容以被引文档头部为准。**无 BR 语义变更 / 无对外契约变更**；**未改代码 / SAD / PRD / API.md / README.md / `.opencode`** |
+| v1.5 | 2026-10-10 | **A 类端点计数同步（P7b 漂移回填 · 只改文档，不改代码）**：§9 AC 追溯矩阵 `:751`「CDP 降级路径 A 4 / A′ 1」→「A 5 / A′ 1」、`:752`「A 类 4 端点逐条验证」→「A 类 5 端点」（`market_sentiment` 独立端点增量：A 类 4→5，`/finance/market_sentiment` 属 A 类）。**CDP 层零改动 / 无 BR 语义变更 / 无对外契约变更 / 无接口变更**；**未改代码 / 测试 / SAD / PRD / API.md / README.md / `.opencode`** |

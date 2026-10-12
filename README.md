@@ -55,11 +55,16 @@ Codes accept `sh`/`sz`/**`bj`** (北交所) equally; dotted forms (`600519.SH`, 
 
 | Endpoint | Description | CDP |
 | --- | --- | --- |
-| `/finance/market` | Market overview: sentiment, indices, advance/decline | Yes |
+| `/finance/market` | Market overview: indices, advance/decline | Yes |
+| `/finance/market_sentiment` | Market sentiment (market degree, balance, up-ratio) | Yes |
 | `/finance/timeline` | Finance index timeline | Yes |
 | `/quotation/market` | Quotation: sectors, rankings, IPOs, BSE | Yes |
 | `/market/timeline` | Index intraday timeline | Yes |
 | `/cls/hotplate` | Sector capital flow rankings (行业/概念/地域) | No |
+| `/cls/up_pool` | 涨停池 (limit-up stocks) | No |
+| `/cls/continuous_up_pool` | 连板池 (consecutive limit-up stocks) | No |
+| `/cls/up_open_pool` | 炸板池 (opened-limit stocks) | No |
+| `/cls/down_pool` | 跌停池 (limit-down stocks) | No |
 | `/ths/longhu` | THS 龙虎榜 (top buy/sell brokerages) | No |
 | `/market/margin` | 融资融券 (margin lending balance) | No |
 

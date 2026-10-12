@@ -45,6 +45,7 @@ from .config import (
     _HOTPLATE_BASE_URL, _HOTPLATE_HEADERS,
     _PLATE_INFO_URL, _PLATE_STOCKS_URL, _PLATE_INDUSTRY_URL,
     _PLATE_HEADERS,
+    _UP_DOWN_ANALYSIS_URL, _UP_DOWN_ANALYSIS_HEADERS,
     CDP_RESTART_INTERVAL, stock_nav_page_names,
     cdp_engine,
 )
@@ -279,6 +280,7 @@ def handle_finance_market(feed_url=None):
         return {'error': 'Finance page not initialized.'}
     ws_raw = data.pop('__ws__', None)
     data.pop('timeline', None)
+    data.pop('market_sentiment', None)      # split out to /finance/market_sentiment
     result = {}
     _fill_missing(result, data, _FINANCE_EXPECTED_KEYS)
     if ws_raw:
@@ -330,6 +332,21 @@ def handle_finance_timeline():
     if tl is None:                              # R18: never return bare null
         return {'error': 'timeline unavailable'}
     return tl
+
+
+def handle_finance_market_sentiment():
+    """CLS Finance Market Sentiment (财联社市场情绪) — from finance CDP page."""
+    global cdp_engine
+    if not cdp_engine or not cdp_engine.ready:
+        return {'error': 'Chrome CDP not available. See README.'}
+    page = cdp_engine.get_page('cls_finance')
+    data = page_data(page)
+    if data is None:
+        return {'error': 'Finance page not initialized.'}
+    ms = data.get('market_sentiment')
+    if ms is None:                              # R18: never return bare null
+        return {'error': 'market_sentiment unavailable'}
+    return ms                                   # upstream envelope, verbatim
 
 
 # ── Hotplate ───────────────────────────────────────────────────────────────
@@ -430,6 +447,78 @@ def handle_cls_plate(code):
     return result
 
 
+# P2-5: the negative cache (cache.py) re-raises the same failure for every
+# request inside its window, so a raw per-failure WARNING would scale with
+# RPS instead of with incidents.  Rate-limit per pool: one warning per
+# _POOL_FETCH_WARN_GAP per pool_type, and a *changed* message logs at once
+# (a new failure mode is a new signal).  Deliberately lock-free (tolerated
+# race) — same style as `metrics._warned`; keys are the enum-gated
+# `_POOL_TYPES` values, so the table stays bounded at 4 entries.
+_POOL_FETCH_WARN_GAP = 30.0                # seconds between identical warnings
+_pool_fetch_warned_at = {}                 # pool_type -> (last_ts, last_msg)
+
+
+def _warn_pool_fetch_failed(pool_type, exc):
+    """Rate-limited B-02 warning: keep the signal, bound the volume (P2-5).
+
+    The message format is unchanged (`[server] cls pool <type> fetch failed:
+    <exc>`), so log scrapers and MS-T13 keep matching.
+    """
+    msg = str(exc)
+    prev = _pool_fetch_warned_at.get(pool_type)
+    now = time.time()
+    if (prev is not None and prev[1] == msg
+            and now - prev[0] < _POOL_FETCH_WARN_GAP):
+        return                                  # same failure, still in window
+    _pool_fetch_warned_at[pool_type] = (now, msg)
+    log.warning('[server] cls pool %s fetch failed: %s', pool_type, msg)
+
+
+def handle_cls_pool(pool_type):
+    """CLS Pool Data (财联社涨停/连板/炸板/跌停 4 池) — direct REST, plate TTL.
+
+    ``pool_type`` ∈ ``_POOL_TYPES`` (= ``_POOL_HANDLERS`` values, the single
+    authority).  Success → ``{'stocks': [...]}`` (upstream ``data`` is a bare
+    list); every failure and every illegal input → ``{'error': ...}`` — the
+    total function never raises (BR-POOL-8), ``_guard`` stays the backstop.
+    """
+    # ① Enum gate (BR-POOL-9 / P1-01): short-circuit on the type first — a
+    # non-hashable `pool_type` (list/dict/set) raises TypeError on the
+    # frozenset membership test, which would break the total-function contract.
+    if not isinstance(pool_type, str) or pool_type not in _POOL_TYPES:
+        return {'error': f'unknown pool type: {pool_type!r}'}
+    # ② Signed URL (BR-POOL-2/5): `way` is hard-coded `last_px` — `change_px`
+    # makes the upstream answer code=9000 (measured, do not change).
+    params = {
+        'app': 'CailianpressWeb', 'os': 'web', 'sv': '8.7.9',
+        'type': pool_type, 'way': 'last_px', 'rever': 1,
+    }
+    params['sign'] = cls_sign_params(params)
+    url = f'{_UP_DOWN_ANALYSIS_URL}?{urlencode(params)}'
+    # ③ Single fetch entry point + plate-domain TTL (BR-POOL-3/4).
+    try:
+        raw = json.loads(fetch_json(
+            url, _UP_DOWN_ANALYSIS_HEADERS,
+            ttl=cache_policy('plate')['ttl']))
+    except Exception as exc:                  # FetchError / JSON decode / …
+        _warn_pool_fetch_failed(pool_type, exc)   # P2-5: rate-limited (MS-T13)
+        return {'error': str(exc)}            # BR-POOL-8: degrade in place
+    # ④ Envelope + fail-loud shape check (BR-POOL-7 / P1-02): a non-list `data`
+    # (the dict shape /cls/plate uses) is contract drift — it must surface as an
+    # error instead of being swallowed into a silent empty pool.
+    if not isinstance(raw, dict):
+        return {'error': 'malformed upstream response'}
+    if raw.get('code') != 200:
+        return {'error': str(raw.get('msg') or 'upstream_error')}
+    data = raw.get('data')
+    if not isinstance(data, list):
+        shape = type(data).__name__
+        log.warning('[server] cls pool %s: unexpected upstream data shape %s',
+                    pool_type, shape)
+        return {'error': f'upstream data shape unexpected: {shape}'}
+    return {'stocks': data}
+
+
 # ── Route table ─────────────────────────────────────────────────────────────
 
 ROUTES = {
@@ -475,19 +564,22 @@ ROUTES = {
 
 _SHAPES = frozenset({'batch', 'object', 'rss', 'text'})
 
-# 14 JSON branches → shape. A new JSON endpoint MUST be registered here,
+# 19 JSON branches → shape. A new JSON endpoint MUST be registered here,
 # otherwise _handle_request falls through to 404 (BR-SRV-2). /healthz reuses
 # the `object` shape but is deliberately NOT in this table (else the guard
 # below would fail at import).
 _JSON_SHAPES = {
     '/finance/market': 'object', '/finance/timeline': 'object',
+    '/finance/market_sentiment': 'object',
     '/quotation/market': 'object', '/market/timeline': 'object',
     '/stock/data': 'batch', '/stock/fundflow': 'batch', '/stock/timeline': 'batch',
     '/stock/f10': 'batch', '/stock/basic_info': 'batch', '/stock/announcement': 'batch',
     '/cls/hotplate': 'object', '/cls/plate': 'object',
+    '/cls/up_pool': 'object', '/cls/continuous_up_pool': 'object',
+    '/cls/up_open_pool': 'object', '/cls/down_pool': 'object',
     '/ths/longhu': 'text', '/market/margin': 'object',
 }
-assert len(_JSON_SHAPES) == 14      # structure guard (P1-6 anti-regression)
+assert len(_JSON_SHAPES) == 19      # structure guard (P1-6 anti-regression)
 
 _STOCK_BATCH_HANDLERS = {
     '/stock/data': handle_cls_stock_batch,
@@ -500,21 +592,32 @@ _STOCK_BATCH_HANDLERS = {
 assert set(_STOCK_BATCH_HANDLERS) == {p for p, s in _JSON_SHAPES.items()
                                       if s == 'batch'}
 
-# 4 CDP panels → their handler (P2: the router dispatches from tables, and the
+# 5 CDP panels → their handler (P2: the router dispatches from tables, and the
 # guard shape is read from _JSON_SHAPES below — never a drifting literal).
 _PANEL_HANDLERS = {
     '/finance/market': handle_finance_market,
     '/finance/timeline': handle_finance_timeline,
+    '/finance/market_sentiment': handle_finance_market_sentiment,
     '/quotation/market': handle_cls_quotation,
     '/market/timeline': handle_market_timeline,
 }
+# 4 CLS pools → their upstream `type` (path mirrors type; table-driven like
+# _PANEL_HANDLERS so the router never hardcodes a type literal — BR-POOL-1).
+_POOL_HANDLERS = {
+    '/cls/up_pool': 'up_pool',
+    '/cls/continuous_up_pool': 'continuous_up_pool',
+    '/cls/up_open_pool': 'up_open_pool',
+    '/cls/down_pool': 'down_pool',
+}
+_POOL_TYPES = frozenset(_POOL_HANDLERS.values())   # value domain (handler gate)
 # P2: _JSON_SHAPES must actually be consumed, not decorative.  This set is the
 # routing's declared JSON coverage; the assertion makes a new _JSON_SHAPES entry
 # without a branch (or a branch without a shape) fail at import time.
 _JSON_DISPATCHED_PATHS = (frozenset(_PANEL_HANDLERS)
                           | set(_STOCK_BATCH_HANDLERS)
                           | {'/cls/hotplate', '/cls/plate',
-                             '/ths/longhu', '/market/margin'})
+                             '/ths/longhu', '/market/margin'}
+                          | set(_POOL_HANDLERS))
 assert _JSON_DISPATCHED_PATHS == frozenset(_JSON_SHAPES)
 
 # path → cache-policy domain for Cache-Control max-age (BR-SRV-8). Unregistered
@@ -522,11 +625,14 @@ assert _JSON_DISPATCHED_PATHS == frozenset(_JSON_SHAPES)
 _CACHE_AGE_DOMAINS = {
     # live CDP panels are real-time quote surfaces — never the 300s default (P2)
     '/finance/market': 'quote', '/finance/timeline': 'quote',
+    '/finance/market_sentiment': 'quote',
     '/quotation/market': 'quote', '/market/timeline': 'quote',
     '/stock/data': 'quote', '/stock/basic_info': 'quote',
     '/stock/fundflow': 'fundflow', '/stock/timeline': 'timeline',
     '/stock/f10': 'f10', '/stock/announcement': 'announcement',
     '/cls/hotplate': 'plate', '/cls/plate': 'plate',
+    '/cls/up_pool': 'plate', '/cls/continuous_up_pool': 'plate',
+    '/cls/up_open_pool': 'plate', '/cls/down_pool': 'plate',
     '/ths/longhu': 'longhu', '/market/margin': 'margin',
     '/cls/telegraph': 'feed', '/eastmoney/kuaixun': 'feed',
     '/ths/kuaixun': 'feed', '/jin10/flash': 'feed',
@@ -920,7 +1026,7 @@ _HEALTH_POLL = 0.25
 
 
 def _base_feed_entries(base_url):
-    """15 healthz feed entries (5 RSS + 10 JSON/CDP); status per §2.9.1."""
+    """20 healthz feed entries (5 RSS + 15 JSON/CDP); status per §2.9.1."""
     feeds = []
     for path, info in ROUTES.items():
         feeds.append({
@@ -932,6 +1038,10 @@ def _base_feed_entries(base_url):
     feeds.extend([
         {'name': 'CLS Finance Market (财联社看盘)', 'path': '/finance/market',
          'url': base_url + '/finance/market', 'status': 'requires_chrome_cdp'},
+        {'name': 'CLS Finance Market Sentiment (财联社市场情绪)',
+         'path': '/finance/market_sentiment',
+         'url': base_url + '/finance/market_sentiment',
+         'status': 'requires_chrome_cdp'},
         {'name': 'CLS Quotation Market (财联社行情)', 'path': '/quotation/market',
          'url': base_url + '/quotation/market', 'status': 'requires_chrome_cdp'},
         {'name': 'CLS Stock Detail (财联社个股详情)', 'path': '/stock/data',
@@ -950,6 +1060,15 @@ def _base_feed_entries(base_url):
          'url': base_url + '/stock/basic_info', 'status': 'configured'},
         {'name': 'Market Margin (融资融券)', 'path': '/market/margin',
          'url': base_url + '/market/margin', 'status': 'configured'},
+        {'name': 'CLS Up Pool (财联社涨停池)', 'path': '/cls/up_pool',
+         'url': base_url + '/cls/up_pool', 'status': 'configured'},
+        {'name': 'CLS Continuous Up Pool (财联社连板池)',
+         'path': '/cls/continuous_up_pool',
+         'url': base_url + '/cls/continuous_up_pool', 'status': 'configured'},
+        {'name': 'CLS Up Open Pool (财联社炸板池)', 'path': '/cls/up_open_pool',
+         'url': base_url + '/cls/up_open_pool', 'status': 'configured'},
+        {'name': 'CLS Down Pool (财联社跌停池)', 'path': '/cls/down_pool',
+         'url': base_url + '/cls/down_pool', 'status': 'configured'},
     ])
     return feeds
 
@@ -1215,7 +1334,7 @@ class RSSHandler(BaseHTTPRequestHandler):
                             body, cache=False, write_body=write_body)
             return
 
-        # ── 4 panels (object) — handler + shape from the dispatch tables ────
+        # ── 5 panels (object) — handler + shape from the dispatch tables ────
         if path in _PANEL_HANDLERS:
             self._send_json_shape(path, _PANEL_HANDLERS[path],
                                   write_body=write_body)
@@ -1227,7 +1346,13 @@ class RSSHandler(BaseHTTPRequestHandler):
                                      write_body=write_body, path=path)
             return
 
-        # ── remaining 4 JSON branches ───────────────────────────────────────
+        # ── remaining 8 JSON branches ───────────────────────────────────────
+        if path in _POOL_HANDLERS:                     # 4 CLS pools (object)
+            pool_type = _POOL_HANDLERS[path]
+            self._send_json_shape(
+                path, lambda pt=pool_type: handle_cls_pool(pt),
+                write_body=write_body)                 # default arg: no late binding
+            return
         if path == '/cls/hotplate':
             self._send_json_shape(path, handle_cls_hotplate,
                                   write_body=write_body)
@@ -1524,10 +1649,17 @@ class RSSHandler(BaseHTTPRequestHandler):
         json_apis = [
             ('/finance/market', 'Finance Market Data (财联社看盘)', '/finance/market', True),
             ('/finance/timeline', 'Finance Timeline (分时图)', '/finance/timeline', True),
+            ('/finance/market_sentiment', 'Market Sentiment (市场情绪)',
+             '/finance/market_sentiment', True),
             ('/quotation/market', 'Quotation Market Data (行情)', '/quotation/market', True),
             ('/market/timeline', 'Market Index Timeline (指数分时图)', '/market/timeline', True),
             ('/cls/hotplate', 'Hotplate (板块)', '/cls/hotplate', False),
             ('/cls/plate', 'Plate Detail (板块详情)', '/cls/plate?code=cls80484', False),
+            ('/cls/up_pool', 'Up Pool (涨停池)', '/cls/up_pool', False),
+            ('/cls/continuous_up_pool', 'Continuous Up Pool (连板池)',
+             '/cls/continuous_up_pool', False),
+            ('/cls/up_open_pool', 'Up Open Pool (炸板池)', '/cls/up_open_pool', False),
+            ('/cls/down_pool', 'Down Pool (跌停池)', '/cls/down_pool', False),
             ('/ths/longhu', 'THS Longhu (龙虎榜)', '/ths/longhu', False),
             ('/stock/data', 'Stock Detail (个股详情)', '/stock/data?code=sz300139', False),
             ('/stock/fundflow', 'Stock Fund Flow (资金流向)', '/stock/fundflow?code=sh600519', False),
@@ -1733,6 +1865,7 @@ def main():
     log.info(f'\nUtilities:')
     log.info(f'  http://localhost:{PORT}/finance/market  — Finance Market Data (JSON, needs Chrome CDP)')
     log.info(f'  http://localhost:{PORT}/finance/timeline  — Finance Timeline (JSON, needs Chrome CDP)')
+    log.info(f'  http://localhost:{PORT}/finance/market_sentiment  — Finance Market Sentiment (JSON, needs Chrome CDP)')
     log.info(f'  http://localhost:{PORT}/quotation/market  — Quotation Market Data (JSON, needs Chrome CDP)')
     log.info(f'  http://localhost:{PORT}/market/timeline  — Market Index Timeline (JSON, needs Chrome CDP)')
     log.info(f'  http://localhost:{PORT}/cls/hotplate  — Hotplate Data (JSON, no CDP needed)')
@@ -1744,6 +1877,10 @@ def main():
     log.info(f'  http://localhost:{PORT}/stock/basic_info  — Stock Basic Info (JSON, no CDP needed)')
     log.info(f'  http://localhost:{PORT}/stock/announcement  — Stock Announcement (JSON, no CDP needed)')
     log.info(f'  http://localhost:{PORT}/market/margin  — Market Margin (融资融券, JSON, no CDP needed)')
+    log.info(f'  http://localhost:{PORT}/cls/up_pool  — Up Pool (JSON, no CDP needed)')
+    log.info(f'  http://localhost:{PORT}/cls/continuous_up_pool  — Continuous Up Pool (JSON, no CDP needed)')
+    log.info(f'  http://localhost:{PORT}/cls/up_open_pool  — Up Open Pool (JSON, no CDP needed)')
+    log.info(f'  http://localhost:{PORT}/cls/down_pool  — Down Pool (JSON, no CDP needed)')
     from .config import STREAM_PORT
     log.info(f'\nStream push (SSE, port {STREAM_PORT}):')
     log.info(f'  POST   http://localhost:{STREAM_PORT}/stream/subscriptions  — create subscription group')
