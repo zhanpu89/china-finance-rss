@@ -411,13 +411,95 @@ class ClsPoolTests(unittest.TestCase):
                 # Seed with the SAME message the handler will produce so the
                 # expiry path is exercised — a mismatched message would re-log
                 # via the changed-message shortcut and mask an expiry regression.
+                # P8-r1 P2: the window is measured on `time.monotonic()`, so the
+                # expired seed must be a monotonic reading too (an epoch seed
+                # would be years in the future ⇒ window never expires ⇒ the
+                # `expired` branch below never logs).
                 srv._pool_fetch_warned_at['up_pool'] = (
-                    time.time() - srv._POOL_FETCH_WARN_GAP - 1, str(exc))
+                    time.monotonic() - srv._POOL_FETCH_WARN_GAP - 1, str(exc))
                 with self.assertLogs('server', level='WARNING'):
                     expired = srv.handle_cls_pool('up_pool')
             self.assertEqual(first, repeat)
             self.assertEqual(first, expired)
             self.assertEqual(set(first), {'error'})
+        finally:
+            srv._pool_fetch_warned_at.clear()                   # restore run-order state
+            srv._pool_fetch_warned_at.update(saved)
+
+    def test_rate_limit_window_uses_monotonic_clock(self):
+        """MS-T18 (P8-r1 P2「墙钟」): the suppress window must be measured on
+        `time.monotonic()`, not `time.time()` — an NTP step (backward ⇒ the
+        window stretches forever; forward ⇒ an early re-warning) must not
+        affect a pure interval measurement.
+
+        Drives a controlled monotonic clock: t0 first warning → t0+10 the same
+        message is silent → t0+40 (40-0 ≥ 30) the same message warns again,
+        and the timestamp STORED in the table must be that monotonic reading
+        itself.  An implementation still reading `time.time()` fails twice:
+        the injected clock never reaches it (epoch ≫ 1040 ⇒ the third call
+        stays inside the wall-clock window and `assertLogs` finds nothing),
+        and the stored timestamp is an epoch value, not `1040.0`.
+        """
+        saved = dict(srv._pool_fetch_warned_at)
+        srv._pool_fetch_warned_at.clear()       # hermetic: independent of run order
+
+        exc = FetchError('upstream_timeout')
+
+        def boom(url, headers=None, ttl=None, encoding=None):
+            raise exc
+        try:
+            with patch.object(srv.time, 'monotonic') as mono:   # P8-r1 P2: 注入受控单调钟
+                mono.return_value = 1000.0
+                with patch.object(srv, 'fetch_json', side_effect=boom):
+                    with self.assertLogs('server', level='WARNING'):
+                        srv.handle_cls_pool('up_pool')          # t0 ⇒ warn
+                    mono.return_value = 1010.0                  # +10s < 30s
+                    with self.assertNoLogs('server', level='WARNING'):
+                        srv.handle_cls_pool('up_pool')          # window ⇒ silent
+                    mono.return_value = 1040.0                  # 40-0 ≥ 30 ⇒ outside
+                    with self.assertLogs('server', level='WARNING'):
+                        srv.handle_cls_pool('up_pool')          # expired ⇒ warn again
+                # the table stores the monotonic reading itself (never an epoch)
+                self.assertEqual(srv._pool_fetch_warned_at['up_pool'][0], 1040.0)
+        finally:
+            srv._pool_fetch_warned_at.clear()                   # restore run-order state
+            srv._pool_fetch_warned_at.update(saved)
+
+    def test_success_clears_the_warn_episode(self):
+        """MS-T19 (P8-r1 P2「episode 盲区」): one SUCCESSFUL fetch ends the
+        pool's failure episode — a later failure with the IDENTICAL message
+        must warn again instead of being read as "the same outage still
+        running" (NEG_TTL=5s ≪ GAP=30s, so a flapping upstream can fail →
+        recover → fail inside a single window).
+
+        Sequence: fail (warn) → same fail inside the window (silent) → success
+        (pops the table entry) → same fail must warn.  Removing the success-
+        path pop leaves the old `(ts, msg)` in place ⇒ the last `assertLogs`
+        finds no record and this case goes red.
+        """
+        saved = dict(srv._pool_fetch_warned_at)
+        srv._pool_fetch_warned_at.clear()       # hermetic: independent of run order
+
+        exc = FetchError('upstream_timeout')
+
+        def boom(url, headers=None, ttl=None, encoding=None):
+            raise exc
+        try:
+            with patch.object(srv, 'fetch_json', side_effect=boom):
+                with self.assertLogs('server', level='WARNING'):
+                    first = srv.handle_cls_pool('up_pool')      # episode starts
+                with self.assertNoLogs('server', level='WARNING'):
+                    again = srv.handle_cls_pool('up_pool')      # same outage, silent
+            self.assertEqual(first, again)
+            with patch.object(srv, 'fetch_json',
+                              side_effect=self._fake_fetch({'code': 200,
+                                                            'data': []})):
+                self.assertEqual(srv.handle_cls_pool('up_pool'), {'stocks': []})
+            self.assertNotIn('up_pool', srv._pool_fetch_warned_at)   # episode closed
+            with patch.object(srv, 'fetch_json', side_effect=boom):
+                with self.assertLogs('server', level='WARNING'):
+                    restarted = srv.handle_cls_pool('up_pool')  # NEW episode ⇒ warn
+            self.assertEqual(set(restarted), {'error'})
         finally:
             srv._pool_fetch_warned_at.clear()                   # restore run-order state
             srv._pool_fetch_warned_at.update(saved)
@@ -1148,6 +1230,34 @@ class HttpSemanticsTests(unittest.TestCase):
             if path == '/finance/market_sentiment':   # headers stay GET-shaped
                 cl = re.search(br'Content-Length: (\d+)', head)
                 self.assertTrue(cl and int(cl.group(1)) > 0, head)
+
+    def test_head_guard_is_intrinsic_to_send_text(self):
+        """MS-T20 (O1「自定义发送路径无 HEAD 守卫」): the HEAD no-body rule must
+        be intrinsic to `_send_text`, not only a property of every caller
+        passing `write_body=False`.
+
+        Simulates the future call site the review flagged — a branch that
+        "forgets" the plumbing and calls `_send_error(..., write_body=True)`
+        for whatever request arrived — and reads the result on a RAW socket
+        (MS-T11b's reader: `http.client` zeroes its HEAD read length, so it
+        would report `b''` even with the body on the wire, making it blind to
+        exactly this regression).  A GET first self-proves the reader really
+        does see a body; then HEAD must carry none while the header block
+        still reports a GET-shaped non-zero Content-Length (RFC 9112 §9.3.2).
+        Removing the `!= 'HEAD'` guard in `_send_text` puts the body on the
+        wire and turns this red.
+        """
+        def leaky(self, write_body=True):      # a future call site that forgot
+            self._send_error('forced', write_body=True)
+
+        with patch.object(RSSHandler, '_handle_request', leaky):
+            _, get_body = self._raw_exchange('GET', '/')
+            self.assertTrue(get_body, 'raw reader must see a GET body first')
+            head, body = self._raw_exchange('HEAD', '/')
+        self.assertTrue(head.startswith(b'HTTP/1.0 400'), head[:40])
+        self.assertEqual(body, b'')
+        cl = re.search(br'Content-Length: (\d+)', head)
+        self.assertTrue(cl and int(cl.group(1)) > 0, head)   # header stays GET-shaped
 
     def test_hotplate_all_partitions_failing_is_200_with_error_body(self):
         def boom(url, headers=None, ttl=None, encoding=None):

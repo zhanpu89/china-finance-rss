@@ -454,6 +454,15 @@ def handle_cls_plate(code):
 # (a new failure mode is a new signal).  Deliberately lock-free (tolerated
 # race) — same style as `metrics._warned`; keys are the enum-gated
 # `_POOL_TYPES` values, so the table stays bounded at 4 entries.
+# P8-r1 P2 (墙钟): the gap is an INTERVAL between two readings, so it is
+# measured with `time.monotonic()` — an NTP step must neither stretch the
+# suppression window (backward jump ⇒ `now - prev[0]` goes negative and stays
+# < GAP forever) nor pre-fire a re-warning (forward jump).  The table hence
+# stores monotonic readings, never wall-clock timestamps.
+# P8-r1 P2 (episode): `handle_cls_pool`'s success path pops this pool's entry,
+# so one success ends the failure episode — the next failure, even with the
+# identical message and even inside the old window, warns again instead of
+# reading as "the same outage still running".
 _POOL_FETCH_WARN_GAP = 30.0                # seconds between identical warnings
 _pool_fetch_warned_at = {}                 # pool_type -> (last_ts, last_msg)
 
@@ -466,7 +475,7 @@ def _warn_pool_fetch_failed(pool_type, exc):
     """
     msg = str(exc)
     prev = _pool_fetch_warned_at.get(pool_type)
-    now = time.time()
+    now = time.monotonic()                  # P8-r1 P2: interval ⇒ monotonic (MS-T18)
     if (prev is not None and prev[1] == msg
             and now - prev[0] < _POOL_FETCH_WARN_GAP):
         return                                  # same failure, still in window
@@ -516,6 +525,12 @@ def handle_cls_pool(pool_type):
         log.warning('[server] cls pool %s: unexpected upstream data shape %s',
                     pool_type, shape)
         return {'error': f'upstream data shape unexpected: {shape}'}
+    # P8-r1 P2 (episode): one success ends this pool's failure episode — pop
+    # the limit-table entry so a LATER failure (identical message, inside the
+    # old window) is a new episode and warns again instead of being read as
+    # "still ongoing".  Single-key pop: lock-free like the rest of the table,
+    # keys stay ⊆ `_POOL_TYPES` ⇒ still bounded at 4 entries.
+    _pool_fetch_warned_at.pop(pool_type, None)
     return {'stocks': data}
 
 
@@ -1579,7 +1594,14 @@ class RSSHandler(BaseHTTPRequestHandler):
         if vary_parts:
             self.send_header('Vary', ', '.join(vary_parts))
         self.end_headers()
-        if write_body:
+        # O1: intrinsic HEAD guard, mirroring CPython
+        # `BaseHTTPRequestHandler.send_error`'s `if self.command != 'HEAD'` —
+        # the no-body rule for HEAD lives HERE, so a future call site that
+        # forgets `write_body=False` still cannot put a body on the wire
+        # (invisible to `http.client`, which zeroes its HEAD read length).
+        # Headers above — Content-Length included — are unaffected: HEAD keeps
+        # the GET-shaped headers, it just never gets the body (RFC 9112 §9.3.2).
+        if write_body and getattr(self, 'command', None) != 'HEAD':
             self.wfile.write(body_bytes)
 
     def _send_not_modified(self, etag, last_modified, varies_on_host=False):
