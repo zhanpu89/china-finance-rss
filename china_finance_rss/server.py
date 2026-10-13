@@ -463,6 +463,13 @@ def handle_cls_plate(code):
 # so one success ends the failure episode — the next failure, even with the
 # identical message and even inside the old window, warns again instead of
 # reading as "the same outage still running".
+# P5a-r3-r4 P2-3 (有意取舍): an episode is ended ONLY by the FULL-SUCCESS
+# return (`{'stocks': ...}`).  `code != 200` and a shape failure — transport
+# succeeded but the envelope/shape did not — return WITHOUT popping, so they
+# do NOT end the episode (and do not re-arm a suppressed warning either).
+# Tying the pop to "transport recovered" would close episodes while the pool
+# is still degraded; deliberately not done.  The bound above is therefore
+# per-episode, not an unconditional per-GAP ceiling.
 _POOL_FETCH_WARN_GAP = 30.0                # seconds between identical warnings
 _pool_fetch_warned_at = {}                 # pool_type -> (last_ts, last_msg)
 
@@ -471,7 +478,10 @@ def _warn_pool_fetch_failed(pool_type, exc):
     """Rate-limited B-02 warning: keep the signal, bound the volume (P2-5).
 
     The message format is unchanged (`[server] cls pool <type> fetch failed:
-    <exc>`), so log scrapers and MS-T13 keep matching.
+    <exc>`), so log scrapers and MS-T13 keep matching.  Two callers share it:
+    the except path passes the exception, the shape path (P2-1) passes the
+    shape description — `str(exc)` is the only coupling, and both messages
+    carry their distinguishing text, so "message changed ⇒ warn now" holds.
     """
     msg = str(exc)
     prev = _pool_fetch_warned_at.get(pool_type)
@@ -522,8 +532,14 @@ def handle_cls_pool(pool_type):
     data = raw.get('data')
     if not isinstance(data, list):
         shape = type(data).__name__
-        log.warning('[server] cls pool %s: unexpected upstream data shape %s',
-                    pool_type, shape)
+        # P2-1: a shape failure re-runs on EVERY request — the plate TTL
+        # bounds the refetch, not the log — so a bare log.warning here scales
+        # with RPS (the very defect P2-5 fixed on the except path).  Route it
+        # through the SAME limiter: the message carries the shape name, so a
+        # *changed* shape is a changed message and still warns at once.  This
+        # is NOT a success — it returns before the episode pop below.
+        _warn_pool_fetch_failed(
+            pool_type, f'unexpected upstream data shape {shape}')
         return {'error': f'upstream data shape unexpected: {shape}'}
     # P8-r1 P2 (episode): one success ends this pool's failure episode — pop
     # the limit-table entry so a LATER failure (identical message, inside the
@@ -1594,11 +1610,18 @@ class RSSHandler(BaseHTTPRequestHandler):
         if vary_parts:
             self.send_header('Vary', ', '.join(vary_parts))
         self.end_headers()
-        # O1: intrinsic HEAD guard, mirroring CPython
-        # `BaseHTTPRequestHandler.send_error`'s `if self.command != 'HEAD'` —
-        # the no-body rule for HEAD lives HERE, so a future call site that
-        # forgets `write_body=False` still cannot put a body on the wire
-        # (invisible to `http.client`, which zeroes its HEAD read length).
+        # O1: intrinsic HEAD guard for THIS exit (`_send_text`) — mirroring
+        # CPython `BaseHTTPRequestHandler.send_error`'s `if self.command !=
+        # 'HEAD'` — so a future `_send_text` call site that forgets
+        # `write_body=False` still cannot put a body on the wire (invisible
+        # to `http.client`, which zeroes its HEAD read length).
+        # Deliberately NOT a service-wide invariant: the other two body exits
+        # are (a) CPython's own `send_error`, which carries its own
+        # `if self.command != 'HEAD'` guard, and (b)
+        # `BoundedThreadPoolServer._reject_503`, which fires before the
+        # request line is read (method unknown ⇒ no guard; a HEAD rejected
+        # under overload would get a body).  Claiming "HEAD is always
+        # bodyless" from this line alone would mis-read those two paths.
         # Headers above — Content-Length included — are unaffected: HEAD keeps
         # the GET-shaped headers, it just never gets the body (RFC 9112 §9.3.2).
         if write_body and getattr(self, 'command', None) != 'HEAD':

@@ -241,7 +241,8 @@ class HotplateFailureShapeTests(unittest.TestCase):
 
 
 class ClsPoolTests(unittest.TestCase):
-    """POOL-T1..T9 / T12..T14 + review P1-01 / P1-02: the 4 CLS pool endpoints.
+    """POOL-T1..T9 / T12..T14 + review P1-01 / P1-02 / P2-1: the 4 CLS pool
+    endpoints.
 
     Direct REST (no CDP): a signed `up_down_analysis` URL through the shared
     `fetch_json`, `way=last_px`, plate-domain TTL.  Stubs are module-level
@@ -523,19 +524,64 @@ class ClsPoolTests(unittest.TestCase):
         """POOL-T8 + P1-02: `data: []` ⇒ `{'stocks': []}` (a legal empty pool,
         no error key); a dict / absent `data` — the shape `/cls/plate` uses —
         must surface as an error instead of a silently empty pool."""
-        with patch.object(srv, 'fetch_json',
-                          side_effect=self._fake_fetch({'code': 200, 'data': []})):
-            self.assertEqual(srv.handle_cls_pool('up_pool'), {'stocks': []})
-        for data in ({'stocks': [{'secu_code': 'sh600519'}]}, None):
+        saved = dict(srv._pool_fetch_warned_at)
+        srv._pool_fetch_warned_at.clear()   # hermetic: shape path writes it (P2-1)
+        try:
             with patch.object(srv, 'fetch_json',
-                              side_effect=self._fake_fetch({'code': 200,
-                                                            'data': data})):
-                with self.assertLogs('server', level='WARNING'):
-                    result = srv.handle_cls_pool('up_pool')
-            self.assertEqual(
-                result,
-                {'error': 'upstream data shape unexpected: '
-                          + type(data).__name__})
+                              side_effect=self._fake_fetch(
+                                  {'code': 200, 'data': []})):
+                self.assertEqual(srv.handle_cls_pool('up_pool'), {'stocks': []})
+            for data in ({'stocks': [{'secu_code': 'sh600519'}]}, None):
+                with patch.object(srv, 'fetch_json',
+                                  side_effect=self._fake_fetch({'code': 200,
+                                                                'data': data})):
+                    with self.assertLogs('server', level='WARNING'):
+                        result = srv.handle_cls_pool('up_pool')
+                self.assertEqual(
+                    result,
+                    {'error': 'upstream data shape unexpected: '
+                              + type(data).__name__})
+        finally:
+            srv._pool_fetch_warned_at.clear()               # restore run-order state
+            srv._pool_fetch_warned_at.update(saved)
+
+    def test_shape_drift_warning_is_rate_limited(self):
+        """P2-1 (P5a-r3-r4) [逆向]: 形状漂移告警必须走同一条限频路径。
+
+        形状判定对**每个请求**重跑（plate TTL 只限回源、不限日志），逐次
+        `log.warning` ⇒ 告警速率 = 端点 RPS，与 P2-5 所治缺陷同型。断言四段：
+        ① 首次漂移必告警且消息含 shape 名；② 同形状仍在窗口内 ⇒ `assertNoLogs`
+        静默（把形状分支改回直写 `log.warning` 即在此转红）；③ **换一个形状**
+        ⇒ 消息变了 ⇒ 立即再告警（「消息变化即时再告警」语义）；④ 同形状两次的
+        error 返回体逐字一致、换形状时 shape 名照常出现在 error 里（限频不改契约）。
+        """
+        saved = dict(srv._pool_fetch_warned_at)
+        srv._pool_fetch_warned_at.clear()       # hermetic: independent of run order
+        try:
+            with patch.object(srv, 'fetch_json',
+                              side_effect=self._fake_fetch(
+                                  {'code': 200, 'data': {'stocks': []}})):
+                with self.assertLogs('server', level='WARNING') as cm:
+                    first = srv.handle_cls_pool('up_pool')
+                self.assertTrue(any('shape' in line and 'dict' in line
+                                    for line in cm.output), cm.output)
+                with self.assertNoLogs('server', level='WARNING'):
+                    repeat = srv.handle_cls_pool('up_pool')  # same shape, in window
+            with patch.object(srv, 'fetch_json',
+                              side_effect=self._fake_fetch(
+                                  {'code': 200, 'data': None})):
+                with self.assertLogs('server', level='WARNING') as cm2:
+                    changed = srv.handle_cls_pool('up_pool')  # new shape ⇒ new signal
+            self.assertTrue(any('NoneType' in line for line in cm2.output),
+                            cm2.output)
+            self.assertEqual(first, repeat)               # same shape ⇒ same body
+            self.assertEqual(                             # shape name still surfaces
+                changed,
+                {'error': 'upstream data shape unexpected: NoneType'})
+            self.assertEqual(set(first), {'error'})
+        finally:
+            srv._pool_fetch_warned_at.clear()                   # restore run-order state
+            srv._pool_fetch_warned_at.update(saved)
 
     def test_enum_gate_rejects_bad_and_unhashable_types_without_fetching(self):
         """POOL-T9 + P1-01: a non-str / non-hashable pool_type returns an error
@@ -1781,6 +1827,37 @@ class RssConditionalGetTests(unittest.TestCase):
         finally:
             conn.close()
 
+    def _raw_exchange(self, method, path, headers=None):
+        """Raw-socket round-trip returning (head, body) — the bytes on the wire.
+
+        Same reader as `HttpSemanticsTests._raw_exchange` (MS-T11b), plus
+        optional request headers.  `http.client` zeroes its read length for
+        304 — CPython `HTTPResponse.begin` sets `self.length = 0` for
+        NOT_MODIFIED, exactly as it does for HEAD — so `resp.read()` answers
+        b'' even when the server really did write a body: any no-body
+        assertion built on it cannot fail.  Only the socket shows the truth.
+        The server speaks HTTP/1.0 (close-delimited), so read-until-EOF is
+        deterministic.
+        """
+        lines = [f'{method} {path} HTTP/1.0', 'Host: 127.0.0.1']
+        lines += [f'{name}: {value}' for name, value in (headers or {}).items()]
+        conn = socket.create_connection(('127.0.0.1', self.port), timeout=5)
+        try:
+            conn.sendall(('\r\n'.join(lines) + '\r\n\r\n').encode())
+            buf = b''
+            while True:
+                try:
+                    chunk = conn.recv(65536)
+                except socket.timeout:
+                    break
+                if not chunk:
+                    break
+                buf += chunk
+        finally:
+            conn.close()
+        head, _, body = buf.partition(b'\r\n\r\n')
+        return head, body
+
     def _assert_pubdate_differs_but_etag_same(self, x1, x2):
         p1 = [e.text for e in ET.fromstring(x1).findall(
             './channel/item/pubDate')]
@@ -1839,6 +1916,35 @@ class RssConditionalGetTests(unittest.TestCase):
             self.assertIn('vary', hdrs)
             self.assertEqual(hdrs['last-modified'], h0['last-modified'])
         self.assertEqual(calls['put'], 1)
+
+    def test_304_body_never_reaches_the_wire(self):
+        """P2-2 (P5a-r3-r4) [逆向]: 304 的「无 body」必须在线上可证伪。
+
+        本文件里所有对 304 断言 `body == b''` 的用例都是**恒真**——`http.client`
+        对 304 把读取长度归零（CPython `HTTPResponse.begin`：`status == NOT_MODIFIED`
+        ⇒ `self.length = 0`），服务器真写了体它也返回 b''。若有人给
+        `_send_not_modified` 加一次 `wfile.write`（不动头部），除头部白名单外的
+        断言全部仍绿。本用例改读裸 socket：先用一个无条件 GET **自证**这条读法
+        确实读得到 body（否则本用例自身也是空断言），再断言带 `If-None-Match` 的
+        GET 线上为 `HTTP/1.0 304`、0 字节体、且**无 `Content-Length`**。
+        """
+        with self._patch_handler(self._fake_handler()):
+            raw_head, raw_body = self._raw_exchange('GET', self.PATH)
+            self.assertTrue(raw_body, 'raw reader must see a GET body first')
+            self.assertTrue(raw_head.startswith(b'HTTP/1.0 200'), raw_head[:40])
+            # Take the validator from the RAW response: `http.client` sends
+            # `Host: 127.0.0.1:<port>`, the raw reader sends `Host: 127.0.0.1`
+            # — different base_url ⇒ different atom:link ⇒ different ETag
+            # (F2 keys the feed cache per Host), so mixing the two would make
+            # the replay a legitimate 200 instead of the 304 under test.
+            etag_match = re.search(br'(?im)^etag: (.+)$', raw_head)
+            self.assertIsNotNone(etag_match, raw_head[:200])
+            head, body = self._raw_exchange(
+                'GET', self.PATH,
+                {'If-None-Match': etag_match.group(1).decode().strip()})
+        self.assertTrue(head.startswith(b'HTTP/1.0 304'), head[:40])
+        self.assertEqual(body, b'')
+        self.assertIsNone(re.search(br'(?im)^content-length:', head), head)
 
     def test_t48_inm_star_304_and_nonmatching_200(self):
         with self._patch_handler(self._fake_handler()):
@@ -1917,9 +2023,11 @@ class RssConditionalGetTests(unittest.TestCase):
         with self._patch_handler(self._fake_handler()):
             _, h0, _ = self._req()
             cache_mod.feed_cache.clear()        # force a TTL-expiry re-gen
-            st, _, body = self._req(headers={'If-None-Match': h0['etag']})
+            st, _, _ = self._req(headers={'If-None-Match': h0['etag']})
         self.assertEqual(st, 304)
-        self.assertEqual(body, b'')
+        # P2-2: no `body == b''` here — `http.client` zeroes its read length
+        # for 304, so it can never fail; 304 无体由裸 socket 用例
+        # `test_304_body_never_reaches_the_wire` 承担。
 
     def test_t52b_pure_function_only_pubdate_differs_same_etag(self):
         base = utils_mod.generate_rss(
@@ -1982,11 +2090,12 @@ class RssConditionalGetTests(unittest.TestCase):
              patch.object(srv, 'formatdate', clock.formatdate):
             st1, h1, _ = self._req(path=path)
             cache_mod.feed_cache.clear()        # simulate TTL expiry
-            st2, _, body = self._req(path=path,
-                                     headers={'If-None-Match': h1['etag']})
+            st2, _, _ = self._req(path=path,
+                                  headers={'If-None-Match': h1['etag']})
         self.assertEqual(st1, 200)
         self.assertEqual(st2, 304)
-        self.assertEqual(body, b'')
+        # P2-2: no `body == b''` — 恒真（`http.client` 对 304 归零读长），
+        # 304 无体由裸 socket 用例 `test_304_body_never_reaches_the_wire` 承担。
 
     def test_t53_content_change_changes_etag_and_200(self):
         xa = utils_mod.generate_rss('T', 'L', 'D', [dict(self.ITEM)],
@@ -2018,15 +2127,17 @@ class RssConditionalGetTests(unittest.TestCase):
         future = formatdate(time.time() + 3600, usegmt=True)
         with self._patch_handler(self._fake_handler()):
             _, h0, _ = self._req()
-            st_inm, h_inm, b_inm = self._req(
+            st_inm, h_inm, _ = self._req(
                 'HEAD', headers={'If-None-Match': h0['etag']})
-            st_ims, h_ims, b_ims = self._req(
+            st_ims, h_ims, _ = self._req(
                 'HEAD', headers={'If-Modified-Since': future})
             st_none, h_none, b_none = self._req('HEAD')
             _, h_get, _ = self._req(headers={'If-None-Match': h0['etag']})
         self.assertEqual((st_inm, st_ims, st_none), (304, 304, 200))
-        for hdrs, body in ((h_inm, b_inm), (h_ims, b_ims)):
-            self.assertEqual(body, b'')
+        # P2-2: no `body == b''` on these 304s — 恒真（`http.client` 对 304
+        # 归零读长），304 无体由裸 socket 用例
+        # `test_304_body_never_reaches_the_wire` 承担；此处只留头部断言。
+        for hdrs in (h_inm, h_ims):
             self.assertEqual(hdrs['etag'], h0['etag'])
             self.assertIn('cache-control', hdrs)
             self.assertIn('vary', hdrs)

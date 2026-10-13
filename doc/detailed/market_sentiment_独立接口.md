@@ -1,6 +1,6 @@
 # market_sentiment 独立接口详细设计
 
-> **版本** v1.0.4 · **状态** 🟢 评审闭环（P3b 评审 `REV-DES-20261010-002` P1-01 + P2×5 已修复）· **日期** 2026-10-10 · **作者/产出** task-decomposer
+> **版本** v1.0.5 · **状态** 🟢 评审闭环（P3b 评审 `REV-DES-20261010-002` P1-01 + P2×5 已修复）· **日期** 2026-10-10 · **作者/产出** task-decomposer
 > 模块路径 `china_finance_rss/server.py`（**增量**：新增 1 个 CDP handler + 1 条路由登记 + `/finance/market` 剥离两动作）+ `china_finance_rss/config.py`（`_FINANCE_EXPECTED_KEYS` 删 1 键）· 归属 **Layer 3（HTTP 入口 / 编排层）**
 > 需求来源：本任务书「market_sentiment 独立接口」——`/finance/market` 的 `market_sentiment` 字段由昨日 commit 拼装进去，现改为单独端点 `GET /finance/market_sentiment`
 > 先例（**命名 / 分层 / 异常风格必须与之一致**）：`server.py:321 handle_finance_timeline`（`/finance/timeline` 已从 `/finance/market` 拆分同型）；`server.py:272 handle_finance_market`（剥离 `data.pop('timeline', None)` 同处）
@@ -269,7 +269,7 @@ feeds.append({'name': 'CLS Finance Market Sentiment (财联社市场情绪)',
 ### 5.5 P8 盲审 5 条 P2 修复伪代码（B-01..B-05）
 
 ```python
-# ── B-02（server.py handle_cls_pool except 内，:513-514）失败路径补日志 ──────
+# ── B-02（server.py handle_cls_pool except 内，:523）失败路径补日志 ──────
 #    P2-5（P7b-r2）：改为**限频**实现——负缓存（NEG_TTL=5s）窗口内同一失败对
 #    每个请求重复发生，逐次告警会使日志量随 RPS 线性放大；故同 pool_type 同错误
 #    消息 30s 窗口内只告警一次，错误消息变化时即时再告警（新失败模式 = 新信号）。
@@ -278,7 +278,7 @@ feeds.append({'name': 'CLS Finance Market Sentiment (财联社市场情绪)',
         _warn_pool_fetch_failed(pool_type, exc)   # ★ P2-5 限频（原 log.warning 直写）
         return {'error': str(exc)}
 
-# ── B-02 限频实现（server.py:466-483，P2-5）────────────────────────────────
+# ── B-02 限频实现（server.py:477-493，P2-5）────────────────────────────────
 _POOL_FETCH_WARN_GAP = 30.0        # 同 pool_type 同消息的两次告警最小间隔（秒）
 _pool_fetch_warned_at = {}         # pool_type -> (last_ts, last_msg)；键 ∈ _POOL_TYPES ⇒ 有界 ≤4 键
 
@@ -292,11 +292,20 @@ def _warn_pool_fetch_failed(pool_type, exc):
     _pool_fetch_warned_at[pool_type] = (now, msg)
     log.warning('[server] cls pool %s fetch failed: %s', pool_type, msg)   # 格式逐字不变
 
-# ── B-02 成功路径 episode 结束（server.py:533，P8-r1 P2）────────────────────
+# ── P2-1（P5a-r3-r4）形状路径第二调用点（server.py:541-542）──────────────────
+#    形状失败（data 非 list）每请求重跑（plate TTL 只限回源、不限日志）⇒ 走同一
+#    限频器；消息含 shape 名 ⇒ 换形状即换消息 ⇒ 即时再告警；同形状 30s 窗口静默。
+#    返回体 {'error': f'upstream data shape unexpected: {shape}'} 不变；
+#    形状失败不 pop（P2-3：episode 仅由全成功 return 结束）。
+        _warn_pool_fetch_failed(
+            pool_type, f'unexpected upstream data shape {shape}')
+        return {'error': f'upstream data shape unexpected: {shape}'}
+
+# ── B-02 成功路径 episode 结束（server.py:549，P8-r1 P2；P2-3 收窄）──────────
     _pool_fetch_warned_at.pop(pool_type, None)   # ★ 一次成功结束该池失败 episode
     return {'stocks': data}                     # 其后同 kind 同消息失败 = 新 episode ⇒ 必再告警
 
-# ── B-03（server.py:520-521）error 值归一为 str ─────────────────────────────
+# ── B-03（server.py:530-531）error 值归一为 str ─────────────────────────────
     if raw.get('code') != 200:
         return {'error': str(raw.get('msg') or 'upstream_error')}   # ★ 外层 str()（msg 非字符串时防类型漂移）
 
@@ -377,9 +386,11 @@ class ClsPoolIntegrationTests(unittest.TestCase):
 | **MS-T15**（**B-04**）TTL 守卫正则 | **双向显式**（负向断言设计不变，仅补全表述）：① **真实源码必不命中**——`source = inspect.getsource(srv.handle_cls_pool)`，新正则 `r'ttl=\s*\d+'` 对其**必不命中**（`assertIsNone`；真实码为 `ttl=cache_policy('plate')`，`=` 后是字母 `c`，正则**正确放行** policy 调用——**期望行为、非规避**）；② **合成串必命中**——`'ttl=30'`/`'ttl=60'`/`'ttl=300'` 对新正则**必命中**（`assertIsNotNone`），且对旧正则 `r'ttl=\s*12\d*'` **必不命中**（证旧守卫假阴性：漏 `30`/`60`/`300`）；保留 `assertIn("cache_policy('plate')", source)`。**避免开发者误写成对真实源码 `assertIsNotNone` 的伪红** | B-04 |
 | **MS-T16**（**B-05**）config 注释 | `inspect.getsource(config)` 中 `plate` 行注释含 `4 cls pools`（可证伪：注释未补 ⇒ 红） | B-05 |
 | **MS-T17**（**B-02**）失败告警限频 | `test_fetch_failure_warning_is_rate_limited`（`tests/test_server_http.py`）：patch `fetch_json` 抛同一异常 ⇒ 首次告警、30s 窗口内同 pool_type 同错误**静默**（日志计数不变）、错误消息变化**即时再告警**、窗口后**续报**；自带 `_pool_fetch_warned_at` save/clear/restore 隔离（hermetic）。锁定"负缓存下日志限频"行为（同 pool_type 同错误 30s 窗口一条） | B-02 |
-| **MS-T18**（**B-02**）单调钟窗口 | `test_rate_limit_window_uses_monotonic_clock`（`tests/test_server_http.py:429`）：patch `srv.time.monotonic` 注入 1000/1010/1040，warn→silent→warn，断言表内时间戳 == 1040.0。可证伪：实现仍读 `time.time()` ⇒ 注入钟不到达 ⇒ 第三次调用仍在墙钟窗口内 ⇒ `assertLogs` 空 ⇒ 红 | B-02 / P8-r1 P2 |
-| **MS-T19**（**B-02**）成功结束 episode | `test_success_clears_the_warn_episode`（`tests/test_server_http.py:468`）：fail(warn)→同 fail(silent)→成功→`'up_pool' not in` 表→再 fail(warn)。可证伪：删成功路径 pop ⇒ 旧 `(ts,msg)` 留存 ⇒ 末次 `assertLogs` 空 ⇒ 红 | B-02 / P8-r1 P2 |
-| **MS-T20**（**O1**）HEAD 内在守卫 | `test_head_guard_is_intrinsic_to_send_text`（`tests/test_server_http.py:1234`）：`patch.object(RSSHandler,'_handle_request', 误传 write_body=True 调 _send_error)`，裸 socket 先 GET 自证再 HEAD 断言 body==b'' 且 Content-Length>0。可证伪：删 `_send_text` 的 `!= 'HEAD'` 守卫 ⇒ HEAD 线上带 body ⇒ 裸 socket 读到非空 ⇒ 红 | O1 / RFC 9112 §9.3.2 |
+| **MS-T18**（**B-02**）单调钟窗口 | `test_rate_limit_window_uses_monotonic_clock`（`tests/test_server_http.py:430`）：patch `srv.time.monotonic` 注入 1000/1010/1040，warn→silent→warn，断言表内时间戳 == 1040.0。可证伪：实现仍读 `time.time()` ⇒ 注入钟不到达 ⇒ 第三次调用仍在墙钟窗口内 ⇒ `assertLogs` 空 ⇒ 红 | B-02 / P8-r1 P2 |
+| **MS-T19**（**B-02**）成功结束 episode | `test_success_clears_the_warn_episode`（`tests/test_server_http.py:469`）：fail(warn)→同 fail(silent)→成功→`'up_pool' not in` 表→再 fail(warn)。可证伪：删成功路径 pop ⇒ 旧 `(ts,msg)` 留存 ⇒ 末次 `assertLogs` 空 ⇒ 红 | B-02 / P8-r1 P2 |
+| **MS-T20**（**O1**）HEAD 内在守卫 | `test_head_guard_is_intrinsic_to_send_text`（`tests/test_server_http.py:1280`）：`patch.object(RSSHandler,'_handle_request', 误传 write_body=True 调 _send_error)`，裸 socket 先 GET 自证再 HEAD 断言 body==b'' 且 Content-Length>0。可证伪：删 `_send_text` 的 `!= 'HEAD'` 守卫 ⇒ HEAD 线上带 body ⇒ 裸 socket 读到非空 ⇒ 红 | O1 / RFC 9112 §9.3.2 |
+| **MS-T21**（**P2-1**）形状漂移告警限频 | `test_shape_drift_warning_is_rate_limited`（`tests/test_server_http.py:548`）：patch `fetch_json` 返回 `data: {}`（dict 形状）⇒ 首次告警含 `'shape'` 与 `'dict'`；同形状窗口内 `assertNoLogs` 静默；换 `data: None`（NoneType 形状）⇒ 消息变了 ⇒ 立即再告警；同形状两次 error 返回体逐字一致、换形状时 shape 名照常出现在 error 里。可证伪：形状分支改回直写 `log.warning` ⇒ repeat 段 `assertNoLogs` 红。自带 `_pool_fetch_warned_at` save/clear/finally 隔离（hermetic） | P2-1 / B-02 |
+| **MS-T22**（**P2-2**）304 无体裸 socket 可证伪 | `test_304_body_never_reaches_the_wire`（`tests/test_server_http.py:1920`）：类级 server fixture + `_patch_handler` 上下文内完成两次交换（`setUp` 每测清 feed_cache）；裸 socket 逐次关闭；无线程/顺序污染。先用无条件 GET 自证读法非恒真（断 200 + 非空体），再断言带 `If-None-Match` 的 GET 线上为 `HTTP/1.0 304`、0 字节体、且无 `Content-Length`。ETag 从裸响应取（裸 reader 发 `Host: 127.0.0.1` 无端口、`http.client` 发带端口 ⇒ base_url/atom:link 不同 ⇒ ETag 不同）。可证伪：`_send_not_modified` 加一次 `wfile.write`（不动头部）⇒ 线上 304 带体 ⇒ 裸读法 read-until-EOF 读到非空 ⇒ 红；改发 `Content-Length` ⇒ 红 | P2-2 / 304 语义 |
 
 > **压测覆盖**：`/finance/market_sentiment` 已纳入 `tests/stress_all.py` 压测清单（`GLOBAL_ENDPOINTS` + `check_endpoint` 分支）。
 
@@ -449,6 +460,7 @@ class ClsPoolIntegrationTests(unittest.TestCase):
 | v1.0.2 | 2026-10-10 | 🔧 契约同步（P7b-r2 Bug-fix Loop） | code-developer 完成 3 条 P2 代码修复（不改对外契约）后的文档回填：**§5.5 B-02** 失败日志改为**限频**实现——`_warn_pool_fetch_failed(pool_type, exc)` + 窗口常量 `_POOL_FETCH_WARN_GAP=30.0`（同 pool_type 同错误 30s 窗口内只告警一次、错误消息变化即时再告警、消息格式逐字不变；负缓存窗口内日志不再随 RPS 放大）；**§8 MS-T11** 删除 HEAD body `== b''` 断言描述（`http.client` 下恒真、用例已删），HEAD body 线上校验由 MS-T11b（裸 socket `_raw_exchange`）承担。**只改文档**；未改代码 / 测试 / `API.md` / `README.md` / `SAD` | 编排层（P7b 契约同步） |
 | v1.0.3 | 2026-10-10 | 🔧 契约同步（P7b-r3 对抗性复查） | 对抗性复查（P8-r1）指出的测试登记漂移补齐：**§8** 新增 **MS-T17**（`test_fetch_failure_warning_is_rate_limited`，B-02 失败告警限频：同 pool_type 同错误 30s 窗口一条、错误变化即时告警、窗口内静默、窗口后续报，自带 `_pool_fetch_warned_at` save/clear/restore 隔离）；**MS-T13** 补注该用例现自带限频表隔离（hermetic），可证伪性不再依赖执行顺序；**§8** 补注 `/finance/market_sentiment` 已纳入 `tests/stress_all.py` 压测清单。**只改文档**；未改代码 / 测试 / `API.md` / `README.md` / `SAD` | 编排层（P7b 契约同步） |
 | v1.0.4 | 2026-10-10 | 🔧 契约同步（P7b-r4 契约同步） | P5a-r3 修复 3 条小问题后的文档回填：**§5.5** B-02 限频实现 `now = time.time()` → `now = time.monotonic()`（P8-r1 P2 墙钟→单调钟）；**§5.5** 补成功路径 `_pool_fetch_warned_at.pop(pool_type, None)` episode 语义（P8-r1 P2）；**§5.5** 行号刷新（实现 `:457-474`→`:466-483`、调用点 `:503-504`→`:513-514`、B-03 `:467-468`→`:520-521`）；**§5.4** 分发行号 `:1287`→`:1353`；**§8** 新增 **MS-T18**（单调钟窗口）/ **MS-T19**（成功结束 episode）/ **MS-T20**（HEAD 内在守卫）三行。**只改文档**；未改代码 / 测试 / `API.md` / `README.md` / `SAD` | 编排层（P7b 契约同步） |
+| v1.0.5 | 2026-10-13 | 🔧 契约同步（P7b-r5 契约同步） | P5a-r4 代码评审 drift 清单（D6–D7）同步：**§5.5** B-02 行号刷新（`:513-514`→`:523`）；**§5.5** 限频实现行号刷新（`:466-483`→`:477-493`）；**§5.5** 补 P2-1 形状路径第二调用点（`server.py:541-542`，消息含 shape 名 ⇒ 换形状即时再告警；同形状 30s 窗口静默；形状失败不 pop）；**§5.5** episode 行号刷新（`:533`→`:549`）+ 补 P2-3 收窄注；**§5.5** B-03 行号刷新（`:520-521`→`:530-531`）；**§8** MS-T18/T19/T20 行号刷新（`:429`→`:430` / `:468`→`:469` / `:1234`→`:1280`）+ 新增 **MS-T21**（`test_shape_drift_warning_is_rate_limited`，P2-1 形状漂移告警限频）/ **MS-T22**（`test_304_body_never_reaches_the_wire`，P2-2 304 无体裸 socket 可证伪）。**只改文档**；未改代码 / 测试 / `API.md` / `README.md` / `SAD` | 编排层（P7b 契约同步） |
 
 > **下游提示（code-developer）**：严格按 §2.5 注册点 RG1–RG7 施工；**先读 `server.py:321 handle_finance_timeline` 与 `server.py:272 handle_finance_market` 再动手**，命名 / 分层 / 异常风格与之一致；**剥离两动作必须同时**（只做一个 ⇒ `/finance/market` 仍含该键，MS-T9 锁定）；`_CACHE_AGE_DOMAINS` 用 `'quote'`。
 > **DOC_SYNC（受影响契约文档，由编排层执行）**：

@@ -1,6 +1,6 @@
 # cls_pools（财联社 4 池独立接口）详细设计
 
-> **版本** v1.0.4 · **状态** 🟡 草稿（P3a 详设增量，待评审）· **日期** 2026-10-10 · **作者/产出** task-decomposer
+> **版本** v1.0.5 · **状态** 🟡 草稿（P3a 详设增量，待评审）· **日期** 2026-10-10 · **作者/产出** task-decomposer
 > 模块路径 `china_finance_rss/server.py`（**增量**：新增 1 个 handler + 1 张分发表 + 4 条路由分支；**无新模块文件**）· 归属 **Layer 3（HTTP 入口 / 编排层）**
 > 需求来源：本任务书「财联社 4 池独立接口」——从 `https://www.cls.cn/finance` 看盘页把「涨停池 / 连板池 / 炸板池 / 跌停池」4 个 tab 数据分离为 4 个独立 HTTP JSON 接口
 > 上游契约（**已实测定案，禁止再探测 / 改参数**）：`https://x-quote.cls.cn/quote/index/up_down_analysis`
@@ -316,11 +316,17 @@ def handle_cls_pool(pool_type):
     data = raw.get('data')
     if not isinstance(data, list):
         shape = type(data).__name__
-        log.warning('[server] cls pool %s: unexpected upstream data shape %s',
-                    pool_type, shape)
+        # P2-1: 形状失败每请求重跑（plate TTL 只限回源、不限日志）⇒ 走同一限频器；
+        # 消息含 shape 名 ⇒ 换形状即换消息 ⇒ 即时再告警；同形状 30s 窗口静默。
+        _warn_pool_fetch_failed(
+            pool_type, f'unexpected upstream data shape {shape}')
         return {'error': f'upstream data shape unexpected: {shape}'}
     # B-02 成功路径：结束该池失败 episode（P8-r1 P2）——一次成功使后续同 kind
-    # 同消息失败成为新 episode、必再告警（NEG_TTL=5s ≪ GAP=30s，flapping 场景）
+    # 同消息失败成为新 episode、必再告警（NEG_TTL=5s ≪ GAP=30s，flapping 场景）。
+    # P2-3（P5a-r3-r4，有意取舍）：episode 仅由全成功 return 结束——code != 200
+    # 与形状失败（transport 成功但信封/形状未达标）return 前不 pop，故不结束
+    # episode、也不重新武装被抑制的告警；限频上界口径为 per-episode，非无条件的
+    # per-GAP 天花板。
     _pool_fetch_warned_at.pop(pool_type, None)
     return {'stocks': data}   # data 裸 list（空 list 属合法成功）
 ```
@@ -412,7 +418,7 @@ feeds.extend([
 
 | 项 | 结论 |
 |----|------|
-| 本增量持有的锁 | **无**——`handle_cls_pool` 是纯函数式（局部变量 + 既有全局只读表）；**唯一模块级可变状态** = B-02 日志限频表 `_pool_fetch_warned_at`（`pool_type -> (last_ts, last_msg)`，键 ∈ 枚举闸 `_POOL_TYPES` 值域 ⇒ **有界 ≤4 键**，lock-free / 容忍竞态）——用途：负缓存（`NEG_TTL=5s`）窗口内同一失败对每个请求重复发生，逐次告警会使日志量随 RPS 线性放大，故同 `pool_type` 同消息 30s 窗口内只告警一次（`_POOL_FETCH_WARN_GAP=30.0`）、消息变化即时再告警；**纯日志限频，不改变任何缓存 / 业务语义**。★ **P8-r1 P2（墙钟→单调钟）**：`last_ts` 存 **`time.monotonic()` 读数**（非墙钟 `time.time()`）——窗口是两次读数之间的**间隔**，NTP 步（回拨 ⇒ `now - prev[0]` 变负、窗口永久拉伸；前拨 ⇒ 提前再告警）不得影响纯间隔测量（`server.py:466-483`）。★ **P8-r1 P2（episode 语义）**：`handle_cls_pool` **成功路径** pop 该池条目（`server.py:533`）⇒ 一次成功结束该池失败 episode，其后同 kind 同消息失败是**新 episode**、必再告警（NEG_TTL=5s ≪ GAP=30s，flapping 场景：失败→恢复→失败须再次告警） |
+| 本增量持有的锁 | **无**——`handle_cls_pool` 是纯函数式（局部变量 + 既有全局只读表）；**唯一模块级可变状态** = B-02 日志限频表 `_pool_fetch_warned_at`（`pool_type -> (last_ts, last_msg)`，键 ∈ 枚举闸 `_POOL_TYPES` 值域 ⇒ **有界 ≤4 键**，lock-free / 容忍竞态）——用途：负缓存（`NEG_TTL=5s`）窗口内同一失败对每个请求重复发生，逐次告警会使日志量随 RPS 线性放大，故同 `pool_type` 同消息 30s 窗口内只告警一次（`_POOL_FETCH_WARN_GAP=30.0`）、消息变化即时再告警；**纯日志限频，不改变任何缓存 / 业务语义**。★ **P8-r1 P2（墙钟→单调钟）**：`last_ts` 存 **`time.monotonic()` 读数**（非墙钟 `time.time()`）——窗口是两次读数之间的**间隔**，NTP 步（回拨 ⇒ `now - prev[0]` 变负、窗口永久拉伸；前拨 ⇒ 提前再告警）不得影响纯间隔测量（`server.py:477-493`）。★ **P8-r1 P2（episode 语义）**：`handle_cls_pool` **成功路径** pop 该池条目（`server.py:549`）⇒ 一次成功结束该池失败 episode，其后同 kind 同消息失败是**新 episode**、必再告警（NEG_TTL=5s ≪ GAP=30s，flapping 场景：失败→恢复→失败须再次告警）。★ **P2-1（P5a-r3-r4，第二写入方）**：形状失败路径（`data` 非 list）亦走 `_warn_pool_fetch_failed`（`server.py:541-542`），消息格式 `cls pool %s fetch failed: unexpected upstream data shape <type>`——消息含 shape 名 ⇒ 换形状即换消息 ⇒ 即时再告警；同形状 30s 窗口静默。★ **P2-3（P5a-r3-r4，episode 收窄）**：episode 仅由全成功 return 结束——`code != 200` 与形状失败 return 前不 pop，故不结束 episode、也不重新武装被抑制的告警；限频上界口径为 per-episode，非无条件的 per-GAP 天花板 |
 | `_POOL_HANDLERS` / `_POOL_TYPES` / `_JSON_SHAPES` / `_CACHE_AGE_DOMAINS` | 导入期构建、**运行期只读**（不修改）；多线程只读安全 |
 | `cache_policy('plate')` | 纯函数、无锁、纳秒级；每次调用返回 fresh dict（`config.md` §7） |
 | `fetch_json` | 内部自有 `_cache_lock`/`_neg_lock`，网络 IO 不持锁；本增量不持任何锁调用它 |
@@ -443,8 +449,9 @@ feeds.extend([
 | **POOL-T13** feeds 索引 | `len(_base_feed_entries('http://x')) == 19`；4 pool 路径 `status == 'configured'` 且 `path` 在索引中（参照 `test_feed_status_corrections` :518） | BR-POOL-12 |
 | **POOL-T14** 分发表值域 | `set(_POOL_HANDLERS) == {'/cls/up_pool','/cls/continuous_up_pool','/cls/up_open_pool','/cls/down_pool'}`；`set(_POOL_HANDLERS.values()) == _POOL_TYPES == {'up_pool','continuous_up_pool','up_open_pool','down_pool'}` | BR-POOL-1/9 |
 | **POOL-T15**（**B-02**）失败告警限频 | `test_fetch_failure_warning_is_rate_limited`（`tests/test_server_http.py`）：patch `fetch_json` 抛同一异常 ⇒ 首次告警、30s 窗口内同 pool_type 同错误**静默**（日志计数不变）、错误消息变化**即时再告警**、窗口后**续报**；自带 `_pool_fetch_warned_at` save/clear/restore 隔离（hermetic）。锁定"负缓存下日志限频"行为（同 pool_type 同错误 30s 窗口一条） | B-02 |
-| **POOL-T16**（**B-02**）单调钟窗口 | `test_rate_limit_window_uses_monotonic_clock`（`tests/test_server_http.py:429`）：patch `srv.time.monotonic` 注入 1000/1010/1040，warn→silent→warn，断言表内时间戳 == 1040.0。可证伪：实现仍读 `time.time()` ⇒ 注入钟不到达 ⇒ 第三次调用仍在墙钟窗口内 ⇒ `assertLogs` 空 ⇒ 红 | B-02 / P8-r1 P2 |
-| **POOL-T17**（**B-02**）成功结束 episode | `test_success_clears_the_warn_episode`（`tests/test_server_http.py:468`）：fail(warn)→同 fail(silent)→成功→`'up_pool' not in` 表→再 fail(warn)。可证伪：删成功路径 pop ⇒ 旧 `(ts,msg)` 留存 ⇒ 末次 `assertLogs` 空 ⇒ 红 | B-02 / P8-r1 P2 |
+| **POOL-T16**（**B-02**）单调钟窗口 | `test_rate_limit_window_uses_monotonic_clock`（`tests/test_server_http.py:430`）：patch `srv.time.monotonic` 注入 1000/1010/1040，warn→silent→warn，断言表内时间戳 == 1040.0。可证伪：实现仍读 `time.time()` ⇒ 注入钟不到达 ⇒ 第三次调用仍在墙钟窗口内 ⇒ `assertLogs` 空 ⇒ 红 | B-02 / P8-r1 P2 |
+| **POOL-T17**（**B-02**）成功结束 episode | `test_success_clears_the_warn_episode`（`tests/test_server_http.py:469`）：fail(warn)→同 fail(silent)→成功→`'up_pool' not in` 表→再 fail(warn)。可证伪：删成功路径 pop ⇒ 旧 `(ts,msg)` 留存 ⇒ 末次 `assertLogs` 空 ⇒ 红 | B-02 / P8-r1 P2 |
+| **POOL-T18**（**P2-1**）形状漂移告警限频 | `test_shape_drift_warning_is_rate_limited`（`tests/test_server_http.py:548`）：patch `fetch_json` 返回 `data: {}`（dict 形状）⇒ 首次告警含 `'shape'` 与 `'dict'`；同形状窗口内 `assertNoLogs` 静默；换 `data: None`（NoneType 形状）⇒ 消息变了 ⇒ 立即再告警；同形状两次 error 返回体逐字一致、换形状时 shape 名照常出现在 error 里。可证伪：形状分支改回直写 `log.warning` ⇒ repeat 段 `assertNoLogs` 红。自带 `_pool_fetch_warned_at` save/clear/finally 隔离（hermetic） | P2-1 / B-02 |
 
 ---
 
@@ -511,5 +518,6 @@ feeds.extend([
 | v1.0.2 | 2026-10-10 | 🔧 契约同步（P7b-r2 Bug-fix Loop） | **§7.1 并发安全**登记 P2-5 新增的模块级限频状态 `_pool_fetch_warned_at`（`server.py` 内，`pool_type -> (时间戳, 消息)`，键 ∈ `_POOL_TYPES` ⇒ ≤4 键、lock-free / 容忍竞态；用途：负缓存窗口内日志不随 RPS 放大；不改变任何缓存 / 业务语义）；同时收口头部版本漂移（v1.0.1「P1-02 语义回写」行已存在但头部未同步，本次一并 bump 至 v1.0.2）。**只改文档**；未改代码 / 测试 / `API.md` / `README.md` / `SAD` | 编排层（P7b 契约同步） |
 | v1.0.3 | 2026-10-10 | 🔧 契约同步（P7b-r3 对抗性复查） | 对抗性复查（P8-r1）指出的测试登记漂移补齐：**§8** 新增 **POOL-T15**（`test_fetch_failure_warning_is_rate_limited`，B-02 失败告警限频：同 pool_type 同错误 30s 窗口一条、错误变化即时告警、窗口内静默、窗口后续报，自带 `_pool_fetch_warned_at` save/clear/restore 隔离；锁定"负缓存下日志限频"行为）。**只改文档**；未改代码 / 测试 / `API.md` / `README.md` / `SAD` | 编排层（P7b 契约同步） |
 | v1.0.4 | 2026-10-10 | 🔧 契约同步（P7b-r4 契约同步） | P5a-r3 修复 3 条小问题后的文档回填：**§5** 伪代码 except 分支补 `_warn_pool_fetch_failed(pool_type, exc)` 调用（P7b-r2 遗留）+ 成功 return 前补 `_pool_fetch_warned_at.pop(pool_type, None)`（episode 语义）；**§5** B-03 补外层 `str()`；**§7.1** 限频表登记补「时间戳为 `time.monotonic()` 读数（非墙钟）」+「成功路径 pop ⇒ episode 结束语义」+ 行号刷新（`server.py:466-483` / `:533`）；**§8** POOL-T15 描述收口（补"日志计数不变"）+ 新增 **POOL-T16**（单调钟窗口，对应 MS-T18）/ **POOL-T17**（成功结束 episode，对应 MS-T19）。**只改文档**；未改代码 / 测试 / `API.md` / `README.md` / `SAD` | 编排层（P7b 契约同步） |
+| v1.0.5 | 2026-10-13 | 🔧 契约同步（P7b-r5 契约同步） | P5a-r4 代码评审 drift 清单（D1–D5）同步：**§5** 伪代码形状分支由直写 `log.warning` 改为 `_warn_pool_fetch_failed(pool_type, f'unexpected upstream data shape {shape}')`（P2-1，消息含 shape 名 ⇒ 换形状即时再告警；同形状 30s 窗口静默）；**§5** episode 注释补 P2-3（episode 仅由全成功 return 结束，`code != 200` 与形状失败不 pop）；**§7.1** 行号刷新（`server.py:477-493` / `:549`）+ 补 P2-1 第二写入方与 P2-3 episode 收窄；**§8** POOL-T16/T17 行号刷新（`:429`→`:430` / `:468`→`:469`）+ 新增 **POOL-T18**（`test_shape_drift_warning_is_rate_limited`，P2-1 形状漂移告警限频）；**§2.5** 下游提示行号刷新（`server.py:496-550`）。**只改文档**；未改代码 / 测试 / `API.md` / `README.md` / `SAD` | 编排层（P7b 契约同步） |
 
-> **下游提示（code-developer）**：严格按 §2.5 注册点 R1–R13 施工；`way` 必须 `last_px`；TTL 取 `cache_policy('plate')['ttl']`；**先读 `server.py:337 handle_cls_hotplate` 与 `server.py:482-535` 再动手**，命名 / 分层 / 异常风格与之一致。**P1-02 fail-loud**：上游 `data` 非 list ⇒ `{'error': 'upstream data shape unexpected: <type>'}` + `logging.warning`（禁止静默空池）。
+> **下游提示（code-developer）**：严格按 §2.5 注册点 R1–R13 施工；`way` 必须 `last_px`；TTL 取 `cache_policy('plate')['ttl']`；**先读 `server.py:337 handle_cls_hotplate` 与 `server.py:496-550` 再动手**，命名 / 分层 / 异常风格与之一致。**P1-02 fail-loud**：上游 `data` 非 list ⇒ `{'error': 'upstream data shape unexpected: <type>'}` + `_warn_pool_fetch_failed`（限频告警，禁止静默空池）。
